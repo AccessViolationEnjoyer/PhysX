@@ -11,16 +11,8 @@ add_custom_command(OUTPUT "${NEWTON_STORAGE_KERNELS}"
 		"${NEWTON_EIGEN_DIR}/Eigen/src/SparseCholesky/SimplicialCholesky_impl.h"
 	VERBATIM)
 add_library(PhysXNewtonCore OBJECT
-	NewtonSolver.cpp NewtonSolver.h NewtonStorage.h BlockCholesky.h IncrementalCholesky.h
+	NewtonSolver.cpp NewtonSolver.h NewtonParallel.h NewtonStorage.h BlockCholesky.h IncrementalCholesky.h
 	"${NEWTON_STORAGE_KERNELS}")
-if(MSVC)
-	target_compile_options(PhysXNewtonCore PRIVATE /openmp)
-else()
-	find_package(OpenMP QUIET)
-	if(OpenMP_CXX_FOUND)
-		target_link_libraries(PhysXNewtonCore PRIVATE OpenMP::OpenMP_CXX)
-	endif()
-endif()
 target_include_directories(PhysXNewtonCore PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 target_include_directories(PhysXNewtonCore SYSTEM PRIVATE "${NEWTON_EIGEN_DIR}")
 # Match Eigen inline definitions across the core and native adapter on all platforms.

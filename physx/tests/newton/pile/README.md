@@ -87,23 +87,14 @@ active-row counts, iterations and paired velocity differences.
 | 1 | 47.662 | 47.208 | 744.804 |
 | 8, after | 48.061 | 48.088 | 753.708 |
 
-There is no useful speedup from eight workers. The initial eight-worker mean contains a
-71.90 ms outlier; the repeated eight-worker result is close to the one-worker result.
-One worker means the harness creates no pool and solves on the main thread. Eight means
-one island task executes on a pool worker while the main thread waits.
+These measurements predate within-island parallel factorization. The current solver uses PhysX
+tasks for sufficiently large Cholesky factors while retaining the serial factor for smaller
+islands. Current paired results are recorded in `../PHYSX_INTEGRATION.md`.
 
-Newton does not prohibit parallel work inside an island. Assembly, independent elimination
-subtrees, and sufficiently large factor blocks can be parallelized, but this requires work
-inside the numerical solver rather than reuse of PGS row batches. The current Cholesky,
-incremental updates, and backsolves are serial. Our body-level AMD ordering differs from
-MuJoCo 3.3.7's model-order sparse factorization; this can affect fill and cost, but this test
-does not attribute a measured percentage of the speedup to ordering.
-
-Source references: `MujocoAdapter.h` dispatches one task per island; `BlockCholesky.h` and
-`IncrementalCholesky.h` implement serial numeric work. Native `engine_forward.c` dispatches
-per island, `engine_island.c` preserves model DOF ordering, and `engine_solver.c` calls its
-serial Cholesky routines in `engine_util_solve.c`. PhysX's `DyDynamics.cpp` can dispatch
-multiple `PxsParallelSolverTask` instances sharing one island's PGS parameters.
+Source references: `MujocoAdapter.h` dispatches one task per island. `BlockCholesky.h` uses a
+`ParallelExecutor` for large trailing updates, and `DyNewtonSolver.cpp` implements that executor
+with PhysX tasks. Native `engine_forward.c` dispatches per island, `engine_island.c` preserves model
+DOF ordering, and `engine_solver.c` calls its serial Cholesky routines in `engine_util_solve.c`.
 
 ## Timing boundary, reproduction and evidence
 

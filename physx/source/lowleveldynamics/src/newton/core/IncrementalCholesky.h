@@ -19,14 +19,14 @@ class IncrementalCholesky
 public:
 	IncrementalCholesky() : m_size(0), m_profile(false) {}
 
-	void beginSolve(bool profile, bool continuation, int workers)
+	void beginSolve(bool profile, bool continuation, ParallelExecutor* parallelExecutor)
 	{
 		// Ordinary solves rebuild numerics. Explicit same-prepared-problem
 		// continuation compares fresh curvature against this factor's m_weights.
 		if(!continuation)
 			m_size = 0;
 		m_profile = profile;
-		m_factor.setParallelWorkers(workers);
+		m_factor.setParallelExecutor(parallelExecutor);
 	}
 
 	bool factor(const Problem& problem, const Curvature& weights, Result& result)

@@ -1,6 +1,7 @@
 #ifndef NEWTON_SOLVER_H
 #define NEWTON_SOLVER_H
 
+#include "NewtonParallel.h"
 #include "NewtonStorage.h"
 #include <Eigen/SparseCore>
 #include <chrono>
@@ -203,7 +204,7 @@ inline double elapsed(Clock::time_point start)
 struct Settings
 {
 	int iterations = 100;
-	int workers = 1;
+	ParallelExecutor* parallelExecutor = NULL;
 	double tolerance = 1.0e-8;
 	double lineTolerance = 0.01;
 	bool checkFactor = false;

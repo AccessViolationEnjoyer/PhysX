@@ -29,11 +29,15 @@
 #include "DyNewtonContactPrep.h"
 #include "DyDynamics.h"
 #include "DyConstraint.h"
+#include "CmFlushPool.h"
+#include "CmTask.h"
 #include "PxsRigidBody.h"
 #include "PxsContactManager.h"
 #include "PxSceneDesc.h"
 #include "foundation/PxAtomic.h"
+#include "foundation/PxIntrinsics.h"
 #include "foundation/PxMutex.h"
+#include "foundation/PxThread.h"
 #include "foundation/PxUserAllocated.h"
 #include "common/PxProfileZone.h"
 #include "core/NewtonSolver.h"
@@ -45,6 +49,166 @@ namespace physx
 {
 namespace Dy
 {
+static volatile PxI32 gNewtonParallelTaskActive = 0;
+
+class NewtonParallelExecutor;
+
+class NewtonParallelTask : public Cm::Task
+{
+	NewtonParallelTask& operator=(const NewtonParallelTask&);
+public:
+	NewtonParallelTask(PxU64 contextId, NewtonParallelExecutor& executor, PxU32 worker, PxI32 generation) :
+		Cm::Task(contextId), mExecutor(executor), mWorker(worker), mGeneration(generation)
+	{
+	}
+
+	virtual void runInternal() PX_OVERRIDE;
+	virtual const char* getName() const PX_OVERRIDE { return "PxsDynamics.newtonParallel"; }
+
+private:
+	NewtonParallelExecutor& mExecutor;
+	PxU32 mWorker;
+	PxI32 mGeneration;
+};
+
+class NewtonParallelExecutor : public newton::ParallelExecutor
+{
+	NewtonParallelExecutor& operator=(const NewtonParallelExecutor&);
+	enum { MAX_WORKERS = 8 };
+	struct Counter
+	{
+		volatile PxI32 value;
+		PxU8 padding[60];
+	};
+public:
+	NewtonParallelExecutor(DynamicsContext& context, PxBaseTask* continuation, PxU32 workerCount) :
+		mContext(context), mContinuation(continuation),
+		mWorkerCount(PxMin(workerCount, PxU32(MAX_WORKERS))), mCount(0), mFunction(NULL), mFunctionContext(NULL),
+		mFinish(0), mAcquired(false), mStarted(false)
+	{
+		mGeneration.value = 0;
+		mNext.value = 0;
+		for(PxU32 worker = 0; worker < MAX_WORKERS; ++worker)
+			mProgress[worker].value = 0;
+	}
+
+	virtual int workerCount() PX_OVERRIDE
+	{
+		if(mWorkerCount < 2)
+			return 1;
+		if(mAcquired)
+			return int(mWorkerCount);
+		// A waiting solver task consumes one dispatcher worker. Let only one island
+		// recruit helpers so other large islands continue to make serial progress.
+		if(PxAtomicCompareExchange(&gNewtonParallelTaskActive, 1, 0) != 0)
+			return 1;
+		mAcquired = true;
+		return int(mWorkerCount);
+	}
+
+	virtual void parallelFor(int count, newton::ParallelFunction function, void* context) PX_OVERRIDE
+	{
+		if(!mStarted)
+			startWorkers();
+		mCount = count;
+		mFunction = function;
+		mFunctionContext = context;
+		mNext.value = 0;
+		PxMemoryBarrier();
+		const PxI32 generation = PxAtomicIncrement(&mGeneration.value);
+		runWork();
+		for(PxU32 worker = 1; worker < mWorkerCount; ++worker)
+			waitFor(&mProgress[worker].value, generation);
+	}
+
+	virtual void endParallelRegion() PX_OVERRIDE
+	{
+		if(!mStarted)
+			return;
+		mFinish = 1;
+		PxMemoryBarrier();
+		const PxI32 generation = PxAtomicIncrement(&mGeneration.value);
+		for(PxU32 worker = 1; worker < mWorkerCount; ++worker)
+			waitFor(&mProgress[worker].value, generation);
+		mFinish = 0;
+		mStarted = false;
+	}
+
+	void runWorker(PxU32 worker, PxI32 generation)
+	{
+		for(;;)
+		{
+			waitFor(&mGeneration.value, generation + 1);
+			generation = mGeneration.value;
+			PxMemoryBarrier();
+			if(mFinish)
+				break;
+			runWork();
+			PxMemoryBarrier();
+			PxAtomicExchange(&mProgress[worker].value, generation);
+		}
+		PxMemoryBarrier();
+		PxAtomicExchange(&mProgress[worker].value, generation);
+	}
+
+	void finish()
+	{
+		if(!mAcquired)
+			return;
+		endParallelRegion();
+		PxAtomicExchange(&gNewtonParallelTaskActive, 0);
+		mAcquired = false;
+	}
+
+private:
+	static void waitFor(volatile PxI32* value, PxI32 target)
+	{
+		while(*value < target)
+			PxThread::yieldProcessor();
+	}
+
+	void startWorkers()
+	{
+		mStarted = true;
+		const PxI32 generation = mGeneration.value;
+		for(PxU32 worker = 1; worker < mWorkerCount; ++worker)
+		{
+			void* memory = mContext.getTaskPool().allocate(sizeof(NewtonParallelTask));
+			NewtonParallelTask* task = PX_PLACEMENT_NEW(memory, NewtonParallelTask)(mContext.getContextId(), *this, worker, generation);
+			task->setContinuation(mContinuation);
+			task->removeReference();
+		}
+	}
+
+	void runWork()
+	{
+		PxI32 index = PxAtomicIncrement(&mNext.value) - 1;
+		while(index < mCount)
+		{
+			mFunction(mFunctionContext, index);
+			index = PxAtomicIncrement(&mNext.value) - 1;
+		}
+	}
+
+	DynamicsContext& mContext;
+	PxBaseTask* mContinuation;
+	PxU32 mWorkerCount;
+	PxI32 mCount;
+	newton::ParallelFunction mFunction;
+	void* mFunctionContext;
+	Counter mGeneration;
+	Counter mNext;
+	Counter mProgress[MAX_WORKERS];
+	volatile PxI32 mFinish;
+	bool mAcquired;
+	bool mStarted;
+};
+
+void NewtonParallelTask::runInternal()
+{
+	mExecutor.runWorker(mWorker, mGeneration);
+}
+
 struct NewtonBodySeed
 {
 	const PxsBodyCore* body;
@@ -355,20 +519,21 @@ static void storeNewtonCorrection(const newton::Result& result, const PxSolverBo
 	}
 }
 
-static bool solveNewtonSystem(NewtonSolver& solver, NewtonIslandWorkspace& workspace, const newton::Result* previous, PxU32 workerCount)
+static bool solveNewtonSystem(NewtonSolver& solver, NewtonIslandWorkspace& workspace, const newton::Result* previous,
+	newton::ParallelExecutor* parallelExecutor)
 {
 	newton::Settings settings = solver.settings;
-	settings.workers = int(workerCount);
+	settings.parallelExecutor = parallelExecutor;
 	const newton::SolveStatus::Enum status = newton::solveNewton(workspace.problem, settings,
 		workspace.result, workspace.numeric, previous);
 	return status == newton::SolveStatus::eSUCCESS || status == newton::SolveStatus::eITERATION_LIMIT;
 }
 
-static bool continueNewtonSystem(NewtonSolver& solver, NewtonIslandWorkspace& workspace, PxU32 workerCount)
+static bool continueNewtonSystem(NewtonSolver& solver, NewtonIslandWorkspace& workspace, newton::ParallelExecutor* parallelExecutor)
 {
 	workspace.previous = workspace.result;
 	newton::Settings settings = solver.settings;
-	settings.workers = int(workerCount);
+	settings.parallelExecutor = parallelExecutor;
 	const newton::SolveStatus::Enum status = newton::continueNewton(workspace.problem, settings,
 		workspace.result, workspace.numeric, &workspace.previous);
 	if(status == newton::SolveStatus::eSUCCESS || status == newton::SolveStatus::eITERATION_LIMIT)
@@ -393,7 +558,8 @@ static void profileNewtonSolve(const NewtonIslandWorkspace& workspace, PxU64 con
 }
 
 static bool solveNewtonRows(NewtonSolver& solver, NewtonIslandWorkspace& workspace, DynamicsContext& context,
-	ThreadContext& threadContext, PxSolverBody* bodies, PxSolverBodyData* allBodyData, PxU32 firstBodyIndex, PxU32 bodyCount, PxU32 workerCount)
+	ThreadContext& threadContext, PxSolverBody* bodies, PxSolverBodyData* allBodyData, PxU32 firstBodyIndex, PxU32 bodyCount,
+	newton::ParallelExecutor* parallelExecutor)
 {
 	PX_PROFILE_ZONE("Dynamics.newtonIsland", context.getContextId());
 	PxSolverBodyData* bodyData = allBodyData + firstBodyIndex + 1;
@@ -415,7 +581,7 @@ static bool solveNewtonRows(NewtonSolver& solver, NewtonIslandWorkspace& workspa
 	threadContext.mAxisConstraintCount = PxU32(workspace.problem.rowCount());
 	{
 		PX_PROFILE_ZONE("Dynamics.newtonSolve", context.getContextId());
-		if(!solveNewtonSystem(solver, workspace, &workspace.previous, workerCount))
+		if(!solveNewtonSystem(solver, workspace, &workspace.previous, parallelExecutor))
 		{
 			solver.report("Newton position solve failed.");
 			return false;
@@ -426,7 +592,7 @@ static bool solveNewtonRows(NewtonSolver& solver, NewtonIslandWorkspace& workspa
 			if(!updateNewtonDilatancyBias(workspace.contacts, workspace.problem,
 				workspace.result, velocityTolerance))
 				break;
-			if(!continueNewtonSystem(solver, workspace, workerCount))
+			if(!continueNewtonSystem(solver, workspace, parallelExecutor))
 			{
 				solver.report("Newton dilatancy correction failed.");
 				break;
@@ -454,8 +620,8 @@ static bool solveNewtonRows(NewtonSolver& solver, NewtonIslandWorkspace& workspa
 	return true;
 }
 
-bool solveNewtonIsland(NewtonSolver& solver, DynamicsContext& context, ThreadContext& threadContext,
-	PxSolverBody* bodies, PxSolverBodyData* bodyData, PxU32 firstBodyIndex, PxU32 bodyCount, PxU32 workerCount)
+static bool solveNewtonIslandInternal(NewtonSolver& solver, DynamicsContext& context, ThreadContext& threadContext,
+	PxSolverBody* bodies, PxSolverBodyData* bodyData, PxU32 firstBodyIndex, PxU32 bodyCount, newton::ParallelExecutor* parallelExecutor)
 {
 	NewtonIslandWorkspace* workspace = NULL;
 	try
@@ -466,7 +632,7 @@ bool solveNewtonIsland(NewtonSolver& solver, DynamicsContext& context, ThreadCon
 			solver.report("Newton workspace allocation failed.");
 			return false;
 		}
-		const bool success = solveNewtonRows(solver, *workspace, context, threadContext, bodies, bodyData, firstBodyIndex, bodyCount, workerCount);
+		const bool success = solveNewtonRows(solver, *workspace, context, threadContext, bodies, bodyData, firstBodyIndex, bodyCount, parallelExecutor);
 		solver.release(workspace);
 		return success;
 	}
@@ -481,6 +647,17 @@ bool solveNewtonIsland(NewtonSolver& solver, DynamicsContext& context, ThreadCon
 	if(workspace)
 		solver.release(workspace);
 	return false;
+}
+
+bool solveNewtonIsland(NewtonSolver& solver, DynamicsContext& context, ThreadContext& threadContext,
+	PxSolverBody* bodies, PxSolverBodyData* bodyData, PxU32 firstBodyIndex, PxU32 bodyCount,
+	PxBaseTask* continuation, PxU32 workerCount)
+{
+	NewtonParallelExecutor parallelExecutor(context, continuation, workerCount);
+	const bool success = solveNewtonIslandInternal(solver, context, threadContext, bodies, bodyData,
+		firstBodyIndex, bodyCount, &parallelExecutor);
+	parallelExecutor.finish();
+	return success;
 }
 
 void saveNewtonPoses(NewtonSolver& solver, PxsBodyCore* const* bodies, const PxU32* nodeIndices, PxU32 bodyCount)

@@ -1238,7 +1238,8 @@ public:
 		const PxU32 bodyCount = mIslandContext.mCounts.bodies;
 		NewtonSolver& solver = *mContext.getNewtonSolver();
 		const PxU32 workerCount = getTaskManager()->getCpuDispatcher()->getWorkerCount();
-		if(solveNewtonIsland(solver, mContext, threadContext, bodies, mContext.mSolverBodyDataPool.begin(), mSolverBodyOffset, bodyCount, workerCount))
+		if(solveNewtonIsland(solver, mContext, threadContext, bodies, mContext.mSolverBodyDataPool.begin(),
+			mSolverBodyOffset, bodyCount, getContinuation(), workerCount))
 		{
 			integrate(mContext.mIslandManager.getAccurateIslandSim(), mContext.mSolverBodyDataPool.begin() + mSolverBodyOffset + 1,
 				threadContext.mRigidBodyArray, threadContext.motionVelocityArray, bodies, bodyCount, mContext.mDt,

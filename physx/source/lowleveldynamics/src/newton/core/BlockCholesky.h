@@ -1,7 +1,3 @@
-#ifdef _OPENMP
-#include <atomic>
-#endif
-
 // Six-coordinate supernodal LLT for the solver's complete rigid-body blocks.
 // Scalar CSC output preserves the existing solves and signed-update path.
 namespace newton
@@ -11,13 +7,12 @@ class BlockCholesky : public StorageCholesky
 	typedef Eigen::Matrix<double, 6, 6> Block;
 	enum
 	{
-		MAX_PARALLEL_WORKERS = 8,
 		MIN_PARALLEL_FACTOR_UPDATES = 500000,
 		MIN_PARALLEL_PIVOT_UPDATES = 256
 	};
 public:
 	bool usesBlocks() const { return m_useBlocks; }
-	void setParallelWorkers(int workers) { m_parallelWorkers = workers < MAX_PARALLEL_WORKERS ? workers : MAX_PARALLEL_WORKERS; }
+	void setParallelExecutor(ParallelExecutor* executor) { m_parallelExecutor = executor; }
 
 	void analyzePattern(const SparseStorage& ap, bool doLDLT)
 	{
@@ -113,7 +108,6 @@ public:
 			}
 		}
 		m_rowOuter[bodies] = int(m_rowEntries.size());
-#ifdef _OPENMP
 		m_updateOuter.resize(bodies + 1);
 		m_updateOuter[0] = 0;
 		for(int body = 0; body < bodies; ++body)
@@ -123,7 +117,7 @@ public:
 		}
 		// The right-looking factor has higher serial cost and extra symbolic
 		// storage. Use it only when parallel work repays both overheads.
-		if(m_parallelWorkers > 1 && m_updateOuter[bodies] >= MIN_PARALLEL_FACTOR_UPDATES)
+		if(m_updateOuter[bodies] >= MIN_PARALLEL_FACTOR_UPDATES && m_parallelExecutor != NULL && m_parallelExecutor->workerCount() > 1)
 		{
 			m_updateTargets.resize(m_updateOuter[bodies]);
 			for(int body = 0; body < bodies; ++body)
@@ -152,7 +146,6 @@ public:
 			m_updateTargets.clear();
 			m_inputBlocks.clear();
 		}
-#endif
 
 		// Scalar storage is an export view for the established triangular
 		// solve and rank-update kernels; its sparsity pattern is invariant.
@@ -186,14 +179,8 @@ public:
 		static_assert(!DoLDLT, "BlockCholesky implements LLT");
 		if(!m_useBlocks)
 			return StorageCholesky::factorize<false>(ap);
-#ifdef _OPENMP
-		if(m_parallelWorkers > 1 && !m_updateTargets.empty())
-		{
-			std::atomic_flag& lock = parallelFactorLock();
-			if(!lock.test_and_set(std::memory_order_acquire))
-				return factorizeParallel(ap, lock);
-		}
-#endif
+		if(m_parallelExecutor != NULL && !m_updateTargets.empty())
+			return factorizeParallel(ap);
 		const int bodies = int(ap.cols()) / 6;
 		for(int body = 0; body < bodies; ++body)
 			m_work[body].setZero();
@@ -265,7 +252,15 @@ public:
 	}
 
 private:
-#ifdef _OPENMP
+	struct ParallelUpdate
+	{
+		BlockCholesky* factor;
+		int body;
+		int first;
+		int end;
+		int count;
+	};
+
 	int findBlock(int column, int row) const
 	{
 		int begin = m_blockOuter[column], end = m_blockOuter[column + 1];
@@ -299,7 +294,13 @@ private:
 		}
 	}
 
-	bool factorizeParallel(const SparseStorage& ap, std::atomic_flag& lock)
+	static void updateTrailingColumnParallel(void* context, int column)
+	{
+		ParallelUpdate& update = *static_cast<ParallelUpdate*>(context);
+		update.factor->updateTrailingColumn(update.body, update.first, update.end, update.count, column);
+	}
+
+	bool factorizeParallel(const SparseStorage& ap)
 	{
 		const int bodies = int(ap.cols()) / 6;
 		for(size_t block = 0; block < m_blocks.size(); ++block)
@@ -312,7 +313,7 @@ private:
 			Eigen::LLT<Block, Eigen::Lower> factor(m_blocks[m_blockOuter[body]]);
 			if(factor.info() != Eigen::Success)
 			{
-				lock.clear(std::memory_order_release);
+				m_parallelExecutor->endParallelRegion();
 				return scalarFallback(ap);
 			}
 			const Block lower = factor.matrixL();
@@ -333,15 +334,19 @@ private:
 			const int count = end - first;
 			if(count * (count + 1) / 2 >= MIN_PARALLEL_PIVOT_UPDATES)
 			{
-				#pragma omp parallel for schedule(dynamic, 1) num_threads(m_parallelWorkers)
-				for(int column = 0; column < count; ++column)
-					updateTrailingColumn(body, first, end, count, column);
+				ParallelUpdate update;
+				update.factor = this;
+				update.body = body;
+				update.first = first;
+				update.end = end;
+				update.count = count;
+				m_parallelExecutor->parallelFor(count, updateTrailingColumnParallel, &update);
 			}
 			else
 				for(int column = 0; column < count; ++column)
 					updateTrailingColumn(body, first, end, count, column);
 		}
-		lock.clear(std::memory_order_release);
+		m_parallelExecutor->endParallelRegion();
 		double* values = m_matrix.valuePtr();
 		for(int body = 0; body < bodies; ++body)
 			for(int axis = 0; axis < 6; ++axis)
@@ -357,15 +362,6 @@ private:
 		return true;
 	}
 
-	static std::atomic_flag& parallelFactorLock()
-	{
-		// Concurrent islands already run as PhysX tasks. Let one large island
-		// recruit workers while the others continue through the serial path.
-		static std::atomic_flag lock = ATOMIC_FLAG_INIT;
-		return lock;
-	}
-#endif
-
 	bool scalarFallback(const SparseStorage& ap)
 	{
 		// The established scalar LLT remains available if different rounding
@@ -375,12 +371,10 @@ private:
 	}
 
 	bool m_useBlocks = false;
-	int m_parallelWorkers = 1;
+	ParallelExecutor* m_parallelExecutor = NULL;
 	std::vector<int> m_parent, m_tags, m_counts, m_pattern;
 	std::vector<int> m_blockOuter, m_blockRows, m_blockColumns, m_rowOuter, m_rowEntries;
-#ifdef _OPENMP
 	std::vector<int> m_updateOuter, m_updateTargets, m_inputBlocks;
-#endif
 	std::vector<Block> m_blocks, m_work;
 };
 }

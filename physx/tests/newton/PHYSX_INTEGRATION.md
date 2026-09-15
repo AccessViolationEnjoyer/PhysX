@@ -59,15 +59,12 @@ The shared task pipeline selects
 `existing start task -> Newton island task -> existing end task` before PGS row packing.
 Independent islands run through PhysX's CPU dispatcher. A connected Newton island remains one
 PhysX task. Large Cholesky factors parallelize independent trailing block updates with up to eight
-OpenMP workers. The established left-looking factorization remains unchanged for smaller factors;
-the selection uses symbolic update work rather than body count. At most one island recruits an
-OpenMP team while other island tasks continue through the serial path.
-
-The numeric factorization cannot enqueue child PhysX tasks and wait for them because a
-`PxBaseTask::run()` implementation must not block. An asynchronous PhysX-task implementation would
-instead require splitting the solver into continuations. Keeping OpenMP private to
-`PhysXNewtonCore` avoids that pipeline change and does not add compiler flags or branches to PGS or
-TGS.
+workers from PhysX's CPU dispatcher. The Newton island task participates in the work and waits at
+the same cooperative barriers used by PhysX's parallel PGS solver. Helpers are launched lazily on
+the first sufficiently large factorization and finish when that factorization ends. The established
+left-looking factorization remains unchanged for smaller factors; selection uses symbolic update
+work rather than body count. At most one island recruits helpers while other island tasks continue
+through the serial path. Newton adds no OpenMP dependency, and the PGS and TGS paths are unchanged.
 
 Workspaces retain row, matrix, factor and result capacity between jobs. Warm starts store
 physical body corrections and transform angular corrections into the current inertia basis.
@@ -130,12 +127,19 @@ was 0.72 um. The conveyor maintained 0.2 m/s.
 Three alternating 1,000-frame PGS runs averaged 0.751 ms before this change and 0.730 ms after
 it. Their physical metrics were identical, so the difference is ordinary run-to-run variation.
 
-On the connected pile fixture, 434,294 symbolic updates at 450 bodies took 59.776 ms serially and
-60.085 ms with the parallel factor. At 500 bodies, 580,797 updates fell from 74.466 ms to 66.227 ms.
-The crossover is therefore 500,000 symbolic updates. At 600 bodies the parallel path reduced the
-Release full step from 105.590 ms to 79.777 ms, and at 700 bodies the profile solve span fell from
-238.029 ms to 104.275 ms. At 1,000 bodies the Release full step fell from 660.640 ms to 277.669 ms;
-both runs produced 6,769 contact pairs and matching settling metrics.
+On the connected pile fixture, the crossover is 500,000 symbolic updates. Paired Release runs of
+the native PhysX-task implementation measured frames 11-30:
+
+| Bodies | One worker | Eight workers | Speedup |
+| ---: | ---: | ---: | ---: |
+| 500 | 74.188 ms | 43.998 ms | 1.69x |
+| 600 | 108.118 ms | 59.745 ms | 1.81x |
+| 1,000 | 640.623 ms | 184.740 ms | 3.47x |
+
+Contact counts, minimum height and settling speed match between the paired runs. The speedup is
+below the worker count because the pivot dependency chain, matrix assembly, triangular solves,
+Newton evaluations and line search remain serial; only each pivot's independent trailing block
+updates run across the task team.
 
 The pre-change source checkpoint is
 `backups/Newton-native-before-mujoco-contacts-2026-09-14_22-22-21.zip`, SHA-256
