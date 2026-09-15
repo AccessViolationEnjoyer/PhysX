@@ -1029,6 +1029,8 @@ bool NpScene::addArticulation(PxArticulationReducedCoordinate& articulation)
 {
 	PX_PROFILE_ZONE("API.addArticulation", getContextId());
 	NP_WRITE_CHECK(this);
+	if(mScene.getSolverType() == PxSolverType::eNEWTON)
+		return outputError<PxErrorCode::eINVALID_OPERATION>(__LINE__, "PxScene::addArticulation(): Newton does not support articulations.");
 	PX_CHECK_AND_RETURN_VAL(articulation.getNbLinks()>0, "PxScene::addArticulation: Empty articulations may not be added to a scene.", false);
 
 	NpArticulationReducedCoordinate& npa = static_cast<NpArticulationReducedCoordinate&>(articulation);
@@ -1275,6 +1277,9 @@ bool NpScene::addArticulationMimicJointInternal(NpArticulationReducedCoordinate*
 
 bool NpScene::addArticulationInternal(PxArticulationReducedCoordinate& npa)
 {
+	if(mScene.getSolverType() == PxSolverType::eNEWTON)
+		return outputError<PxErrorCode::eINVALID_OPERATION>(__LINE__, "PxScene::addArticulationInternal(): Newton does not support articulations.");
+
 	// Add root link first
 	const PxU32 nbLinks = npa.getNbLinks();
 	PX_ASSERT(nbLinks > 0);
@@ -1991,6 +1996,16 @@ bool NpScene::addAggregate(PxAggregate& aggregate)
 	NP_CHECK_CORRUPTION_AND_RETURN_VAL(false)
 
 	NpAggregate& np = static_cast<NpAggregate&>(aggregate);
+
+	if(mScene.getSolverType() == PxSolverType::eNEWTON)
+	{
+		const PxU32 nbActors = np.getCurrentSizeFast();
+		for(PxU32 i = 0; i < nbActors; ++i)
+		{
+			if(np.getActorFast(i)->getConcreteType() == PxConcreteType::eARTICULATION_LINK)
+				return outputError<PxErrorCode::eINVALID_OPERATION>(__LINE__, "PxScene::addAggregate(): Newton does not support aggregates containing articulations.");
+		}
+	}
 
 #if PX_CHECKED
 	{

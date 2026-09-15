@@ -869,11 +869,11 @@ Sc::Scene::Scene(const PxSceneDesc& desc, PxU64 contextID) :
 	{
 		// PT: we must pass mPublicFlags to the contexts in case it has been tweaked by the above code
 
-		if (desc.solverType == PxSolverType::ePGS)
+		if (desc.solverType == PxSolverType::ePGS || desc.solverType == PxSolverType::eNEWTON)
 		{
 			mDynamicsContext = createDynamicsContext(&mLLContext->getNpMemBlockPool(), mLLContext->getTaskPool(), mLLContext->getSimStats(),
 													*allocator, &getMaterialManager(), *mSimpleIslandManager, contextID,
-													desc.maxBiasCoefficient, desc.getTolerancesScale().length, mPublicFlags);
+													desc.maxBiasCoefficient, desc.getTolerancesScale().length, mPublicFlags, desc.solverType == PxSolverType::eNEWTON ? &desc : NULL);
 		}
 		else
 		{

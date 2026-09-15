@@ -1358,6 +1358,12 @@ inline PxU32 getPxSceneDescGpuComputeVersion( const PxSceneDesc* inOwner ) { ret
 inline void setPxSceneDescGpuComputeVersion( PxSceneDesc* inOwner, PxU32 inData) { inOwner->gpuComputeVersion = inData; }
 inline PxU32 getPxSceneDescContactPairSlabSize( const PxSceneDesc* inOwner ) { return inOwner->contactPairSlabSize; }
 inline void setPxSceneDescContactPairSlabSize( PxSceneDesc* inOwner, PxU32 inData) { inOwner->contactPairSlabSize = inData; }
+inline PxU32 getPxSceneDescNewtonMaxIterations( const PxSceneDesc* inOwner ) { return inOwner->newtonMaxIterations; }
+inline void setPxSceneDescNewtonMaxIterations( PxSceneDesc* inOwner, PxU32 inData) { inOwner->newtonMaxIterations = inData; }
+inline PxReal getPxSceneDescNewtonTolerance( const PxSceneDesc* inOwner ) { return inOwner->newtonTolerance; }
+inline void setPxSceneDescNewtonTolerance( PxSceneDesc* inOwner, PxReal inData) { inOwner->newtonTolerance = inData; }
+inline PxReal getPxSceneDescNewtonRegularization( const PxSceneDesc* inOwner ) { return inOwner->newtonRegularization; }
+inline void setPxSceneDescNewtonRegularization( PxSceneDesc* inOwner, PxReal inData) { inOwner->newtonRegularization = inData; }
 PX_PHYSX_CORE_API PxSceneDescGeneratedInfo::PxSceneDescGeneratedInfo()
 	: ToDefault( "ToDefault", setPxSceneDesc_ToDefault)
 	, Gravity( "Gravity", setPxSceneDescGravity, getPxSceneDescGravity )
@@ -1398,6 +1404,9 @@ PX_PHYSX_CORE_API PxSceneDescGeneratedInfo::PxSceneDescGeneratedInfo()
 	, GpuMaxNumStaticPartitions( "GpuMaxNumStaticPartitions", setPxSceneDescGpuMaxNumStaticPartitions, getPxSceneDescGpuMaxNumStaticPartitions )
 	, GpuComputeVersion( "GpuComputeVersion", setPxSceneDescGpuComputeVersion, getPxSceneDescGpuComputeVersion )
 	, ContactPairSlabSize( "ContactPairSlabSize", setPxSceneDescContactPairSlabSize, getPxSceneDescContactPairSlabSize )
+	, NewtonMaxIterations( "NewtonMaxIterations", setPxSceneDescNewtonMaxIterations, getPxSceneDescNewtonMaxIterations )
+	, NewtonTolerance( "NewtonTolerance", setPxSceneDescNewtonTolerance, getPxSceneDescNewtonTolerance )
+	, NewtonRegularization( "NewtonRegularization", setPxSceneDescNewtonRegularization, getPxSceneDescNewtonRegularization )
 {}
 PX_PHYSX_CORE_API PxSceneDescGeneratedValues::PxSceneDescGeneratedValues( const PxSceneDesc* inSource )
 		:PxSceneQueryDescGeneratedValues( inSource )
@@ -1439,6 +1448,9 @@ PX_PHYSX_CORE_API PxSceneDescGeneratedValues::PxSceneDescGeneratedValues( const 
 		,GpuMaxNumStaticPartitions( inSource->gpuMaxNumStaticPartitions )
 		,GpuComputeVersion( inSource->gpuComputeVersion )
 		,ContactPairSlabSize( inSource->contactPairSlabSize )
+		,NewtonMaxIterations( inSource->newtonMaxIterations )
+		,NewtonTolerance( inSource->newtonTolerance )
+		,NewtonRegularization( inSource->newtonRegularization )
 {
 	PX_UNUSED(inSource);
 }

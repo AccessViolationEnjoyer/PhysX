@@ -1,0 +1,263 @@
+#ifndef NEWTON_SOLVER_H
+#define NEWTON_SOLVER_H
+
+#include "NewtonStorage.h"
+#include <Eigen/SparseCore>
+#include <chrono>
+#include <cstdint>
+#include <string>
+#include <limits>
+#include <vector>
+
+namespace newton
+{
+struct SolveStatus
+{
+	enum Enum
+	{
+		eSUCCESS,
+		eITERATION_LIMIT,
+		eINVALID_INPUT,
+		eFACTORIZATION_FAILED,
+		eNUMERICAL_FAILURE,
+		eOUT_OF_MEMORY
+	};
+};
+typedef Eigen::VectorXd Vector;
+typedef Eigen::Ref<const Vector> ConstVector;
+typedef Eigen::Ref<Vector> MutableVector;
+typedef Eigen::Vector3d Vec3;
+typedef Eigen::Matrix3d Mat3;
+typedef Eigen::Matrix<double, 3, 6> Jacobian;
+typedef Eigen::Matrix<double, 6, 1> Vec6;
+typedef Eigen::SparseMatrix<double> Sparse;
+typedef std::chrono::steady_clock Clock;
+
+// J is mass scaled: each column is divided by sqrt(mass or inertia).
+// Contact rows are tangent 0, tangent 1, normal. Bilateral blocks hold three
+// equality rows. Scalar nonnegative edges pack the normal row into one solver row.
+struct Contact
+{
+	int rowCount() const { return bilateral || friction != 0.0 ? 3 : 1; }
+	bool bilateral = false; // Three equality rows for joint/spring benchmarks.
+	int body[2]; // Distinct dynamic bodies, or -1 for the fixed world.
+	Jacobian jacobian[2]; // Rows are tangent 0, tangent 1, normal; mass-scaled columns.
+	Vec3 freeVelocity;
+	Vec3 regularization;
+	double friction;
+	double maxNormalImpulse = std::numeric_limits<double>::infinity();
+};
+
+// The normal row is the complete scalar contact. Three-row contacts retain
+// their two additional rows separately, so scalar records contain no padding
+// Jacobians or duplicate solve representation.
+struct CompactContact
+{
+	int row = 0;
+	// Ordinary scalar rows need no sidecar. Small negative tags identify bilateral
+	// blocks; the reserved lower range identifies optional scalar impulse bounds.
+	enum { SCALAR_BOUNDS_TAG = -0x40000000 };
+	int block = 0; // 0: nonnegative scalar; >0: friction block; <0: bilateral or bounds.
+	int body[2];
+	Vec6 jacobian[2];
+	double freeVelocity;
+	double regularization;
+	bool hasScalarBounds() const { return block <= SCALAR_BOUNDS_TAG; }
+	int rowCount() const { return block && !hasScalarBounds() ? 3 : 1; }
+};
+
+struct ScalarBounds
+{
+	double lower;
+	double upper;
+};
+
+struct ContactBlock
+{
+	Eigen::Matrix<double, 2, 6> tangentJacobian[2];
+	Eigen::Vector2d freeVelocity;
+	Eigen::Vector2d regularization;
+	double friction;
+	double maxNormalImpulse = std::numeric_limits<double>::infinity();
+	int coupled = -1;
+};
+
+// Native patch rows are contiguous scalar contacts: normals, then up to four
+// tangent rows. Every row has the same ordered body pair. Normal bounds are
+// [0,cap], tangent scalar bounds are unbounded; friction couples the group.
+struct Patch
+{
+	int firstContact;
+	int normalCount;
+	int tangentCount;
+	double friction; // May change between solves without rebuilding the Jacobian.
+};
+
+struct Problem
+{
+	std::string name;
+	double timestep;
+	std::vector<double> inverseMass;
+	std::vector<CompactContact> contacts;
+	// Exactly one uniquely owned block per three-row contact; no shared or orphan blocks.
+	std::vector<ContactBlock> contactBlocks;
+	std::vector<ScalarBounds> scalarBounds;
+	std::vector<Patch> patches;
+	bool hasFiniteBounds = false;
+	bool prepared = false;
+	// Core-assigned identity of prepared equations; bounds edits also invalidate continuation.
+	std::uint64_t preparationGeneration = 0;
+	SparseStorage jacobian;
+	std::vector<int> columnCursors;
+	std::vector<int> rowContact;
+	std::vector<int> coupledContacts;
+	int equalityRows = 0;
+	bool isUnilateral() const { return equalityRows == 0 && coupledContacts.empty() && scalarBounds.empty() && patches.empty(); }
+	VectorStorage freeVelocity;
+	VectorStorage regularization;
+	VectorStorage freeBodyVelocity;
+	VectorStorage massDiagonal; // Physical mass/inertia diagonal for acceleration-space convergence tests.
+	int bodyCount() const { return int(inverseMass.size()); }
+	int rowCount() const { return int(freeVelocity.size()); }
+	void clearContacts() { contacts.clear(); contactBlocks.clear(); scalarBounds.clear(); patches.clear(); prepared = false; }
+	// Returns the new contact index; [0,+infinity] uses the ordinary scalar record.
+	int addScalarContact(const CompactContact& input, double lowerImpulse, double upperImpulse);
+	// Change an existing bounded scalar sidecar without rebuilding J or allocating.
+	// Grouped patch rows keep their group contract; only ungrouped rows use this API.
+	bool setScalarBounds(int contactIndex, double lowerImpulse, double upperImpulse) noexcept;
+	// Groups must be appended in increasing, nonoverlapping contact order.
+	int addPatch(int firstContact, int normalCount, int tangentCount, double friction);
+	const ScalarBounds& bounds(const CompactContact& contact) const
+	{
+		return scalarBounds[size_t(CompactContact::SCALAR_BOUNDS_TAG - contact.block)];
+	}
+	// Compatibility builder for full three-row inputs. Native scalar producers
+	// can populate CompactContact records directly, without an intermediate Contact.
+	void addContact(const Contact& input);
+	const ContactBlock& block(const CompactContact& contact) const
+	{
+		return contactBlocks[size_t(contact.block > 0 ? contact.block - 1 : -contact.block - 1)];
+	}
+	ContactBlock& block(const CompactContact& contact)
+	{
+		return contactBlocks[size_t(contact.block > 0 ? contact.block - 1 : -contact.block - 1)];
+	}
+	int coupledIndex(const CompactContact& contact) const { return contact.block > 0 ? block(contact).coupled : -1; }
+	Vec6 contactRow(const CompactContact& contact, int end, int axis) const
+	{
+		if(axis == 2)
+			return contact.jacobian[end];
+		return block(contact).tangentJacobian[end].row(axis).transpose();
+	}
+	double contactEntry(const CompactContact& contact, int end, int axis, int column) const
+	{
+		return axis == 2 ? contact.jacobian[end][column] : block(contact).tangentJacobian[end](axis, column);
+	}
+	Jacobian contactJacobian(const CompactContact& contact, int end) const
+	{
+		Jacobian result;
+		result.topRows<2>() = block(contact).tangentJacobian[end];
+		result.row(2) = contact.jacobian[end].transpose();
+		return result;
+	}
+};
+
+struct SolverStatistics
+{
+	int iterations;
+	int factorizations;
+	int symbolicAnalyses = 0;
+	int lineSearchEvaluations = 0;
+	int rankUpdates = 0;
+	int reusedFactors = 0;
+	int factorFallbacks = 0;
+	double matrixMs = 0.0;
+	double evaluationMs = 0.0;
+	double lineSearchMs = 0.0;
+	double conversionMs = 0.0;
+	double factorMs = 0.0;
+	double symbolicMs = 0.0;
+	double updateMs = 0.0;
+	double backsolveMs = 0.0;
+	double factorError = 0.0;
+	double scaledGradient = 0.0;
+	double scaledImprovement = 0.0;
+	int stopReason = 0; // 0: iteration limit, 1: gradient, 2: improvement, 5: precision, 6: line search.
+	double gradientResidual = 0.0;
+	double elapsedMs;
+	SolverStatistics() : iterations(0), factorizations(0), elapsedMs(0.0) {}
+};
+
+struct Result : SolverStatistics
+{
+	SolveStatus::Enum status = SolveStatus::eINVALID_INPUT;
+	VectorStorage impulse;
+	VectorStorage primal; // Mass-scaled body velocity increment used for warm starting.
+};
+
+inline double elapsed(Clock::time_point start)
+{
+	return std::chrono::duration<double, std::milli>(Clock::now() - start).count();
+}
+
+struct Settings
+{
+	int iterations = 100;
+	double tolerance = 1.0e-8;
+	double lineTolerance = 0.01;
+	bool checkFactor = false;
+	bool profile = false; // Detailed phase timers; total solve time is always measured.
+};
+
+// Pack scalar rows and construct J from the contact blocks. Called during constraint preparation.
+SolveStatus::Enum prepareProblem(Problem& problem) noexcept;
+
+// Producers can count entries while emitting rows: zero 6 * bodyCount() counters,
+// then count the stored nonzero coefficients for each dynamic endpoint. Scalar
+// contacts contribute their normal row; blocks contribute all three rows.
+// addContact does not count. This call consumes columnCursors into CSC cursors;
+// reset and recount before each preparation.
+SolveStatus::Enum prepareProblemFromColumnCounts(Problem& problem) noexcept;
+
+// Optional diagnostic; kept outside simulation solve timing.
+double computeResidual(const Problem& problem, ConstVector impulse);
+
+struct WorkspaceData;
+
+// One synchronous solve may use a workspace at a time. The caller owns its
+// lifetime and may retain/move it between jobs; storage grows only with capacity.
+class Workspace
+{
+public:
+	Workspace() noexcept;
+	~Workspace();
+	Workspace(Workspace&& other) noexcept;
+	Workspace& operator=(Workspace&& other) noexcept;
+	Workspace(const Workspace&) = delete;
+	Workspace& operator=(const Workspace&) = delete;
+private:
+	WorkspaceData* m_data;
+	friend SolveStatus::Enum solveNewton(const Problem&, const Settings&, Result&, Workspace&, const Result*) noexcept;
+	friend SolveStatus::Enum continueNewton(const Problem&, const Settings&, Result&, Workspace&, const Result*) noexcept;
+};
+
+// Minimize 0.5*|v|^2 + sum phi(Jv + freeVelocity), where
+// phi(s) = max_lambda(-s*lambda - 0.5*lambda'R*lambda) over each row/block's bounds.
+// The scalar lambda is clamp(-s/R, lower, upper). Positive compliance is required.
+// The caller retains workspace and result storage; previous may alias result.
+// Failures return status without escaping through an engine task. Iteration-limit
+// results remain available for callers that explicitly accept bounded iteration work.
+SolveStatus::Enum solveNewton(const Problem& problem, const Settings& settings, Result& result,
+	Workspace& workspace, const Result* previous = NULL) noexcept;
+
+// Continue target-only solves of the same prepared problem without discarding the
+// numerical factor. Only freeVelocity and patch friction may change directly;
+// changing J, R, body mapping, row kinds or caps requires preparation (or the
+// scalar-bound setter). Preparation, bounds edits, another Problem, and failed
+// solves invalidate reuse automatically. An ordinary solve always starts a new
+// numerical factor, and must begin each new island/timestep in native callers.
+// Existing curvature updates/refactor fallback still produce the exact new H.
+SolveStatus::Enum continueNewton(const Problem& problem, const Settings& settings, Result& result,
+	Workspace& workspace, const Result* previous = NULL) noexcept;
+}
+#endif

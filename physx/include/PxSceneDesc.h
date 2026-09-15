@@ -87,7 +87,8 @@ struct PxSolverType
 	enum Enum
 	{
 		ePGS,	//!< Projected Gauss-Seidel iterative solver
-		eTGS	//!< Temporal Gauss-Seidel solver
+		eTGS,	//!< Temporal Gauss-Seidel solver
+		eNEWTON	//!< CPU regularized Newton solver for rigid bodies; articulations are not supported
 	};
 };
 
@@ -738,6 +739,44 @@ public:
 	PxSolverType::Enum	solverType;
 
 	/**
+	\brief Maximum Newton iterations for each constraint solve phase.
+
+	Only used by PxSolverType::eNEWTON. Position correction and final physical velocity
+	may require separate solves. Friction corrections and material transitions share
+	this budget within each phase. Rigid-body PGS position/velocity iteration counts do not
+	control this solver. Must be in [1, 2147483647].
+
+	<b>Default:</b> 100
+	*/
+	PxU32 newtonMaxIterations;
+
+	/**
+	\brief Newton convergence tolerance for the normalized gradient and cost improvement.
+
+	Only used by PxSolverType::eNEWTON. Must be finite and greater than zero.
+	Lower values request a more accurate solve, subject to newtonMaxIterations.
+	Native friction corrections also test a row-normalized compliant velocity residual
+	divided by the timestep against this value.
+
+	<b>Default:</b> 1e-8
+	*/
+	PxReal newtonTolerance;
+
+	/**
+	\brief Dimensionless response-scaled compliance for otherwise hard Newton constraint rows.
+
+	Only used by PxSolverType::eNEWTON. For a row with response r = J M^-1 J^T,
+	the solver uses positive regularization R = newtonRegularization * r. This adds
+	physical softness: it is not an exact zero-compliance constraint or just a
+	factorization tolerance. Smaller values reduce softness but can worsen conditioning.
+	Rows with physical spring compliance retain their specified spring law.
+	Must be finite and greater than zero.
+
+	<b>Default:</b> 1e-4
+	*/
+	PxReal newtonRegularization;
+
+	/**
 	\brief A contact with a relative velocity below this will not bounce. A typical value for simulation.
 	stability is about 0.2 * gravity.
 
@@ -1098,6 +1137,9 @@ PX_INLINE PxSceneDesc::PxSceneDesc(const PxTolerancesScale& scale):
 
 	frictionType					(PxFrictionType::ePATCH),
 	solverType						(PxSolverType::ePGS),
+	newtonMaxIterations				(100),
+	newtonTolerance					(1e-8f),
+	newtonRegularization				(1e-4f),
 	bounceThresholdVelocity			(0.2f * scale.speed),
 	frictionOffsetThreshold			(0.04f * scale.length),
 	frictionCorrelationDistance		(0.025f * scale.length),
@@ -1182,8 +1224,23 @@ PX_INLINE bool PxSceneDesc::isValid() const
 	if(!sanityBounds.isValid())
 		return false;
 
-	if(solverType == PxSolverType::ePGS && (flags & PxSceneFlag::eENABLE_EXTERNAL_FORCES_EVERY_ITERATION_TGS))
+	if(solverType != PxSolverType::ePGS && solverType != PxSolverType::eTGS && solverType != PxSolverType::eNEWTON)
 		return false;
+
+	if(solverType != PxSolverType::eTGS && (flags & PxSceneFlag::eENABLE_EXTERNAL_FORCES_EVERY_ITERATION_TGS))
+		return false;
+
+	if(solverType == PxSolverType::eNEWTON)
+	{
+		if(newtonMaxIterations == 0 || newtonMaxIterations > 0x7fffffffu)
+			return false;
+		if(!PxIsFinite(newtonTolerance) || newtonTolerance <= 0.0f)
+			return false;
+		if(!PxIsFinite(newtonRegularization) || newtonRegularization <= 0.0f)
+			return false;
+		if(flags & (PxSceneFlag::eENABLE_GPU_DYNAMICS | PxSceneFlag::eENABLE_DIRECT_GPU_API))
+			return false;
+	}
 
 #if PX_SUPPORT_GPU_PHYSX
 	if(!PxIsPowerOfTwo(gpuMaxNumPartitions))

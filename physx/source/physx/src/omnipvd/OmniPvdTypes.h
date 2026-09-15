@@ -143,6 +143,7 @@ OMNI_PVD_ENUM_END		(PxBroadPhaseType)
 OMNI_PVD_ENUM_BEGIN		(PxSolverType)
 OMNI_PVD_ENUM_VALUE		(PxSolverType, ePGS)
 OMNI_PVD_ENUM_VALUE		(PxSolverType, eTGS)
+OMNI_PVD_ENUM_VALUE		(PxSolverType, eNEWTON)
 OMNI_PVD_ENUM_END		(PxSolverType)
 
 OMNI_PVD_ENUM_BEGIN		(PxPairFilteringMode)

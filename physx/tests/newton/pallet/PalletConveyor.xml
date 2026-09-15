@@ -1,0 +1,992 @@
+<mujoco model="Pallet conveyors">
+	<compiler angle="radian"/>
+	<size memory="256M"/>
+	<option timestep="0.01" gravity="0 -9.81 0" integrator="Euler" solver="Newton"
+		cone="pyramidal" jacobian="sparse" iterations="100" tolerance="1e-8" ls_tolerance="0.01"/>
+	<default><geom type="box" condim="3" friction="0.5 0 0" margin="0.001" gap="0"
+		solref="0.02 1" solimp="0.9999 0.9999 0.001 0.5 2"/></default>
+	<visual><global offwidth="1280" offheight="720"/><headlight ambient="0.4 0.4 0.4"/></visual>
+	<worldbody>
+		<light pos="0 10 0" dir="0 -1 0" directional="true"/>
+		<geom name="belt1" pos="0 0.4 -4.4" size="6 0.1 0.6" rgba="0.2 0.25 0.3 1"/>
+		<geom name="belt2" pos="0 0.4 -2.2" size="6 0.1 0.6" rgba="0.2 0.25 0.3 1"/>
+		<geom name="belt3" pos="0 0.4 0" size="6 0.1 0.6" rgba="0.2 0.25 0.3 1"/>
+		<geom name="belt4" pos="0 0.4 2.2" size="6 0.1 0.6" rgba="0.2 0.25 0.3 1"/>
+		<geom name="belt5" pos="0 0.4 4.4" size="6 0.1 0.6" rgba="0.2 0.25 0.3 1"/>
+		<body name="lane1_pallet" pos="-3 0.575 -4.4"><freejoint/>
+			<geom size="0.6 0.075 0.5" mass="10" rgba="0.5 0.3 0.12 1"/>
+		</body>
+		<body name="lane1_box1" pos="-3.45 0.775 -4.7"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane1_box2" pos="-3.15 0.775 -4.7"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane1_box3" pos="-2.85 0.775 -4.7"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane1_box4" pos="-2.55 0.775 -4.7"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane1_box5" pos="-3.45 0.775 -4.4"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane1_box6" pos="-3.15 0.775 -4.4"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane1_box7" pos="-2.85 0.775 -4.4"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane1_box8" pos="-2.55 0.775 -4.4"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane1_box9" pos="-3.45 0.775 -4.1"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane1_box10" pos="-3.15 0.775 -4.1"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane1_box11" pos="-2.85 0.775 -4.1"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane1_box12" pos="-2.55 0.775 -4.1"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane1_sheet1" pos="-3 0.9005 -4.4"><freejoint/>
+			<geom size="0.6 0.0005 0.5" mass="0.1" rgba="0.1 0.7 0.85 1"/>
+		</body>
+		<body name="lane1_box13" pos="-3.45 1.026 -4.7"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane1_box14" pos="-3.15 1.026 -4.7"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane1_box15" pos="-2.85 1.026 -4.7"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane1_box16" pos="-2.55 1.026 -4.7"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane1_box17" pos="-3.45 1.026 -4.4"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane1_box18" pos="-3.15 1.026 -4.4"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane1_box19" pos="-2.85 1.026 -4.4"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane1_box20" pos="-2.55 1.026 -4.4"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane1_box21" pos="-3.45 1.026 -4.1"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane1_box22" pos="-3.15 1.026 -4.1"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane1_box23" pos="-2.85 1.026 -4.1"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane1_box24" pos="-2.55 1.026 -4.1"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane1_sheet2" pos="-3 1.1515 -4.4"><freejoint/>
+			<geom size="0.6 0.0005 0.5" mass="0.1" rgba="0.1 0.7 0.85 1"/>
+		</body>
+		<body name="lane1_box25" pos="-3.45 1.277 -4.7"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane1_box26" pos="-3.15 1.277 -4.7"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane1_box27" pos="-2.85 1.277 -4.7"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane1_box28" pos="-2.55 1.277 -4.7"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane1_box29" pos="-3.45 1.277 -4.4"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane1_box30" pos="-3.15 1.277 -4.4"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane1_box31" pos="-2.85 1.277 -4.4"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane1_box32" pos="-2.55 1.277 -4.4"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane1_box33" pos="-3.45 1.277 -4.1"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane1_box34" pos="-3.15 1.277 -4.1"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane1_box35" pos="-2.85 1.277 -4.1"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane1_box36" pos="-2.55 1.277 -4.1"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane1_sheet3" pos="-3 1.4025 -4.4"><freejoint/>
+			<geom size="0.6 0.0005 0.5" mass="0.1" rgba="0.1 0.7 0.85 1"/>
+		</body>
+		<body name="lane1_box37" pos="-3.45 1.528 -4.7"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane1_box38" pos="-3.15 1.528 -4.7"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane1_box39" pos="-2.85 1.528 -4.7"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane1_box40" pos="-2.55 1.528 -4.7"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane1_box41" pos="-3.45 1.528 -4.4"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane1_box42" pos="-3.15 1.528 -4.4"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane1_box43" pos="-2.85 1.528 -4.4"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane1_box44" pos="-2.55 1.528 -4.4"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane1_box45" pos="-3.45 1.528 -4.1"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane1_box46" pos="-3.15 1.528 -4.1"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane1_box47" pos="-2.85 1.528 -4.1"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane1_box48" pos="-2.55 1.528 -4.1"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane1_sheet4" pos="-3 1.6535 -4.4"><freejoint/>
+			<geom size="0.6 0.0005 0.5" mass="0.1" rgba="0.1 0.7 0.85 1"/>
+		</body>
+		<body name="lane1_box49" pos="-3.45 1.779 -4.7"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane1_box50" pos="-3.15 1.779 -4.7"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane1_box51" pos="-2.85 1.779 -4.7"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane1_box52" pos="-2.55 1.779 -4.7"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane1_box53" pos="-3.45 1.779 -4.4"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane1_box54" pos="-3.15 1.779 -4.4"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane1_box55" pos="-2.85 1.779 -4.4"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane1_box56" pos="-2.55 1.779 -4.4"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane1_box57" pos="-3.45 1.779 -4.1"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane1_box58" pos="-3.15 1.779 -4.1"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane1_box59" pos="-2.85 1.779 -4.1"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane1_box60" pos="-2.55 1.779 -4.1"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane2_pallet" pos="-3 0.575 -2.2"><freejoint/>
+			<geom size="0.6 0.075 0.5" mass="10" rgba="0.5 0.3 0.12 1"/>
+		</body>
+		<body name="lane2_box1" pos="-3.45 0.775 -2.5"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane2_box2" pos="-3.15 0.775 -2.5"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane2_box3" pos="-2.85 0.775 -2.5"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane2_box4" pos="-2.55 0.775 -2.5"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane2_box5" pos="-3.45 0.775 -2.2"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane2_box6" pos="-3.15 0.775 -2.2"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane2_box7" pos="-2.85 0.775 -2.2"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane2_box8" pos="-2.55 0.775 -2.2"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane2_box9" pos="-3.45 0.775 -1.9"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane2_box10" pos="-3.15 0.775 -1.9"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane2_box11" pos="-2.85 0.775 -1.9"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane2_box12" pos="-2.55 0.775 -1.9"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane2_sheet1" pos="-3 0.9005 -2.2"><freejoint/>
+			<geom size="0.6 0.0005 0.5" mass="0.1" rgba="0.1 0.7 0.85 1"/>
+		</body>
+		<body name="lane2_box13" pos="-3.45 1.026 -2.5"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane2_box14" pos="-3.15 1.026 -2.5"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane2_box15" pos="-2.85 1.026 -2.5"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane2_box16" pos="-2.55 1.026 -2.5"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane2_box17" pos="-3.45 1.026 -2.2"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane2_box18" pos="-3.15 1.026 -2.2"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane2_box19" pos="-2.85 1.026 -2.2"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane2_box20" pos="-2.55 1.026 -2.2"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane2_box21" pos="-3.45 1.026 -1.9"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane2_box22" pos="-3.15 1.026 -1.9"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane2_box23" pos="-2.85 1.026 -1.9"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane2_box24" pos="-2.55 1.026 -1.9"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane2_sheet2" pos="-3 1.1515 -2.2"><freejoint/>
+			<geom size="0.6 0.0005 0.5" mass="0.1" rgba="0.1 0.7 0.85 1"/>
+		</body>
+		<body name="lane2_box25" pos="-3.45 1.277 -2.5"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane2_box26" pos="-3.15 1.277 -2.5"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane2_box27" pos="-2.85 1.277 -2.5"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane2_box28" pos="-2.55 1.277 -2.5"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane2_box29" pos="-3.45 1.277 -2.2"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane2_box30" pos="-3.15 1.277 -2.2"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane2_box31" pos="-2.85 1.277 -2.2"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane2_box32" pos="-2.55 1.277 -2.2"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane2_box33" pos="-3.45 1.277 -1.9"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane2_box34" pos="-3.15 1.277 -1.9"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane2_box35" pos="-2.85 1.277 -1.9"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane2_box36" pos="-2.55 1.277 -1.9"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane2_sheet3" pos="-3 1.4025 -2.2"><freejoint/>
+			<geom size="0.6 0.0005 0.5" mass="0.1" rgba="0.1 0.7 0.85 1"/>
+		</body>
+		<body name="lane2_box37" pos="-3.45 1.528 -2.5"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane2_box38" pos="-3.15 1.528 -2.5"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane2_box39" pos="-2.85 1.528 -2.5"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane2_box40" pos="-2.55 1.528 -2.5"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane2_box41" pos="-3.45 1.528 -2.2"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane2_box42" pos="-3.15 1.528 -2.2"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane2_box43" pos="-2.85 1.528 -2.2"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane2_box44" pos="-2.55 1.528 -2.2"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane2_box45" pos="-3.45 1.528 -1.9"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane2_box46" pos="-3.15 1.528 -1.9"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane2_box47" pos="-2.85 1.528 -1.9"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane2_box48" pos="-2.55 1.528 -1.9"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane2_sheet4" pos="-3 1.6535 -2.2"><freejoint/>
+			<geom size="0.6 0.0005 0.5" mass="0.1" rgba="0.1 0.7 0.85 1"/>
+		</body>
+		<body name="lane2_box49" pos="-3.45 1.779 -2.5"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane2_box50" pos="-3.15 1.779 -2.5"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane2_box51" pos="-2.85 1.779 -2.5"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane2_box52" pos="-2.55 1.779 -2.5"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane2_box53" pos="-3.45 1.779 -2.2"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane2_box54" pos="-3.15 1.779 -2.2"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane2_box55" pos="-2.85 1.779 -2.2"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane2_box56" pos="-2.55 1.779 -2.2"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane2_box57" pos="-3.45 1.779 -1.9"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane2_box58" pos="-3.15 1.779 -1.9"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane2_box59" pos="-2.85 1.779 -1.9"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane2_box60" pos="-2.55 1.779 -1.9"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane3_pallet" pos="-3 0.575 0"><freejoint/>
+			<geom size="0.6 0.075 0.5" mass="10" rgba="0.5 0.3 0.12 1"/>
+		</body>
+		<body name="lane3_box1" pos="-3.45 0.775 -0.3"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane3_box2" pos="-3.15 0.775 -0.3"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane3_box3" pos="-2.85 0.775 -0.3"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane3_box4" pos="-2.55 0.775 -0.3"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane3_box5" pos="-3.45 0.775 0"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane3_box6" pos="-3.15 0.775 0"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane3_box7" pos="-2.85 0.775 0"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane3_box8" pos="-2.55 0.775 0"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane3_box9" pos="-3.45 0.775 0.3"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane3_box10" pos="-3.15 0.775 0.3"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane3_box11" pos="-2.85 0.775 0.3"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane3_box12" pos="-2.55 0.775 0.3"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane3_sheet1" pos="-3 0.9005 0"><freejoint/>
+			<geom size="0.6 0.0005 0.5" mass="0.1" rgba="0.1 0.7 0.85 1"/>
+		</body>
+		<body name="lane3_box13" pos="-3.45 1.026 -0.3"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane3_box14" pos="-3.15 1.026 -0.3"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane3_box15" pos="-2.85 1.026 -0.3"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane3_box16" pos="-2.55 1.026 -0.3"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane3_box17" pos="-3.45 1.026 0"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane3_box18" pos="-3.15 1.026 0"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane3_box19" pos="-2.85 1.026 0"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane3_box20" pos="-2.55 1.026 0"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane3_box21" pos="-3.45 1.026 0.3"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane3_box22" pos="-3.15 1.026 0.3"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane3_box23" pos="-2.85 1.026 0.3"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane3_box24" pos="-2.55 1.026 0.3"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane3_sheet2" pos="-3 1.1515 0"><freejoint/>
+			<geom size="0.6 0.0005 0.5" mass="0.1" rgba="0.1 0.7 0.85 1"/>
+		</body>
+		<body name="lane3_box25" pos="-3.45 1.277 -0.3"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane3_box26" pos="-3.15 1.277 -0.3"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane3_box27" pos="-2.85 1.277 -0.3"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane3_box28" pos="-2.55 1.277 -0.3"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane3_box29" pos="-3.45 1.277 0"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane3_box30" pos="-3.15 1.277 0"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane3_box31" pos="-2.85 1.277 0"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane3_box32" pos="-2.55 1.277 0"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane3_box33" pos="-3.45 1.277 0.3"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane3_box34" pos="-3.15 1.277 0.3"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane3_box35" pos="-2.85 1.277 0.3"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane3_box36" pos="-2.55 1.277 0.3"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane3_sheet3" pos="-3 1.4025 0"><freejoint/>
+			<geom size="0.6 0.0005 0.5" mass="0.1" rgba="0.1 0.7 0.85 1"/>
+		</body>
+		<body name="lane3_box37" pos="-3.45 1.528 -0.3"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane3_box38" pos="-3.15 1.528 -0.3"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane3_box39" pos="-2.85 1.528 -0.3"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane3_box40" pos="-2.55 1.528 -0.3"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane3_box41" pos="-3.45 1.528 0"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane3_box42" pos="-3.15 1.528 0"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane3_box43" pos="-2.85 1.528 0"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane3_box44" pos="-2.55 1.528 0"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane3_box45" pos="-3.45 1.528 0.3"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane3_box46" pos="-3.15 1.528 0.3"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane3_box47" pos="-2.85 1.528 0.3"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane3_box48" pos="-2.55 1.528 0.3"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane3_sheet4" pos="-3 1.6535 0"><freejoint/>
+			<geom size="0.6 0.0005 0.5" mass="0.1" rgba="0.1 0.7 0.85 1"/>
+		</body>
+		<body name="lane3_box49" pos="-3.45 1.779 -0.3"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane3_box50" pos="-3.15 1.779 -0.3"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane3_box51" pos="-2.85 1.779 -0.3"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane3_box52" pos="-2.55 1.779 -0.3"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane3_box53" pos="-3.45 1.779 0"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane3_box54" pos="-3.15 1.779 0"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane3_box55" pos="-2.85 1.779 0"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane3_box56" pos="-2.55 1.779 0"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane3_box57" pos="-3.45 1.779 0.3"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane3_box58" pos="-3.15 1.779 0.3"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane3_box59" pos="-2.85 1.779 0.3"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane3_box60" pos="-2.55 1.779 0.3"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane4_pallet" pos="-3 0.575 2.2"><freejoint/>
+			<geom size="0.6 0.075 0.5" mass="10" rgba="0.5 0.3 0.12 1"/>
+		</body>
+		<body name="lane4_box1" pos="-3.45 0.775 1.9"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane4_box2" pos="-3.15 0.775 1.9"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane4_box3" pos="-2.85 0.775 1.9"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane4_box4" pos="-2.55 0.775 1.9"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane4_box5" pos="-3.45 0.775 2.2"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane4_box6" pos="-3.15 0.775 2.2"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane4_box7" pos="-2.85 0.775 2.2"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane4_box8" pos="-2.55 0.775 2.2"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane4_box9" pos="-3.45 0.775 2.5"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane4_box10" pos="-3.15 0.775 2.5"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane4_box11" pos="-2.85 0.775 2.5"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane4_box12" pos="-2.55 0.775 2.5"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane4_sheet1" pos="-3 0.9005 2.2"><freejoint/>
+			<geom size="0.6 0.0005 0.5" mass="0.1" rgba="0.1 0.7 0.85 1"/>
+		</body>
+		<body name="lane4_box13" pos="-3.45 1.026 1.9"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane4_box14" pos="-3.15 1.026 1.9"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane4_box15" pos="-2.85 1.026 1.9"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane4_box16" pos="-2.55 1.026 1.9"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane4_box17" pos="-3.45 1.026 2.2"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane4_box18" pos="-3.15 1.026 2.2"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane4_box19" pos="-2.85 1.026 2.2"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane4_box20" pos="-2.55 1.026 2.2"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane4_box21" pos="-3.45 1.026 2.5"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane4_box22" pos="-3.15 1.026 2.5"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane4_box23" pos="-2.85 1.026 2.5"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane4_box24" pos="-2.55 1.026 2.5"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane4_sheet2" pos="-3 1.1515 2.2"><freejoint/>
+			<geom size="0.6 0.0005 0.5" mass="0.1" rgba="0.1 0.7 0.85 1"/>
+		</body>
+		<body name="lane4_box25" pos="-3.45 1.277 1.9"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane4_box26" pos="-3.15 1.277 1.9"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane4_box27" pos="-2.85 1.277 1.9"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane4_box28" pos="-2.55 1.277 1.9"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane4_box29" pos="-3.45 1.277 2.2"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane4_box30" pos="-3.15 1.277 2.2"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane4_box31" pos="-2.85 1.277 2.2"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane4_box32" pos="-2.55 1.277 2.2"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane4_box33" pos="-3.45 1.277 2.5"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane4_box34" pos="-3.15 1.277 2.5"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane4_box35" pos="-2.85 1.277 2.5"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane4_box36" pos="-2.55 1.277 2.5"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane4_sheet3" pos="-3 1.4025 2.2"><freejoint/>
+			<geom size="0.6 0.0005 0.5" mass="0.1" rgba="0.1 0.7 0.85 1"/>
+		</body>
+		<body name="lane4_box37" pos="-3.45 1.528 1.9"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane4_box38" pos="-3.15 1.528 1.9"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane4_box39" pos="-2.85 1.528 1.9"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane4_box40" pos="-2.55 1.528 1.9"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane4_box41" pos="-3.45 1.528 2.2"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane4_box42" pos="-3.15 1.528 2.2"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane4_box43" pos="-2.85 1.528 2.2"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane4_box44" pos="-2.55 1.528 2.2"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane4_box45" pos="-3.45 1.528 2.5"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane4_box46" pos="-3.15 1.528 2.5"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane4_box47" pos="-2.85 1.528 2.5"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane4_box48" pos="-2.55 1.528 2.5"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane4_sheet4" pos="-3 1.6535 2.2"><freejoint/>
+			<geom size="0.6 0.0005 0.5" mass="0.1" rgba="0.1 0.7 0.85 1"/>
+		</body>
+		<body name="lane4_box49" pos="-3.45 1.779 1.9"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane4_box50" pos="-3.15 1.779 1.9"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane4_box51" pos="-2.85 1.779 1.9"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane4_box52" pos="-2.55 1.779 1.9"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane4_box53" pos="-3.45 1.779 2.2"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane4_box54" pos="-3.15 1.779 2.2"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane4_box55" pos="-2.85 1.779 2.2"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane4_box56" pos="-2.55 1.779 2.2"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane4_box57" pos="-3.45 1.779 2.5"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane4_box58" pos="-3.15 1.779 2.5"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane4_box59" pos="-2.85 1.779 2.5"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane4_box60" pos="-2.55 1.779 2.5"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane5_pallet" pos="-3 0.575 4.4"><freejoint/>
+			<geom size="0.6 0.075 0.5" mass="10" rgba="0.5 0.3 0.12 1"/>
+		</body>
+		<body name="lane5_box1" pos="-3.45 0.775 4.1"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane5_box2" pos="-3.15 0.775 4.1"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane5_box3" pos="-2.85 0.775 4.1"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane5_box4" pos="-2.55 0.775 4.1"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane5_box5" pos="-3.45 0.775 4.4"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane5_box6" pos="-3.15 0.775 4.4"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane5_box7" pos="-2.85 0.775 4.4"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane5_box8" pos="-2.55 0.775 4.4"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane5_box9" pos="-3.45 0.775 4.7"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane5_box10" pos="-3.15 0.775 4.7"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane5_box11" pos="-2.85 0.775 4.7"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane5_box12" pos="-2.55 0.775 4.7"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane5_sheet1" pos="-3 0.9005 4.4"><freejoint/>
+			<geom size="0.6 0.0005 0.5" mass="0.1" rgba="0.1 0.7 0.85 1"/>
+		</body>
+		<body name="lane5_box13" pos="-3.45 1.026 4.1"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane5_box14" pos="-3.15 1.026 4.1"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane5_box15" pos="-2.85 1.026 4.1"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane5_box16" pos="-2.55 1.026 4.1"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane5_box17" pos="-3.45 1.026 4.4"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane5_box18" pos="-3.15 1.026 4.4"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane5_box19" pos="-2.85 1.026 4.4"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane5_box20" pos="-2.55 1.026 4.4"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane5_box21" pos="-3.45 1.026 4.7"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane5_box22" pos="-3.15 1.026 4.7"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane5_box23" pos="-2.85 1.026 4.7"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane5_box24" pos="-2.55 1.026 4.7"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane5_sheet2" pos="-3 1.1515 4.4"><freejoint/>
+			<geom size="0.6 0.0005 0.5" mass="0.1" rgba="0.1 0.7 0.85 1"/>
+		</body>
+		<body name="lane5_box25" pos="-3.45 1.277 4.1"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane5_box26" pos="-3.15 1.277 4.1"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane5_box27" pos="-2.85 1.277 4.1"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane5_box28" pos="-2.55 1.277 4.1"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane5_box29" pos="-3.45 1.277 4.4"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane5_box30" pos="-3.15 1.277 4.4"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane5_box31" pos="-2.85 1.277 4.4"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane5_box32" pos="-2.55 1.277 4.4"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane5_box33" pos="-3.45 1.277 4.7"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane5_box34" pos="-3.15 1.277 4.7"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane5_box35" pos="-2.85 1.277 4.7"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane5_box36" pos="-2.55 1.277 4.7"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane5_sheet3" pos="-3 1.4025 4.4"><freejoint/>
+			<geom size="0.6 0.0005 0.5" mass="0.1" rgba="0.1 0.7 0.85 1"/>
+		</body>
+		<body name="lane5_box37" pos="-3.45 1.528 4.1"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane5_box38" pos="-3.15 1.528 4.1"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane5_box39" pos="-2.85 1.528 4.1"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane5_box40" pos="-2.55 1.528 4.1"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane5_box41" pos="-3.45 1.528 4.4"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane5_box42" pos="-3.15 1.528 4.4"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane5_box43" pos="-2.85 1.528 4.4"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane5_box44" pos="-2.55 1.528 4.4"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane5_box45" pos="-3.45 1.528 4.7"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane5_box46" pos="-3.15 1.528 4.7"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane5_box47" pos="-2.85 1.528 4.7"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane5_box48" pos="-2.55 1.528 4.7"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane5_sheet4" pos="-3 1.6535 4.4"><freejoint/>
+			<geom size="0.6 0.0005 0.5" mass="0.1" rgba="0.1 0.7 0.85 1"/>
+		</body>
+		<body name="lane5_box49" pos="-3.45 1.779 4.1"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane5_box50" pos="-3.15 1.779 4.1"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane5_box51" pos="-2.85 1.779 4.1"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane5_box52" pos="-2.55 1.779 4.1"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane5_box53" pos="-3.45 1.779 4.4"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane5_box54" pos="-3.15 1.779 4.4"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane5_box55" pos="-2.85 1.779 4.4"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane5_box56" pos="-2.55 1.779 4.4"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane5_box57" pos="-3.45 1.779 4.7"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane5_box58" pos="-3.15 1.779 4.7"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+		<body name="lane5_box59" pos="-2.85 1.779 4.7"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.85 0.7 0.45 1"/>
+		</body>
+		<body name="lane5_box60" pos="-2.55 1.779 4.7"><freejoint/>
+			<geom size="0.15 0.125 0.15" mass="1" rgba="0.7 0.5 0.3 1"/>
+		</body>
+	</worldbody>
+</mujoco>

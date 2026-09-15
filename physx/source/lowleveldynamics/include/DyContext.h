@@ -320,7 +320,7 @@ protected:
 Context* createDynamicsContext(	PxcNpMemBlockPool* memBlockPool, Cm::FlushPool& taskPool, PxvSimStats& simStats,
 								Cm::VirtualAllocatorCallback& allocator, PxsMaterialManager* materialManager,
 								IG::SimpleIslandManager& islandManager, PxU64 contextID, PxReal maxBiasCoefficient,
-								PxReal lengthScale, PxSceneFlags sceneFlags);
+								PxReal lengthScale, PxSceneFlags sceneFlags, const PxSceneDesc* newtonDesc = NULL);
 
 Context* createTGSDynamicsContext(	PxcNpMemBlockPool* memBlockPool, Cm::FlushPool& taskPool, PxvSimStats& simStats,
 									Cm::VirtualAllocatorCallback& allocator, PxsMaterialManager* materialManager,

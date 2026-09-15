@@ -57,6 +57,7 @@ namespace Dy
 {
 	struct SolverIslandParams;
 	class DynamicsContext;
+	class NewtonSolver;
 
 #define SOLVER_PARALLEL_METHOD_ARGS	\
 	DynamicsContext&	context,	\
@@ -119,9 +120,9 @@ public:
 										DynamicsContext(PxcNpMemBlockPool* memBlockPool, Cm::FlushPool& taskPool,
 														PxvSimStats& simStats, Cm::VirtualAllocatorCallback& allocator,
 														PxsMaterialManager* materialManager, IG::SimpleIslandManager& islandManager,
-														PxU64 contextID, PxReal maxBiasCoefficient, PxReal lengthScale, PxSceneFlags sceneFlags);
+														PxU64 contextID, PxReal maxBiasCoefficient, PxReal lengthScale, PxSceneFlags sceneFlags, const PxSceneDesc* newtonDesc);
 
-	virtual								~DynamicsContext() {}
+	virtual								~DynamicsContext();
 
 	// Context
 	virtual	void						destroy()	PX_OVERRIDE;
@@ -130,10 +131,12 @@ public:
 												PxReal dt, const PxVec3& gravity, Cm::PinnableBitMap& changedHandleMap)	PX_OVERRIDE;
 	virtual void						mergeResults()	PX_OVERRIDE;
 	virtual void						setSimulationController(PxsSimulationController* simulationController )	PX_OVERRIDE	{ mSimulationController = simulationController; }
-	virtual PxSolverType::Enum			getSolverType()	const	PX_OVERRIDE	{ return PxSolverType::ePGS;	}
+	virtual PxSolverType::Enum			getSolverType()	const	PX_OVERRIDE	{ return mNewtonSolver ? PxSolverType::eNEWTON : PxSolverType::ePGS;	}
 	//~Context
 
 					void				updatePostKinematic(IG::SimpleIslandManager& simpleIslandManager, PxBaseTask* continuation, PxBaseTask* lostTouchTask, PxU32 maxLinks);
+
+	PX_FORCE_INLINE NewtonSolver*		getNewtonSolver() const { return mNewtonSolver; }
 
 	PX_FORCE_INLINE bool				solveFrictionEveryIteration() const { return mSolveFrictionEveryIteration; }
 
@@ -235,9 +238,11 @@ protected:
 
 private:
 	const bool	mSolveFrictionEveryIteration;
+	NewtonSolver* mNewtonSolver;
 
 	protected:
 
+	friend class PxsNewtonSolverTask;
 	friend class PxsSolverStartTask;
 	friend class PxsSolverAticulationsTask;
 	friend class PxsSolverSetupConstraintsTask;
