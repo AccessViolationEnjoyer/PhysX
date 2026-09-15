@@ -12,7 +12,7 @@ class BlockCholesky : public StorageCholesky
 	enum
 	{
 		MAX_PARALLEL_WORKERS = 8,
-		MIN_PARALLEL_FACTOR_UPDATES = 1000000,
+		MIN_PARALLEL_FACTOR_UPDATES = 500000,
 		MIN_PARALLEL_PIVOT_UPDATES = 256
 	};
 public:
