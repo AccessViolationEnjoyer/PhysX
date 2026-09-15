@@ -57,8 +57,17 @@ The maintained implementation lives under `source/lowleveldynamics/src/newton/`:
 
 The shared task pipeline selects
 `existing start task -> Newton island task -> existing end task` before PGS row packing.
-Independent islands run through PhysX's CPU dispatcher. A connected Newton island is one
-factorization task; its factorization is not split across workers.
+Independent islands run through PhysX's CPU dispatcher. A connected Newton island remains one
+PhysX task. Large Cholesky factors parallelize independent trailing block updates with up to eight
+OpenMP workers. The established left-looking factorization remains unchanged for smaller factors;
+the selection uses symbolic update work rather than body count. At most one island recruits an
+OpenMP team while other island tasks continue through the serial path.
+
+The numeric factorization cannot enqueue child PhysX tasks and wait for them because a
+`PxBaseTask::run()` implementation must not block. An asynchronous PhysX-task implementation would
+instead require splitting the solver into continuations. Keeping OpenMP private to
+`PhysXNewtonCore` avoids that pipeline change and does not add compiler flags or branches to PGS or
+TGS.
 
 Workspaces retain row, matrix, factor and result capacity between jobs. Warm starts store
 physical body corrections and transform angular corrections into the current inertia basis.
@@ -120,6 +129,13 @@ was 0.72 um. The conveyor maintained 0.2 m/s.
 
 Three alternating 1,000-frame PGS runs averaged 0.751 ms before this change and 0.730 ms after
 it. Their physical metrics were identical, so the difference is ordinary run-to-run variation.
+
+On the connected pile fixture, the one-million-update crossover keeps the 600-body factor on the
+serial path and selects the parallel factor at 700 bodies. Over frames 11-60, the 700-body profile
+solve span fell from 238.029 ms with one worker to 104.275 ms with eight. In Release, the 1,000-body
+full step fell from 660.640 ms to 277.669 ms. Both 1,000-body runs produced 6,769 contact pairs and
+matching settling metrics. The 500-body Release path remained serial and averaged 130.152 ms over
+frames 101-210.
 
 The pre-change source checkpoint is
 `backups/Newton-native-before-mujoco-contacts-2026-09-14_22-22-21.zip`, SHA-256

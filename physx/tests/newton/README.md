@@ -145,9 +145,10 @@ NewtonBenchmark input [seed|-] [solution|-] [repeats=8] [iterations=100] [check=
 ```
 
 For 500 boxes, repeat one 125-box fixture as four independent islands, with eight available
-workers. Parallelism is currently across islands; the sparse factorization within each island
-is single threaded. `ms` includes the first island's complete per-call solve work and result
-output writes. `wall_ms` includes dispatch, all island solves and result collection.
+workers. These factors remain below the internal parallel-work crossover, so parallelism in this
+fixture is across islands. Larger connected factors can also parallelize their trailing block
+updates with up to eight workers. `ms` includes the first island's complete per-call solve work and
+result output writes. `wall_ms` includes dispatch, all island solves and result collection.
 Optional residual diagnostics and file I/O are outside both timers. This is not a full PhysX
 simulation-step timing. `Settings.profile` enables detailed phase timers; the normal path measures
 only total solve time. Persistent worker storage is freed when its thread exits.
@@ -156,8 +157,9 @@ only total solve time. Persistent worker storage is freed when its thread exits.
 
 [pile/README.md](pile/README.md) documents the connected 125-, 500- and 1,000-box benchmark,
 including native MuJoCo comparisons, identical settled snapshots and one/eight-worker controls.
-Unlike the older four-island 500-box fixture, every box is part of one connected island.
-The prototype is still faster than native MuJoCo, but a single large island remains expensive.
+Unlike the older four-island 500-box fixture, every box is part of one connected island. Factors
+above the measured symbolic-work crossover use the parallel Cholesky path; smaller factors retain
+the original serial path.
 
 ## Full pallet conveyor scene
 

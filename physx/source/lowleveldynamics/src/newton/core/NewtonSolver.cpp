@@ -1108,7 +1108,7 @@ static SolveStatus::Enum solveNewtonInternal(const Problem& problem, const Setti
 	weights.resize(problem);
 	workspace.patchScratch.resize(problem);
 	inverseRoot = compliance.cwiseSqrt().cwiseInverse();
-	factor.beginSolve(settings.profile, continuation);
+	factor.beginSolve(settings.profile, continuation, settings.workers);
 	Clock::time_point evaluationStart = profileStart(settings.profile);
 	if(!evaluatePrimal(problem, velocity, inverseRoot, contactVelocity, impulse, gradient, &weights, workspace.patchScratch))
 		return SolveStatus::eNUMERICAL_FAILURE;

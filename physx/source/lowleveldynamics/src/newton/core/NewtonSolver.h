@@ -203,6 +203,7 @@ inline double elapsed(Clock::time_point start)
 struct Settings
 {
 	int iterations = 100;
+	int workers = 1;
 	double tolerance = 1.0e-8;
 	double lineTolerance = 0.01;
 	bool checkFactor = false;

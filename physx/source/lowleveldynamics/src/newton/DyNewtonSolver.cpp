@@ -355,17 +355,21 @@ static void storeNewtonCorrection(const newton::Result& result, const PxSolverBo
 	}
 }
 
-static bool solveNewtonSystem(NewtonSolver& solver, NewtonIslandWorkspace& workspace, const newton::Result* previous)
+static bool solveNewtonSystem(NewtonSolver& solver, NewtonIslandWorkspace& workspace, const newton::Result* previous, PxU32 workerCount)
 {
-	const newton::SolveStatus::Enum status = newton::solveNewton(workspace.problem, solver.settings,
+	newton::Settings settings = solver.settings;
+	settings.workers = int(workerCount);
+	const newton::SolveStatus::Enum status = newton::solveNewton(workspace.problem, settings,
 		workspace.result, workspace.numeric, previous);
 	return status == newton::SolveStatus::eSUCCESS || status == newton::SolveStatus::eITERATION_LIMIT;
 }
 
-static bool continueNewtonSystem(NewtonSolver& solver, NewtonIslandWorkspace& workspace)
+static bool continueNewtonSystem(NewtonSolver& solver, NewtonIslandWorkspace& workspace, PxU32 workerCount)
 {
 	workspace.previous = workspace.result;
-	const newton::SolveStatus::Enum status = newton::continueNewton(workspace.problem, solver.settings,
+	newton::Settings settings = solver.settings;
+	settings.workers = int(workerCount);
+	const newton::SolveStatus::Enum status = newton::continueNewton(workspace.problem, settings,
 		workspace.result, workspace.numeric, &workspace.previous);
 	if(status == newton::SolveStatus::eSUCCESS || status == newton::SolveStatus::eITERATION_LIMIT)
 		return true;
@@ -389,7 +393,7 @@ static void profileNewtonSolve(const NewtonIslandWorkspace& workspace, PxU64 con
 }
 
 static bool solveNewtonRows(NewtonSolver& solver, NewtonIslandWorkspace& workspace, DynamicsContext& context,
-	ThreadContext& threadContext, PxSolverBody* bodies, PxSolverBodyData* allBodyData, PxU32 firstBodyIndex, PxU32 bodyCount)
+	ThreadContext& threadContext, PxSolverBody* bodies, PxSolverBodyData* allBodyData, PxU32 firstBodyIndex, PxU32 bodyCount, PxU32 workerCount)
 {
 	PX_PROFILE_ZONE("Dynamics.newtonIsland", context.getContextId());
 	PxSolverBodyData* bodyData = allBodyData + firstBodyIndex + 1;
@@ -411,7 +415,7 @@ static bool solveNewtonRows(NewtonSolver& solver, NewtonIslandWorkspace& workspa
 	threadContext.mAxisConstraintCount = PxU32(workspace.problem.rowCount());
 	{
 		PX_PROFILE_ZONE("Dynamics.newtonSolve", context.getContextId());
-		if(!solveNewtonSystem(solver, workspace, &workspace.previous))
+		if(!solveNewtonSystem(solver, workspace, &workspace.previous, workerCount))
 		{
 			solver.report("Newton position solve failed.");
 			return false;
@@ -422,7 +426,7 @@ static bool solveNewtonRows(NewtonSolver& solver, NewtonIslandWorkspace& workspa
 			if(!updateNewtonDilatancyBias(workspace.contacts, workspace.problem,
 				workspace.result, velocityTolerance))
 				break;
-			if(!continueNewtonSystem(solver, workspace))
+			if(!continueNewtonSystem(solver, workspace, workerCount))
 			{
 				solver.report("Newton dilatancy correction failed.");
 				break;
@@ -451,7 +455,7 @@ static bool solveNewtonRows(NewtonSolver& solver, NewtonIslandWorkspace& workspa
 }
 
 bool solveNewtonIsland(NewtonSolver& solver, DynamicsContext& context, ThreadContext& threadContext,
-	PxSolverBody* bodies, PxSolverBodyData* bodyData, PxU32 firstBodyIndex, PxU32 bodyCount)
+	PxSolverBody* bodies, PxSolverBodyData* bodyData, PxU32 firstBodyIndex, PxU32 bodyCount, PxU32 workerCount)
 {
 	NewtonIslandWorkspace* workspace = NULL;
 	try
@@ -462,7 +466,7 @@ bool solveNewtonIsland(NewtonSolver& solver, DynamicsContext& context, ThreadCon
 			solver.report("Newton workspace allocation failed.");
 			return false;
 		}
-		const bool success = solveNewtonRows(solver, *workspace, context, threadContext, bodies, bodyData, firstBodyIndex, bodyCount);
+		const bool success = solveNewtonRows(solver, *workspace, context, threadContext, bodies, bodyData, firstBodyIndex, bodyCount, workerCount);
 		solver.release(workspace);
 		return success;
 	}
