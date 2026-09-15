@@ -9,7 +9,8 @@ class ParallelExecutor
 {
 public:
 	virtual ~ParallelExecutor() {}
-	virtual int workerCount() = 0;
+	virtual int workerCapacity() const = 0;
+	virtual int acquireWorkerCount() = 0;
 	virtual void parallelFor(int count, ParallelFunction function, void* context) = 0;
 	virtual void endParallelRegion() = 0;
 };

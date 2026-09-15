@@ -12,7 +12,8 @@ class BlockCholesky : public StorageCholesky
 	};
 public:
 	bool usesBlocks() const { return m_useBlocks; }
-	void setParallelExecutor(ParallelExecutor* executor) { m_parallelExecutor = executor; }
+	int parallelWorkerCount() const { return m_parallelWorkers; }
+	void setParallelExecutor(ParallelExecutor* executor) { m_parallelExecutor = executor; m_parallelWorkers = 0; }
 
 	void analyzePattern(const SparseStorage& ap, bool doLDLT)
 	{
@@ -117,7 +118,7 @@ public:
 		}
 		// The right-looking factor has higher serial cost and extra symbolic
 		// storage. Use it only when parallel work repays both overheads.
-		if(m_updateOuter[bodies] >= MIN_PARALLEL_FACTOR_UPDATES && m_parallelExecutor != NULL && m_parallelExecutor->workerCount() > 1)
+		if(m_updateOuter[bodies] >= MIN_PARALLEL_FACTOR_UPDATES && m_parallelExecutor != NULL && m_parallelExecutor->workerCapacity() > 1)
 		{
 			m_updateTargets.resize(m_updateOuter[bodies]);
 			for(int body = 0; body < bodies; ++body)
@@ -180,7 +181,12 @@ public:
 		if(!m_useBlocks)
 			return StorageCholesky::factorize<false>(ap);
 		if(m_parallelExecutor != NULL && !m_updateTargets.empty())
-			return factorizeParallel(ap);
+		{
+			if(m_parallelWorkers == 0)
+				m_parallelWorkers = m_parallelExecutor->acquireWorkerCount();
+			if(m_parallelWorkers > 1)
+				return factorizeParallel(ap);
+		}
 		const int bodies = int(ap.cols()) / 6;
 		for(int body = 0; body < bodies; ++body)
 			m_work[body].setZero();
@@ -314,6 +320,7 @@ private:
 			if(factor.info() != Eigen::Success)
 			{
 				m_parallelExecutor->endParallelRegion();
+				m_parallelWorkers = 1;
 				return scalarFallback(ap);
 			}
 			const Block lower = factor.matrixL();
@@ -372,6 +379,7 @@ private:
 
 	bool m_useBlocks = false;
 	ParallelExecutor* m_parallelExecutor = NULL;
+	int m_parallelWorkers = 0;
 	std::vector<int> m_parent, m_tags, m_counts, m_pattern;
 	std::vector<int> m_blockOuter, m_blockRows, m_blockColumns, m_rowOuter, m_rowEntries;
 	std::vector<int> m_updateOuter, m_updateTargets, m_inputBlocks;

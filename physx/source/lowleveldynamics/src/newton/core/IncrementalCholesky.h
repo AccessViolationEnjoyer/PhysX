@@ -103,6 +103,11 @@ public:
 		// This changes only how the same target Hessian is factorized. The
 		// estimate is deterministic and depends on the sparse pattern and
 		// current changed contacts, never wall time or a scene identifier.
+		// Matrix assembly remains serial; only discount the numeric factor work.
+		double refactorWork = m_refactorWork;
+		const int parallelWorkers = m_factor.parallelWorkerCount();
+		if(parallelWorkers > 1)
+			refactorWork -= m_factorWork * double(parallelWorkers - 1) / parallelWorkers;
 		double updateWork = 0.0;
 		for(const RankUpdate& update : m_updates)
 		{
@@ -113,7 +118,7 @@ public:
 					first = std::min(first, m_permutation[6 * contact.body[end]]);
 			if(first < m_size)
 				updateWork += m_reachWork[first];
-			if(updateWork > m_refactorWork)
+			if(updateWork > refactorWork)
 			{
 				result.updateMs += profileElapsed(m_profile, start);
 				return refactor(problem, weights, result);
@@ -128,7 +133,7 @@ public:
 					first = std::min(first, m_permutation[6 * contact.body[end]]);
 			if(first < m_size)
 				updateWork += m_reachWork[first];
-			if(updateWork > m_refactorWork)
+			if(updateWork > refactorWork)
 			{
 				result.updateMs += profileElapsed(m_profile, start);
 				return refactor(problem, weights, result);

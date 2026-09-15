@@ -92,7 +92,12 @@ public:
 			mProgress[worker].value = 0;
 	}
 
-	virtual int workerCount() PX_OVERRIDE
+	virtual int workerCapacity() const PX_OVERRIDE
+	{
+		return int(mWorkerCount);
+	}
+
+	virtual int acquireWorkerCount() PX_OVERRIDE
 	{
 		if(mWorkerCount < 2)
 			return 1;
