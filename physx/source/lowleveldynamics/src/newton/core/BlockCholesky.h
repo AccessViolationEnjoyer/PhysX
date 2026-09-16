@@ -1,5 +1,5 @@
 // Six-coordinate supernodal LLT for the solver's complete rigid-body blocks.
-// Scalar CSC output preserves the existing solves and signed-update path.
+// Scalar storage is exported only when signed rank updates invalidate the retained blocks.
 namespace newton
 {
 class BlockCholesky : public StorageCholesky
@@ -7,13 +7,44 @@ class BlockCholesky : public StorageCholesky
 	typedef Eigen::Matrix<double, 6, 6> Block;
 	enum
 	{
-		MIN_PARALLEL_FACTOR_UPDATES = 500000,
-		MIN_PARALLEL_PIVOT_UPDATES = 256
+		MIN_PARALLEL_FACTOR_UPDATES = 60000,
+		MIN_PARALLEL_PIVOT_UPDATES = 64,
+		MIN_PARALLEL_SOLVE_UPDATES = 1000000
 	};
 public:
 	bool usesBlocks() const { return m_useBlocks; }
+	bool hasCurrentBlocks() const { return m_blocksCurrent; }
 	int parallelWorkerCount() const { return m_parallelWorkers; }
 	void setParallelExecutor(ParallelExecutor* executor) { m_parallelExecutor = executor; m_parallelWorkers = 0; }
+
+	void beginScalarUpdates()
+	{
+		ensureScalarFactor();
+		m_blocksCurrent = false;
+	}
+
+	void solveBlocks(double* solution)
+	{
+		if(m_parallelExecutor == NULL || m_parallelWorkers < 2 || m_updateOuter.back() < MIN_PARALLEL_SOLVE_UPDATES)
+		{
+			solveBlocksSerial(solution);
+			return;
+		}
+		ParallelSolve solve;
+		solve.factor = this;
+		solve.solution = solution;
+		const int levels = int(m_solveLevelOuter.size()) - 1;
+		for(int level = 0; level < levels; ++level)
+		{
+			solve.first = m_solveLevelOuter[level];
+			m_parallelExecutor->parallelFor(m_solveLevelOuter[level + 1] - solve.first, solveForwardParallel, &solve);
+		}
+		for(int level = levels - 1; level >= 0; --level)
+		{
+			solve.first = m_solveLevelOuter[level];
+			m_parallelExecutor->parallelFor(m_solveLevelOuter[level + 1] - solve.first, solveBackwardParallel, &solve);
+		}
+	}
 
 	void analyzePattern(const SparseStorage& ap, bool doLDLT)
 	{
@@ -109,6 +140,25 @@ public:
 			}
 		}
 		m_rowOuter[bodies] = int(m_rowEntries.size());
+		m_solveLevels.resize(bodies);
+		int levelCount = 0;
+		for(int body = 0; body < bodies; ++body)
+		{
+			int level = 0;
+			for(int entry = m_rowOuter[body]; entry < m_rowOuter[body + 1]; ++entry)
+				level = std::max(level, m_solveLevels[m_blockColumns[m_rowEntries[entry]]] + 1);
+			m_solveLevels[body] = level;
+			levelCount = std::max(levelCount, level + 1);
+		}
+		m_solveLevelOuter.assign(levelCount + 1, 0);
+		for(int body = 0; body < bodies; ++body)
+			++m_solveLevelOuter[m_solveLevels[body] + 1];
+		for(int level = 0; level < levelCount; ++level)
+			m_solveLevelOuter[level + 1] += m_solveLevelOuter[level];
+		m_solveBodies.resize(bodies);
+		m_counts.assign(m_solveLevelOuter.begin(), m_solveLevelOuter.end() - 1);
+		for(int body = 0; body < bodies; ++body)
+			m_solveBodies[m_counts[m_solveLevels[body]]++] = body;
 		m_updateOuter.resize(bodies + 1);
 		m_updateOuter[0] = 0;
 		for(int body = 0; body < bodies; ++body)
@@ -148,8 +198,8 @@ public:
 			m_inputBlocks.clear();
 		}
 
-		// Scalar storage is an export view for the established triangular
-		// solve and rank-update kernels; its sparsity pattern is invariant.
+		// Scalar storage is an export view for signed rank updates; its
+		// sparsity pattern is invariant.
 		const int size = 6 * bodies;
 		m_matrix.resize(size, size);
 		int entries = 0;
@@ -179,7 +229,11 @@ public:
 	{
 		static_assert(!DoLDLT, "BlockCholesky implements LLT");
 		if(!m_useBlocks)
+		{
+			m_blocksCurrent = false;
+			m_scalarCurrent = true;
 			return StorageCholesky::factorize<false>(ap);
+		}
 		if(m_parallelExecutor != NULL && !m_updateTargets.empty())
 		{
 			if(m_parallelWorkers == 0)
@@ -242,18 +296,8 @@ public:
 				return scalarFallback(ap);
 			m_blocks[m_blockOuter[k]] = factor.matrixL();
 		}
-		double* values = m_matrix.valuePtr();
-		for(int body = 0; body < bodies; ++body)
-			for(int axis = 0; axis < 6; ++axis)
-			{
-				int entry = m_matrix.outerIndexPtr()[6 * body + axis];
-				const Block& diagonal = m_blocks[m_blockOuter[body]];
-				for(int row = axis; row < 6; ++row)
-					values[entry++] = diagonal(row, axis);
-				for(int block = m_blockOuter[body] + 1; block < m_blockOuter[body + 1]; ++block)
-					for(int row = 0; row < 6; ++row)
-						values[entry++] = m_blocks[block](row, axis);
-			}
+		m_blocksCurrent = true;
+		m_scalarCurrent = false;
 		return true;
 	}
 
@@ -266,6 +310,75 @@ private:
 		int end;
 		int count;
 	};
+
+	struct ParallelSolve
+	{
+		BlockCholesky* factor;
+		double* solution;
+		int first;
+	};
+
+	void solveForwardBody(double* solution, int body) const
+	{
+		Eigen::Map<Vec6> mapped(solution + 6 * body);
+		Vec6 current = mapped;
+		for(int entry = m_rowOuter[body]; entry < m_rowOuter[body + 1]; ++entry)
+		{
+			const int block = m_rowEntries[entry];
+			const Eigen::Map<const Vec6> solved(solution + 6 * m_blockColumns[block]);
+			current.noalias() -= m_blocks[block] * solved;
+		}
+		const Block& diagonal = m_blocks[m_blockOuter[body]];
+		for(int column = 0; column < 6; ++column)
+		{
+			current[column] /= diagonal(column, column);
+			for(int row = column + 1; row < 6; ++row)
+				current[row] -= diagonal(row, column) * current[column];
+		}
+		mapped = current;
+	}
+
+	void solveBackwardBody(double* solution, int body) const
+	{
+		Eigen::Map<Vec6> mapped(solution + 6 * body);
+		Vec6 current = mapped;
+		for(int block = m_blockOuter[body] + 1; block < m_blockOuter[body + 1]; ++block)
+		{
+			const Eigen::Map<const Vec6> solved(solution + 6 * m_blockRows[block]);
+			current.noalias() -= m_blocks[block].transpose() * solved;
+		}
+		const Block& diagonal = m_blocks[m_blockOuter[body]];
+		for(int column = 5; column >= 0; --column)
+		{
+			for(int row = column + 1; row < 6; ++row)
+				current[column] -= diagonal(row, column) * current[row];
+			current[column] /= diagonal(column, column);
+		}
+		mapped = current;
+	}
+
+	void solveBlocksSerial(double* solution) const
+	{
+		const int bodies = int(m_blockOuter.size()) - 1;
+		for(int body = 0; body < bodies; ++body)
+			solveForwardBody(solution, body);
+		for(int body = bodies - 1; body >= 0; --body)
+			solveBackwardBody(solution, body);
+	}
+
+	static void solveForwardParallel(void* context, int index)
+	{
+		ParallelSolve& solve = *static_cast<ParallelSolve*>(context);
+		const int body = solve.factor->m_solveBodies[solve.first + index];
+		solve.factor->solveForwardBody(solve.solution, body);
+	}
+
+	static void solveBackwardParallel(void* context, int index)
+	{
+		ParallelSolve& solve = *static_cast<ParallelSolve*>(context);
+		const int body = solve.factor->m_solveBodies[solve.first + index];
+		solve.factor->solveBackwardBody(solve.solution, body);
+	}
 
 	int findBlock(int column, int row) const
 	{
@@ -306,6 +419,41 @@ private:
 		update.factor->updateTrailingColumn(update.body, update.first, update.end, update.count, column);
 	}
 
+	void exportBody(int body)
+	{
+		double* values = m_matrix.valuePtr();
+		for(int axis = 0; axis < 6; ++axis)
+		{
+			int entry = m_matrix.outerIndexPtr()[6 * body + axis];
+			const Block& diagonal = m_blocks[m_blockOuter[body]];
+			for(int row = axis; row < 6; ++row)
+				values[entry++] = diagonal(row, axis);
+			for(int block = m_blockOuter[body] + 1; block < m_blockOuter[body + 1]; ++block)
+				for(int row = 0; row < 6; ++row)
+					values[entry++] = m_blocks[block](row, axis);
+		}
+	}
+
+	static void exportBodyParallel(void* context, int body)
+	{
+		static_cast<BlockCholesky*>(context)->exportBody(body);
+	}
+
+	void ensureScalarFactor()
+	{
+		if(m_scalarCurrent)
+			return;
+		const int bodies = int(m_blockOuter.size()) - 1;
+		if(m_parallelExecutor != NULL && m_parallelWorkers > 1)
+		{
+			m_parallelExecutor->parallelFor(bodies, exportBodyParallel, this);
+		}
+		else
+			for(int body = 0; body < bodies; ++body)
+				exportBody(body);
+		m_scalarCurrent = true;
+	}
+
 	bool factorizeParallel(const SparseStorage& ap)
 	{
 		const int bodies = int(ap.cols()) / 6;
@@ -319,7 +467,6 @@ private:
 			Eigen::LLT<Block, Eigen::Lower> factor(m_blocks[m_blockOuter[body]]);
 			if(factor.info() != Eigen::Success)
 			{
-				m_parallelExecutor->endParallelRegion();
 				m_parallelWorkers = 1;
 				return scalarFallback(ap);
 			}
@@ -353,19 +500,8 @@ private:
 				for(int column = 0; column < count; ++column)
 					updateTrailingColumn(body, first, end, count, column);
 		}
-		m_parallelExecutor->endParallelRegion();
-		double* values = m_matrix.valuePtr();
-		for(int body = 0; body < bodies; ++body)
-			for(int axis = 0; axis < 6; ++axis)
-			{
-				int entry = m_matrix.outerIndexPtr()[6 * body + axis];
-				const Block& diagonal = m_blocks[m_blockOuter[body]];
-				for(int row = axis; row < 6; ++row)
-					values[entry++] = diagonal(row, axis);
-				for(int block = m_blockOuter[body] + 1; block < m_blockOuter[body + 1]; ++block)
-					for(int row = 0; row < 6; ++row)
-						values[entry++] = m_blocks[block](row, axis);
-			}
+		m_blocksCurrent = true;
+		m_scalarCurrent = false;
 		return true;
 	}
 
@@ -374,14 +510,19 @@ private:
 		// The established scalar LLT remains available if different rounding
 		// of dense block arithmetic encounters a nonpositive pivot.
 		StorageCholesky::analyzePattern(ap, false);
+		m_blocksCurrent = false;
+		m_scalarCurrent = true;
 		return StorageCholesky::factorize<false>(ap);
 	}
 
 	bool m_useBlocks = false;
+	bool m_blocksCurrent = false;
+	bool m_scalarCurrent = false;
 	ParallelExecutor* m_parallelExecutor = NULL;
 	int m_parallelWorkers = 0;
 	std::vector<int> m_parent, m_tags, m_counts, m_pattern;
 	std::vector<int> m_blockOuter, m_blockRows, m_blockColumns, m_rowOuter, m_rowEntries;
+	std::vector<int> m_solveLevels, m_solveLevelOuter, m_solveBodies;
 	std::vector<int> m_updateOuter, m_updateTargets, m_inputBlocks;
 	std::vector<Block> m_blocks, m_work;
 };

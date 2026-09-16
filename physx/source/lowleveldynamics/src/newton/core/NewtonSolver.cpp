@@ -821,7 +821,7 @@ static bool evaluateImpulses(const Problem& problem, ConstVector contactVelocity
 
 // These calls use distinct solver-owned input/output buffers. The prepared
 // Jacobian is compressed CSC with strictly increasing row indices per column.
-static void multiplyJacobianCsc(const Problem& problem, ConstVector vector, MutableVector product)
+static void multiplyJacobianCscSerial(const Problem& problem, ConstVector vector, MutableVector product)
 {
 	const double* EIGEN_RESTRICT values = problem.jacobian.valuePtr();
 	const int* EIGEN_RESTRICT indices = problem.jacobian.innerIndexPtr();
@@ -839,33 +839,125 @@ static void multiplyJacobianCsc(const Problem& problem, ConstVector vector, Muta
 	}
 }
 
-static void evaluatePrimalGradientCsc(const Problem& problem, ConstVector velocity,
-	ConstVector impulse, MutableVector gradient)
+struct ContactVelocityEvaluation
+{
+	const Problem* problem;
+	const double* velocity;
+	double* contactVelocity;
+	int chunks;
+};
+
+static void evaluateContactVelocityChunk(void* context, int index)
+{
+	ContactVelocityEvaluation& evaluation = *static_cast<ContactVelocityEvaluation*>(context);
+	const int count = int(evaluation.problem->contacts.size());
+	const int firstContact = count * index / evaluation.chunks;
+	const int lastContact = count * (index + 1) / evaluation.chunks;
+	for(int i = firstContact; i < lastContact; ++i)
+	{
+		const CompactContact& contact = evaluation.problem->contacts[i];
+		const int firstEnd = contact.body[1] >= 0 && (contact.body[0] < 0 || contact.body[1] < contact.body[0]) ? 1 : 0;
+		if(contact.rowCount() == 1)
+		{
+			double value = 0.0;
+			for(int endpoint = 0; endpoint < 2; ++endpoint)
+			{
+				const int end = endpoint == 0 ? firstEnd : 1 - firstEnd;
+				if(contact.body[end] >= 0)
+					value += contact.jacobian[end].dot(Eigen::Map<const Vec6>(evaluation.velocity + 6 * contact.body[end]));
+			}
+			evaluation.contactVelocity[contact.row] = value;
+		}
+		else
+		{
+			Vec3 value = Vec3::Zero();
+			const ContactBlock& block = evaluation.problem->block(contact);
+			for(int endpoint = 0; endpoint < 2; ++endpoint)
+			{
+				const int end = endpoint == 0 ? firstEnd : 1 - firstEnd;
+				if(contact.body[end] < 0)
+					continue;
+				const Eigen::Map<const Vec6> velocity(evaluation.velocity + 6 * contact.body[end]);
+				value.head<2>().noalias() += block.tangentJacobian[end] * velocity;
+				value[2] += contact.jacobian[end].dot(velocity);
+			}
+			Eigen::Map<Vec3>(evaluation.contactVelocity + contact.row) = value;
+		}
+	}
+}
+
+static void multiplyJacobianCsc(const Problem& problem, ConstVector vector, MutableVector product,
+	ParallelExecutor* parallelExecutor)
+{
+	if(parallelExecutor != NULL && problem.bodyCount() >= 500)
+	{
+		const int workers = parallelExecutor->acquireWorkerCount();
+		if(workers > 1)
+		{
+			ContactVelocityEvaluation evaluation = { &problem, vector.data(), product.data(), 4 * workers };
+			parallelExecutor->parallelFor(evaluation.chunks, evaluateContactVelocityChunk, &evaluation);
+			return;
+		}
+	}
+	multiplyJacobianCscSerial(problem, vector, product);
+}
+
+struct GradientEvaluation
+{
+	const Problem* problem;
+	const double* impulse;
+	const double* velocity;
+	double* gradient;
+	int chunks;
+};
+
+static void evaluateGradientColumns(const Problem& problem, const double* impulse,
+	const double* velocity, double* gradient, int first, int last)
 {
 	const double* EIGEN_RESTRICT values = problem.jacobian.valuePtr();
 	const int* EIGEN_RESTRICT indices = problem.jacobian.innerIndexPtr();
 	const int* EIGEN_RESTRICT offsets = problem.jacobian.outerIndexPtr();
-	const double* EIGEN_RESTRICT input = impulse.data();
-	const double* EIGEN_RESTRICT primal = velocity.data();
-	double* EIGEN_RESTRICT output = gradient.data();
-	for(int column = 0; column < problem.jacobian.cols(); ++column)
+	for(int column = first; column < last; ++column)
 	{
 		double value = 0.0;
 		for(int entry = offsets[column]; entry < offsets[column + 1]; ++entry)
-			value += values[entry] * input[indices[entry]];
-		// Fuse only the final store, retaining the complete ordered dot product.
-		output[column] = primal[column] - value;
+			value += values[entry] * impulse[indices[entry]];
+		gradient[column] = velocity[column] - value;
 	}
 }
 
-static bool evaluatePrimal(const Problem& problem, ConstVector velocity, ConstVector inverseRoot,
-	MutableVector contactVelocity, MutableVector impulse, MutableVector gradient, Curvature* weights, PatchScratch& scratch)
+static void evaluateGradientChunk(void* context, int index)
 {
-	multiplyJacobianCsc(problem, velocity, contactVelocity);
+	GradientEvaluation& evaluation = *static_cast<GradientEvaluation*>(context);
+	const int columns = int(evaluation.problem->jacobian.cols());
+	const int first = columns * index / evaluation.chunks;
+	const int last = columns * (index + 1) / evaluation.chunks;
+	evaluateGradientColumns(*evaluation.problem, evaluation.impulse, evaluation.velocity, evaluation.gradient, first, last);
+}
+
+static void evaluatePrimalGradientCsc(const Problem& problem, ConstVector velocity,
+	ConstVector impulse, MutableVector gradient, ParallelExecutor* parallelExecutor)
+{
+	if(parallelExecutor != NULL && problem.bodyCount() >= 500)
+	{
+		const int workers = parallelExecutor->acquireWorkerCount();
+		if(workers > 1)
+		{
+			GradientEvaluation evaluation = { &problem, impulse.data(), velocity.data(), gradient.data(), 4 * workers };
+			parallelExecutor->parallelFor(evaluation.chunks, evaluateGradientChunk, &evaluation);
+			return;
+		}
+	}
+	evaluateGradientColumns(problem, impulse.data(), velocity.data(), gradient.data(), 0, int(problem.jacobian.cols()));
+}
+static bool evaluatePrimal(const Problem& problem, ConstVector velocity, ConstVector inverseRoot,
+	MutableVector contactVelocity, MutableVector impulse, MutableVector gradient, Curvature* weights, PatchScratch& scratch, ParallelExecutor* parallelExecutor)
+{
+	multiplyJacobianCsc(problem, velocity, contactVelocity, parallelExecutor);
 	contactVelocity += problem.freeVelocity;
 	if(!evaluateImpulses(problem, contactVelocity, inverseRoot, impulse, weights, scratch))
 		return false;
-	evaluatePrimalGradientCsc(problem, velocity, impulse, gradient);
+	evaluatePrimalGradientCsc(problem, velocity, impulse, gradient, parallelExecutor);
 	return true;
 }
 
@@ -1000,11 +1092,11 @@ static ConvexLineValue evaluateConvexLine(const Problem& problem, ConstVector co
 }
 
 static double searchConvex(const Problem& problem, ConstVector velocity, ConstVector direction,
-	ConstVector contactVelocity, ConstVector inverseRoot, MutableVector contactDirection, int& evaluations, PatchScratch& scratch, double slopeTolerance = 0.0)
+	ConstVector contactVelocity, ConstVector inverseRoot, MutableVector contactDirection, int& evaluations, PatchScratch& scratch, ParallelExecutor* parallelExecutor, double slopeTolerance = 0.0)
 {
 	// Reuse the contact velocity from the current objective/gradient evaluation.
 	ConstVector compliance = problem.regularization;
-	multiplyJacobianCsc(problem, direction, contactDirection);
+	multiplyJacobianCsc(problem, direction, contactDirection, parallelExecutor);
 	const double velocitySlope = velocity.dot(direction), directionNorm = direction.squaredNorm();
 	const ConvexLineValue initial = evaluateConvexLine(problem, contactVelocity, contactDirection, compliance, inverseRoot,
 		velocitySlope, directionNorm, 0.0, scratch);
@@ -1110,7 +1202,7 @@ static SolveStatus::Enum solveNewtonInternal(const Problem& problem, const Setti
 	inverseRoot = compliance.cwiseSqrt().cwiseInverse();
 	factor.beginSolve(settings.profile, continuation, settings.parallelExecutor);
 	Clock::time_point evaluationStart = profileStart(settings.profile);
-	if(!evaluatePrimal(problem, velocity, inverseRoot, contactVelocity, impulse, gradient, &weights, workspace.patchScratch))
+	if(!evaluatePrimal(problem, velocity, inverseRoot, contactVelocity, impulse, gradient, &weights, workspace.patchScratch, settings.parallelExecutor))
 		return SolveStatus::eNUMERICAL_FAILURE;
 	if(previous)
 	{
@@ -1130,7 +1222,7 @@ static SolveStatus::Enum solveNewtonInternal(const Problem& problem, const Setti
 		if(warmCost > coldCost)
 		{
 			velocity.setZero();
-			if(!evaluatePrimal(problem, velocity, inverseRoot, contactVelocity, impulse, gradient, &weights, workspace.patchScratch))
+			if(!evaluatePrimal(problem, velocity, inverseRoot, contactVelocity, impulse, gradient, &weights, workspace.patchScratch, settings.parallelExecutor))
 				return SolveStatus::eNUMERICAL_FAILURE;
 		}
 	}
@@ -1179,7 +1271,7 @@ static SolveStatus::Enum solveNewtonInternal(const Problem& problem, const Setti
 			direction = -gradient;
 		}
 		const Clock::time_point lineStart = profileStart(settings.profile);
-		const double alpha = searchConvex(problem, velocity, direction, contactVelocity, inverseRoot, workspace.contactDirection, result.lineSearchEvaluations, workspace.patchScratch,
+		const double alpha = searchConvex(problem, velocity, direction, contactVelocity, inverseRoot, workspace.contactDirection, result.lineSearchEvaluations, workspace.patchScratch, settings.parallelExecutor,
 			stopping.lineThreshold(problem, direction));
 		result.lineSearchMs += profileElapsed(settings.profile, lineStart);
 		if(!std::isfinite(alpha))
@@ -1193,7 +1285,7 @@ static SolveStatus::Enum solveNewtonInternal(const Problem& problem, const Setti
 		velocity.swap(nextVelocity);
 		result.iterations = iteration + 1;
 		evaluationStart = profileStart(settings.profile);
-		if(!evaluatePrimal(problem, velocity, inverseRoot, contactVelocity, impulse, gradient, &weights, workspace.patchScratch))
+		if(!evaluatePrimal(problem, velocity, inverseRoot, contactVelocity, impulse, gradient, &weights, workspace.patchScratch, settings.parallelExecutor))
 			return SolveStatus::eNUMERICAL_FAILURE;
 		result.evaluationMs += profileElapsed(settings.profile, evaluationStart);
 		const double nextCost = primalCost(problem, velocity, contactVelocity, impulse);

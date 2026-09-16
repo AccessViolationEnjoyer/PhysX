@@ -83,7 +83,7 @@ class NewtonParallelExecutor : public newton::ParallelExecutor
 public:
 	NewtonParallelExecutor(DynamicsContext& context, PxBaseTask* continuation, PxU32 workerCount) :
 		mContext(context), mContinuation(continuation),
-		mWorkerCount(PxMin(workerCount, PxU32(MAX_WORKERS))), mCount(0), mFunction(NULL), mFunctionContext(NULL),
+		mWorkerCount(PxMin(workerCount, PxU32(MAX_WORKERS))), mCount(0), mBatchSize(1), mFunction(NULL), mFunctionContext(NULL),
 		mFinish(0), mAcquired(false), mStarted(false)
 	{
 		mGeneration.value = 0;
@@ -116,6 +116,7 @@ public:
 		if(!mStarted)
 			startWorkers();
 		mCount = count;
+		mBatchSize = PxMax(1, count / (int(mWorkerCount) * 8));
 		mFunction = function;
 		mFunctionContext = context;
 		mNext.value = 0;
@@ -187,11 +188,13 @@ private:
 
 	void runWork()
 	{
-		PxI32 index = PxAtomicIncrement(&mNext.value) - 1;
-		while(index < mCount)
+		PxI32 first = PxAtomicAdd(&mNext.value, mBatchSize) - mBatchSize;
+		while(first < mCount)
 		{
-			mFunction(mFunctionContext, index);
-			index = PxAtomicIncrement(&mNext.value) - 1;
+			const PxI32 last = PxMin(first + mBatchSize, mCount);
+			for(PxI32 index = first; index < last; ++index)
+				mFunction(mFunctionContext, index);
+			first = PxAtomicAdd(&mNext.value, mBatchSize) - mBatchSize;
 		}
 	}
 
@@ -199,6 +202,7 @@ private:
 	PxBaseTask* mContinuation;
 	PxU32 mWorkerCount;
 	PxI32 mCount;
+	PxI32 mBatchSize;
 	newton::ParallelFunction mFunction;
 	void* mFunctionContext;
 	Counter mGeneration;

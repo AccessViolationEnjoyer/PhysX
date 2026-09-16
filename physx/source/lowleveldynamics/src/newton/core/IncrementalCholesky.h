@@ -1,3 +1,5 @@
+#include "NewtonMetis.h"
+
 // Internal factor implementation. Included by NewtonSolver.cpp.
 // Signed rank updates operate directly on the retained Eigen-format factor.
 class IncrementalCholesky
@@ -141,6 +143,8 @@ public:
 		}
 		if(m_updates.empty() && m_patchUpdates.empty())
 			++result.reusedFactors;
+		else
+			m_factor.beginScalarUpdates();
 		// Add positive changes before downdates. Every intermediate matrix
 		// then remains positive definite whenever the target Hessian is SPD.
 		for(int pass = 0; pass < 2; ++pass)
@@ -188,8 +192,13 @@ public:
 		MutableVector solution = Eigen::Map<Vector>(m_solution.data(), m_size);
 		for(int row = 0; row < m_size; ++row)
 			solution[m_permutation[row]] = -gradient[row];
-		solveForwardBlocks(solution.data());
-		solveBackwardPackets(solution.data());
+		if(m_factor.hasCurrentBlocks())
+			m_factor.solveBlocks(solution.data());
+		else
+		{
+			solveForwardBlocks(solution.data());
+			solveBackwardPackets(solution.data());
+		}
 		for(int row = 0; row < m_size; ++row)
 			direction[row] = solution[m_permutation[row]];
 	}
@@ -379,30 +388,43 @@ private:
 			for(Sparse::InnerIterator entry(matrix, 6 * body); entry; ++entry)
 			{
 				const int row = int(entry.row()) / 6;
-				if(row != previous)
+				if(row != body && row != previous)
 				{
 					m_bodyEdges.push_back(BodyPair(body, row));
-					if(row != body)
-						m_bodyEdges.push_back(BodyPair(row, body));
-					previous = row;
+					m_bodyEdges.push_back(BodyPair(row, body));
 				}
+				previous = row;
 			}
 		}
 		std::sort(m_bodyEdges.begin(), m_bodyEdges.end());
-		m_bodyGraph.resize(bodies, bodies);
-		m_bodyGraph.resizeNonZeros(m_bodyEdges.size());
+		m_metisOuter.resize(bodies + 1);
+		m_metisInner.resize(m_bodyEdges.size());
 		int edge = 0;
 		for(int body = 0; body < bodies; ++body)
 		{
-			m_bodyGraph.outerIndexPtr()[body] = edge;
+			m_metisOuter[body] = idx_t(edge);
 			while(edge < int(m_bodyEdges.size()) && m_bodyEdges[edge].first == body)
 			{
-				m_bodyGraph.innerIndexPtr()[edge] = m_bodyEdges[edge].second;
+				m_metisInner[edge] = idx_t(m_bodyEdges[edge].second);
 				++edge;
 			}
 		}
-		m_bodyGraph.outerIndexPtr()[bodies] = edge;
-		Eigen::internal::orderSparse(m_bodyGraph, m_bodyOrder, m_orderingWorkspace);
+		m_metisOuter[bodies] = idx_t(edge);
+		m_bodyOrder.resize(bodies);
+		m_metisInverse.resize(bodies);
+		if(bodies > 1)
+		{
+			idx_t count = idx_t(bodies);
+			idx_t options[METIS_NOPTIONS];
+			Newton_METIS_SetDefaultOptions(options);
+			const int result = Newton_METIS_NodeND(&count, m_metisOuter.data(), m_metisInner.data(), NULL,
+				options, m_bodyOrder.data(), m_metisInverse.data());
+			if(result != METIS_OK)
+				for(int body = 0; body < bodies; ++body)
+					m_bodyOrder[body] = body;
+		}
+		else if(bodies == 1)
+			m_bodyOrder[0] = 0;
 		m_permutation.resize(matrix.cols());
 		for(int body = 0; body < bodies; ++body)
 			for(int axis = 0; axis < 6; ++axis)
@@ -555,9 +577,9 @@ private:
 	int m_size;
 	bool m_profile;
 	BlockCholesky m_factor;
-	SparseStorage m_bodyGraph;
 	std::vector<BodyPair> m_bodyEdges;
-	std::vector<int> m_bodyOrder, m_orderingWorkspace, m_permutation;
+	std::vector<int> m_bodyOrder, m_permutation;
+	std::vector<idx_t> m_metisOuter, m_metisInner, m_metisInverse;
 	HessianStorage m_hessian;
 	SparseStorage m_permuted;
 	struct PermutedEntry
