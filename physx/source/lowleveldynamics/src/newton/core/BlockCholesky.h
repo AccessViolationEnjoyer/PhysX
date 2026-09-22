@@ -14,6 +14,7 @@ class BlockCholesky : public StorageCholesky
 public:
 	bool usesBlocks() const { return m_useBlocks; }
 	bool hasCurrentBlocks() const { return m_blocksCurrent; }
+	void swapInverseDiagonal(std::vector<double>& inverseDiagonal) { m_inverseDiagonal.swap(inverseDiagonal); }
 	int parallelWorkerCount() const { return m_parallelWorkers; }
 	void setParallelExecutor(ParallelExecutor* executor) { m_parallelExecutor = executor; m_parallelWorkers = 0; }
 
@@ -109,9 +110,17 @@ public:
 		m_blockColumns.resize(blocks);
 		m_blocks.resize(blocks);
 		m_work.resize(bodies);
+		m_inverseDiagonal.resize(6 * bodies);
 		for(int body = 0; body < bodies; ++body)
 		{
 			m_work[body].setZero();
+		}
+		m_inputCoordinates.resize(ap.nonZeros());
+		const int* inputInner = ap.innerIndexPtr();
+		for(int entry = 0; entry < ap.nonZeros(); ++entry)
+		{
+			const int row = inputInner[entry];
+			m_inputCoordinates[entry] = (row / 6 << 3) | row % 6;
 		}
 		m_rowEntries.clear();
 		reserveStorage(m_rowEntries, std::uint32_t(blocks - bodies));
@@ -211,7 +220,6 @@ public:
 			m_inputBlocks.resize(ap.nonZeros());
 			const int columnCount = ap.outerSize();
 			const int* inputOuter = ap.outerIndexPtr();
-			const int* inputInner = ap.innerIndexPtr();
 			for(int column = 0; column < columnCount; ++column)
 			{
 				const int end = inputOuter[column + 1];
@@ -285,24 +293,27 @@ public:
 			}
 		}
 		const int bodies = int(ap.cols()) / 6;
+		const int* inputOuter = ap.outerIndexPtr();
+		const double* inputValues = ap.valuePtr();
 		for(int k = 0; k < bodies; ++k)
 		{
 			// Scatter the upper input into the corresponding lower block row.
 			for(int axis = 0; axis < 6; ++axis)
 			{
-				for(Sparse::InnerIterator entry(ap, 6 * k + axis); entry; ++entry)
+				const int column = 6 * k + axis;
+				const int end = inputOuter[column + 1];
+				for(int entry = inputOuter[column]; entry < end; ++entry)
 				{
-					m_work[int(entry.row()) / 6](axis, int(entry.row()) % 6) = entry.value();
+					const int coordinate = m_inputCoordinates[entry];
+					m_work[coordinate >> 3].data()[6 * (coordinate & 7) + axis] = inputValues[entry];
 				}
 			}
-			Block diagonal = m_work[k];
-			m_work[k].setZero();
+			Block& diagonal = m_work[k];
 			for(int rowEntry = m_rowOuter[k]; rowEntry < m_rowOuter[k + 1]; ++rowEntry)
 			{
 				const int address = m_rowEntries[rowEntry];
 				const int i = m_blockColumns[address];
-				Block value = m_work[i];
-				m_work[i].setZero();
+				Block& value = m_work[i];
 				const Block& lower = m_blocks[m_blockOuter[i]];
 				// Solve value * L' = work using contiguous six-value columns.
 				// These fixed blocks need neither packed GEMM panels nor a transpose.
@@ -312,7 +323,7 @@ public:
 					{
 						subtractScaled6(value.data() + 6 * column, value.data() + 6 * inner, lower(column, inner));
 					}
-					const double inverse = 1.0 / lower(column, column);
+					const double inverse = m_inverseDiagonal[6 * i + column];
 					for(int row = 0; row < 6; ++row)
 					{
 						value(row, column) *= inverse;
@@ -326,6 +337,7 @@ public:
 				}
 				subtractLowerOuterProduct6(diagonal.data(), value.data());
 				m_blocks[address] = value;
+				value.setZero();
 			}
 			Block lower;
 			if(!cholesky6(diagonal, lower))
@@ -339,6 +351,11 @@ public:
 				return scalarFallback(ap);
 			}
 			m_blocks[m_blockOuter[k]] = lower;
+			for(int column = 0; column < 6; ++column)
+			{
+				m_inverseDiagonal[6 * k + column] = 1.0 / lower(column, column);
+			}
+			diagonal.setZero();
 		}
 		m_blocksCurrent = true;
 		m_scalarCurrent = false;
@@ -528,14 +545,13 @@ private:
 		}
 		const int columnCount = ap.outerSize();
 		const int* inputOuter = ap.outerIndexPtr();
-		const int* inputInner = ap.innerIndexPtr();
 		const double* inputValues = ap.valuePtr();
 		for(int column = 0; column < columnCount; ++column)
 		{
 			const int end = inputOuter[column + 1];
 			for(int entry = inputOuter[column]; entry < end; ++entry)
 			{
-				m_blocks[m_inputBlocks[entry]](column % 6, inputInner[entry] % 6) = inputValues[entry];
+				m_blocks[m_inputBlocks[entry]](column % 6, m_inputCoordinates[entry] & 7) = inputValues[entry];
 			}
 		}
 		for(int body = 0; body < bodies; ++body)
@@ -547,24 +563,28 @@ private:
 				return scalarFallback(ap);
 			}
 			m_blocks[m_blockOuter[body]] = lower;
+			double inverseDiagonal[6];
+			for(int column = 0; column < 6; ++column)
+			{
+				inverseDiagonal[column] = 1.0 / lower(column, column);
+				m_inverseDiagonal[6 * body + column] = inverseDiagonal[column];
+			}
 			const int first = m_blockOuter[body] + 1;
 			const int end = m_blockOuter[body + 1];
 			for(int address = first; address < end; ++address)
 			{
-				Block value = m_blocks[address];
+				Block& value = m_blocks[address];
 				for(int column = 0; column < 6; ++column)
 				{
 					for(int inner = 0; inner < column; ++inner)
 					{
 						subtractScaled6(value.data() + 6 * column, value.data() + 6 * inner, lower(column, inner));
 					}
-					const double inverse = 1.0 / lower(column, column);
 					for(int row = 0; row < 6; ++row)
 					{
-						value(row, column) *= inverse;
+						value(row, column) *= inverseDiagonal[column];
 					}
 				}
-				m_blocks[address] = value;
 			}
 			const int count = end - first;
 			if(count * (count + 1) / 2 >= MIN_PARALLEL_PIVOT_UPDATES)
@@ -606,7 +626,8 @@ private:
 	ParallelExecutor* m_parallelExecutor = NULL;
 	int m_parallelWorkers = 0;
 	std::vector<int> m_parent, m_tags, m_counts, m_pattern;
-	std::vector<int> m_blockOuter, m_blockRows, m_blockColumns, m_rowOuter, m_rowEntries;
+	std::vector<int> m_blockOuter, m_blockRows, m_blockColumns, m_rowOuter, m_rowEntries, m_inputCoordinates;
+	std::vector<double> m_inverseDiagonal;
 	std::vector<int> m_solveLevels, m_solveLevelOuter, m_solveBodies;
 	std::vector<int> m_updateOuter, m_updateTargets, m_inputBlocks;
 	std::vector<Block> m_blocks, m_work;

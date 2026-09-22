@@ -25,7 +25,8 @@ class IncrementalCholesky
 	};
 
 public:
-	IncrementalCholesky() : m_size(0), m_profile(false) {}
+	IncrementalCholesky() : m_size(0), m_profile(false), m_updateInverseCurrent(false) {}
+	const Curvature& currentWeights() const { return m_weights; }
 
 	void beginSolve(bool profile, bool continuation, ParallelExecutor* parallelExecutor)
 	{
@@ -34,12 +35,13 @@ public:
 		if(!continuation)
 		{
 			m_size = 0;
+			m_updateInverseCurrent = false;
 		}
 		m_profile = profile;
 		m_factor.setParallelExecutor(parallelExecutor);
 	}
 
-	bool factor(const Problem& problem, const Curvature& weights, Result& result)
+	bool factor(const Problem& problem, Curvature& weights, Result& result)
 	{
 		reserveStorage(m_updates, std::uint32_t(problem.rowCount()));
 		if(m_size == 0)
@@ -183,7 +185,28 @@ public:
 		}
 		else
 		{
+			const bool blockInverseCurrent = m_factor.hasCurrentBlocks();
 			m_factor.beginScalarUpdates();
+			if(!m_updateInverseCurrent)
+			{
+				if(blockInverseCurrent)
+				{
+					m_updateInverseDiagonal.resize(m_size);
+					m_factor.swapInverseDiagonal(m_updateInverseDiagonal);
+				}
+				else
+				{
+					const Sparse& lower = m_factor.m_matrix;
+					const int* outer = lower.outerIndexPtr();
+					const double* values = lower.valuePtr();
+					m_updateInverseDiagonal.resize(m_size);
+					for(int column = 0; column < m_size; ++column)
+					{
+						m_updateInverseDiagonal[column] = 1.0 / values[outer[column]];
+					}
+				}
+				m_updateInverseCurrent = true;
+			}
 		}
 		// Add positive changes before downdates. Every intermediate matrix
 		// then remains positive definite whenever the target Hessian is SPD.
@@ -206,7 +229,6 @@ public:
 					++result.factorFallbacks;
 					return refactor(problem, weights, result);
 				}
-
 			}
 			for(std::uint32_t i = 0; i < patchUpdateCount; ++i)
 			{
@@ -225,7 +247,7 @@ public:
 				}
 			}
 		}
-		m_weights = weights;
+		m_weights.swap(weights);
 		result.updateMs += profileElapsed(m_profile, start);
 		return true;
 	}
@@ -233,7 +255,6 @@ public:
 	void solveDirection(ConstVector gradient, MutableVector direction)
 	{
 		// Solve H * direction = -gradient directly into the caller's buffer.
-		m_solution.resize(m_size);
 		std::vector<double>& solution = m_solution;
 		for(int row = 0; row < m_size; ++row)
 		{
@@ -317,21 +338,42 @@ private:
 			storeVector<6>(solution + first, current);
 			const int offBegin = outer[first] + 6;
 			const int offEnd = outer[first + 1];
+			int offColumn[6];
+			for(int axis = 0; axis < 6; ++axis)
+			{
+				offColumn[axis] = outer[first + axis] + 6 - axis - offBegin;
+			}
 			for(int entry = offBegin; entry < offEnd; entry += 6)
 			{
-				const int offset = entry - offBegin;
 				double* destination = solution + inner[entry];
+#if defined(NEWTON_AVX2_FMA)
+				__m256d firstFour = _mm256_loadu_pd(destination);
+				__m128d lastTwo = _mm_loadu_pd(destination + 4);
 				for(int axis = 0; axis < 6; ++axis)
 				{
 					if(current[axis] != 0.0)
 					{
-						const int address = outer[first + axis] + 6 - axis + offset;
+						const double* column = values + entry + offColumn[axis];
+						const __m256d scale = _mm256_set1_pd(current[axis]);
+						firstFour = _mm256_fnmadd_pd(scale, _mm256_loadu_pd(column), firstFour);
+						lastTwo = _mm_fnmadd_pd(_mm256_castpd256_pd128(scale), _mm_loadu_pd(column + 4), lastTwo);
+					}
+				}
+				_mm256_storeu_pd(destination, firstFour);
+				_mm_storeu_pd(destination + 4, lastTwo);
+#else
+				for(int axis = 0; axis < 6; ++axis)
+				{
+					if(current[axis] != 0.0)
+					{
+						const int address = entry + offColumn[axis];
 						for(int row = 0; row < 6; ++row)
 						{
 							destination[row] -= current[axis] * values[address + row];
 						}
 					}
 				}
+#endif
 			}
 		}
 	}
@@ -362,7 +404,7 @@ private:
 		}
 	}
 
-	bool refactor(const Problem& problem, const Curvature& weights, Result& result)
+	bool refactor(const Problem& problem, Curvature& weights, Result& result)
 	{
 		const bool firstFactor = m_size == 0;
 		bool changedPattern = false;
@@ -388,6 +430,8 @@ private:
 			result.symbolicMs += profileElapsed(m_profile, symbolicStart);
 		}
 		m_size = int(matrix.rows());
+		m_vector.resize(m_size);
+		m_solution.resize(m_size);
 		const int nonzeroCount = matrix.nonZeros();
 		for(int entry = 0; entry < nonzeroCount; ++entry)
 		{
@@ -397,6 +441,7 @@ private:
 		{
 			return false;
 		}
+		m_updateInverseCurrent = false;
 		if(firstFactor)
 		{
 			// Numeric-factor work is proportional to squared column lengths;
@@ -445,7 +490,11 @@ private:
 		}
 		++result.factorizations;
 		result.factorMs += profileElapsed(m_profile, factorStart);
-		m_weights = weights;
+		if(m_weights.diagonal.size() != weights.diagonal.size() || m_weights.coupled.size() != weights.coupled.size() || m_weights.patches.size() != weights.patches.size())
+		{
+			m_weights.resize(problem);
+		}
+		m_weights.swap(weights);
 		return true;
 	}
 
@@ -665,7 +714,8 @@ private:
 		return updatePair(contact.body, vector, add);
 	}
 
-	bool updatePair(const int* body, const Vec6* vector, bool add)
+	template<bool Add>
+	bool updatePairSigned(const int* body, const Vec6* vector)
 	{
 		// Preserve the established signed-update kernel's pivot floor.
 		static constexpr double minimumPivotSquare = 1.0e-15;
@@ -675,19 +725,21 @@ private:
 		// The first off-diagonal row in a factor column is its parent. A retained
 		// dense work vector avoids rebuilding/merging sparse index lists at every
 		// pivot, while the factor's sparse columns bound all numerical work.
-		m_vector.resize(m_size);
-		std::fill(m_vector.begin(), m_vector.end(), 0.0);
+		// A successful update consumes the single elimination-tree path below and
+		// clears every visited entry, so the retained vector is already zero here.
+		// Avoid clearing the entire factor-sized vector for every contact update.
 		int first = m_size;
 		for(int end = 0; end < 2; ++end)
 		{
 			if(body[end] >= 0)
 			{
 				const Vec6& row = vector[end];
+				const int base = m_permutation[6 * body[end]];
 				for(int component = 0; component < 6; ++component)
 				{
 					if(row[component] != 0.0)
 					{
-						const int column = m_permutation[6 * body[end] + component];
+						const int column = base + component;
 						m_vector[column] = row[component];
 						first = std::min(first, column);
 					}
@@ -706,20 +758,24 @@ private:
 			if(x != 0.0)
 			{
 				const double diagonal = values[begin];
-				const double square = diagonal * diagonal + (add ? x * x : -x * x);
+				const double square = diagonal * diagonal + (Add ? x * x : -x * x);
 				// A nonpositive or undersized pivot requires a full refactorization.
 				if(!(square >= minimumPivotSquare))
 				{
+					// A failed downdate leaves values on the unconsumed suffix of the
+					// path. Restore the zero invariant before the full-factor fallback.
+					std::fill(m_vector.begin(), m_vector.end(), 0.0);
 					return false;
 				}
 				const double r = std::sqrt(square);
-				const double inverseDiagonal = 1.0 / diagonal;
+				const double inverseDiagonal = m_updateInverseDiagonal[column];
 				const double inverseR = 1.0 / r;
 				const double c = r * inverseDiagonal;
 				const double s = x * inverseDiagonal;
 				const double inverseC = diagonal * inverseR;
-				const double signedSC = (add ? x : -x) * inverseR;
+				const double signedSC = (Add ? x : -x) * inverseR;
 				values[begin] = r;
+				m_updateInverseDiagonal[column] = inverseR;
 				// Full body blocks make six consecutive factor entries address six
 				// consecutive work values. Expose those packets without gathers.
 				const int remainder = 5 - column % 6;
@@ -744,6 +800,11 @@ private:
 		return true;
 	}
 
+	bool updatePair(const int* body, const Vec6* vector, bool add)
+	{
+		return add ? updatePairSigned<true>(body, vector) : updatePairSigned<false>(body, vector);
+	}
+
 	int m_size;
 	bool m_profile;
 	BlockCholesky m_factor;
@@ -762,8 +823,9 @@ private:
 	std::vector<PermutedEntry> m_permutedEntries;
 	std::vector<int> m_permutedSourceIndices, m_permutationRowOffsets, m_permutationCursors;
 	std::vector<int> m_outer, m_inner;
-	std::vector<double> m_vector, m_solution, m_reachWork;
+	std::vector<double> m_vector, m_solution, m_reachWork, m_updateInverseDiagonal;
 	double m_refactorWork = 0.0, m_factorWork = 0.0;
+	bool m_updateInverseCurrent;
 	Curvature m_weights;
 	std::vector<RankUpdate> m_updates;
 	std::vector<PatchUpdate> m_patchUpdates;

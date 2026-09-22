@@ -133,6 +133,22 @@ NEWTON_FORCE_INLINE double dot6(const double* NEWTON_RESTRICT left, const double
 #endif
 }
 
+NEWTON_FORCE_INLINE double dot6Pair(const double* NEWTON_RESTRICT left0, const double* NEWTON_RESTRICT right0,
+									const double* NEWTON_RESTRICT left1, const double* NEWTON_RESTRICT right1)
+{
+#if defined(NEWTON_AVX2_FMA)
+	const __m256d first = _mm256_fmadd_pd(_mm256_loadu_pd(left1), _mm256_loadu_pd(right1),
+									_mm256_mul_pd(_mm256_loadu_pd(left0), _mm256_loadu_pd(right0)));
+	const __m128d end = _mm_fmadd_pd(_mm_loadu_pd(left1 + 4), _mm_loadu_pd(right1 + 4),
+								_mm_mul_pd(_mm_loadu_pd(left0 + 4), _mm_loadu_pd(right0 + 4)));
+	const __m128d halves = _mm_add_pd(_mm256_castpd256_pd128(first), _mm256_extractf128_pd(first, 1));
+	const __m128d sum = _mm_add_pd(halves, _mm_unpackhi_pd(halves, halves));
+	return _mm_cvtsd_f64(sum) + _mm_cvtsd_f64(end) + _mm_cvtsd_f64(_mm_unpackhi_pd(end, end));
+#else
+	return dot6(left0, right0) + dot6(left1, right1);
+#endif
+}
+
 NEWTON_FORCE_INLINE void subtractProduct6(double* NEWTON_RESTRICT destination, const double* NEWTON_RESTRICT left, const double* NEWTON_RESTRICT right)
 {
 #if defined(NEWTON_AVX2_FMA)
@@ -333,7 +349,7 @@ NEWTON_FORCE_INLINE void updateCholesky6(double* NEWTON_RESTRICT factor, double*
 }
 
 template<int Rows, int Columns>
-class Matrix
+class alignas((Rows == 6 && Columns == 6) ? 32 : 8) Matrix
 {
 public:
 	Matrix() {}
@@ -846,7 +862,22 @@ public:
 	{
 		double result = 0.0;
 		const std::uint32_t count = std::uint32_t(m_values.size());
+#if defined(NEWTON_AVX2_FMA)
+		std::uint32_t i = 0;
+		for(; i + 4 <= count; i += 4)
+		{
+			const __m256d products = _mm256_mul_pd(_mm256_loadu_pd(m_values.data() + i), _mm256_loadu_pd(other.m_values.data() + i));
+			const __m128d low = _mm256_castpd256_pd128(products);
+			const __m128d high = _mm256_extractf128_pd(products, 1);
+			result += _mm_cvtsd_f64(low);
+			result += _mm_cvtsd_f64(_mm_unpackhi_pd(low, low));
+			result += _mm_cvtsd_f64(high);
+			result += _mm_cvtsd_f64(_mm_unpackhi_pd(high, high));
+		}
+		for(; i < count; ++i)
+#else
 		for(std::uint32_t i = 0; i < count; ++i)
+#endif
 		{
 			result += m_values[i] * other.m_values[i];
 		}

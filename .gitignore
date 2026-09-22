@@ -2,5 +2,6 @@
 /audit-*.txt
 /vtune-audit-*.csv
 /backups/
+/work/
 /physx/bin/
 /physx/tests/newton/__pycache__/

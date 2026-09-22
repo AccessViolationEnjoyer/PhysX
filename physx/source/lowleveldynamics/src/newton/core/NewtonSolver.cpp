@@ -188,6 +188,12 @@ struct Curvature
 		reserveStorage(patches, std::uint32_t(problem.patches.size()));
 		patches.resize(problem.patches.size());
 	}
+	void swap(Curvature& other) noexcept
+	{
+		diagonal.swap(other.diagonal);
+		coupled.swap(other.coupled);
+		patches.swap(other.patches);
+	}
 };
 
 // Distinguish every successful preparation, including a new Problem constructed
@@ -197,25 +203,6 @@ static std::uint64_t nextPreparationGeneration()
 {
 	static std::atomic<std::uint64_t> generation(0);
 	return generation.fetch_add(1, std::memory_order_relaxed) + 1;
-}
-
-int Problem::addScalarContact(const CompactContact& input, double lowerImpulse, double upperImpulse)
-{
-	CompactContact contact = input;
-	contact.row = 0;
-	contact.block = 0;
-	if(lowerImpulse != 0.0 || upperImpulse != MAX_IMPULSE)
-	{
-		const ScalarBounds limits = { lowerImpulse, upperImpulse };
-		contact.block = CompactContact::SCALAR_BOUNDS_TAG - int(scalarBounds.size());
-		reserveStorage(scalarBounds, std::uint32_t(scalarBounds.size()) + 1);
-		scalarBounds.push_back(limits);
-	}
-	reserveStorage(contacts, std::uint32_t(contacts.size()) + 1);
-	const int index = int(contacts.size());
-	contacts.push_back(contact);
-	prepared = false;
-	return index;
 }
 
 void Problem::setScalarBounds(int contactIndex, double lowerImpulse, double upperImpulse) noexcept
@@ -323,6 +310,57 @@ static void prepareHessianTopology(Problem& problem)
 	const std::uint32_t contactCount = std::uint32_t(problem.contacts.size());
 	std::vector<std::uint64_t>& pairs = problem.hessianPairs;
 	pairs.clear();
+	problem.hessianDiagonalBlocks.resize(bodyCount);
+	problem.hessianContactBlocks.assign(contactCount, -1);
+	// Dense contact graphs contain many rows for the same body pair. For small
+	// bodies, a retained direct lookup avoids sorting all duplicates and doing a
+	// binary search for every row. Sparse and large systems keep the compact path.
+	const bool useDenseLookup = bodyCount <= 256 && contactCount >= 8 * bodyCount;
+	if(useDenseLookup)
+	{
+		std::vector<int>& lookup = problem.hessianPairLookup;
+		lookup.assign(std::size_t(bodyCount) * bodyCount, -1);
+		for(std::uint32_t body = 0; body < bodyCount; ++body)
+		{
+			lookup[std::size_t(body) * bodyCount + body] = 0;
+		}
+		for(std::uint32_t i = 0; i < contactCount; ++i)
+		{
+			const CompactContact& contact = problem.contacts[i];
+			if(contact.body[0] >= 0 && contact.body[1] >= 0)
+			{
+				const std::uint32_t first = std::uint32_t(std::min(contact.body[0], contact.body[1]));
+				const std::uint32_t second = std::uint32_t(std::max(contact.body[0], contact.body[1]));
+				lookup[std::size_t(first) * bodyCount + second] = 0;
+			}
+		}
+		reserveStorage(pairs, bodyCount + contactCount);
+		for(std::uint32_t first = 0; first < bodyCount; ++first)
+		{
+			for(std::uint32_t second = first; second < bodyCount; ++second)
+			{
+				int& pair = lookup[std::size_t(first) * bodyCount + second];
+				if(pair >= 0)
+				{
+					pair = int(pairs.size());
+					pairs.emplace_back((std::uint64_t(first) << 32) | second);
+				}
+			}
+			problem.hessianDiagonalBlocks[first] = lookup[std::size_t(first) * bodyCount + first];
+		}
+		for(std::uint32_t i = 0; i < contactCount; ++i)
+		{
+			const CompactContact& contact = problem.contacts[i];
+			if(contact.body[0] >= 0 && contact.body[1] >= 0)
+			{
+				const std::uint32_t first = std::uint32_t(std::min(contact.body[0], contact.body[1]));
+				const std::uint32_t second = std::uint32_t(std::max(contact.body[0], contact.body[1]));
+				problem.hessianContactBlocks[i] = lookup[std::size_t(first) * bodyCount + second];
+			}
+		}
+		return;
+	}
+
 	reserveStorage(pairs, bodyCount + contactCount);
 	for(std::uint32_t body = 0; body < bodyCount; ++body)
 	{
@@ -338,8 +376,6 @@ static void prepareHessianTopology(Problem& problem)
 	}
 	std::sort(pairs.begin(), pairs.end());
 	pairs.erase(std::unique(pairs.begin(), pairs.end()), pairs.end());
-
-	problem.hessianDiagonalBlocks.resize(bodyCount);
 	const std::uint32_t pairCount = std::uint32_t(pairs.size());
 	for(std::uint32_t pair = 0; pair < pairCount; ++pair)
 	{
@@ -349,7 +385,6 @@ static void prepareHessianTopology(Problem& problem)
 			problem.hessianDiagonalBlocks[first] = int(pair);
 		}
 	}
-	problem.hessianContactBlocks.assign(contactCount, -1);
 	for(std::uint32_t i = 0; i < contactCount; ++i)
 	{
 		const CompactContact& contact = problem.contacts[i];
@@ -361,7 +396,7 @@ static void prepareHessianTopology(Problem& problem)
 	}
 }
 
-template<bool CountEntries>
+template<bool CountEntries, bool BuildJacobian>
 static void prepareProblemInternal(Problem& problem)
 {
 	// Every three-row contact owns one block; scalar contacts own none.
@@ -371,6 +406,7 @@ static void prepareProblemInternal(Problem& problem)
 	problem.equalityRows = 0;
 	problem.hasFiniteBounds = !problem.patches.empty();
 	problem.prepared = false;
+	problem.compactJacobian = !BuildJacobian;
 	assert(problem.massDiagonal.size() == problem.bodyCount() * 6);
 	assert(!problem.massDiagonal.size() || problem.massDiagonal.minCoeff() > 0.0);
 	const int massCount = problem.massDiagonal.size();
@@ -414,7 +450,7 @@ static void prepareProblemInternal(Problem& problem)
 			}
 		}
 	}
-	assert(columnCounts.size() == std::uint32_t(problem.bodyCount() * 6));
+	assert(!BuildJacobian || columnCounts.size() == std::uint32_t(problem.bodyCount() * 6));
 	problem.freeVelocity.resize(rows);
 	problem.regularization.resize(rows);
 	reserveStorage(problem.rowContact, std::uint32_t(rows));
@@ -424,17 +460,25 @@ static void prepareProblemInternal(Problem& problem)
 	// reduction or an intermediate transpose.
 	problem.jacobian.resize(rows, problem.bodyCount() * 6);
 	int entries = 0;
-	const int columnCount = int(columnCounts.size());
-	for(int column = 0; column < columnCount; ++column)
+	const int columnCount = problem.bodyCount() * 6;
+	if(BuildJacobian)
 	{
-		problem.jacobian.outerIndexPtr()[column] = entries;
-		const int count = columnCounts[column];
-		assert(count >= 0 && count <= std::numeric_limits<int>::max() - entries);
-		columnCounts[column] = entries;
-		entries += count;
+		for(int column = 0; column < columnCount; ++column)
+		{
+			problem.jacobian.outerIndexPtr()[column] = entries;
+			const int count = columnCounts[column];
+			assert(count >= 0 && count <= std::numeric_limits<int>::max() - entries);
+			columnCounts[column] = entries;
+			entries += count;
+		}
+		problem.jacobian.outerIndexPtr()[columnCount] = entries;
+		problem.jacobian.resizeNonZeros(entries);
 	}
-	problem.jacobian.outerIndexPtr()[columnCount] = entries;
-	problem.jacobian.resizeNonZeros(entries);
+	else
+	{
+		std::fill_n(problem.jacobian.outerIndexPtr(), columnCount + 1, 0);
+		problem.jacobian.resizeNonZeros(0);
+	}
 	int nextRow = 0;
 	std::uint32_t nextPatch = 0;
 	for(int i = 0; i < contactCount; ++i)
@@ -504,17 +548,21 @@ static void prepareProblemInternal(Problem& problem)
 			problem.freeVelocity[row] = axis == 2 ? contact.freeVelocity : problem.block(contact).freeVelocity[axis];
 			problem.regularization[row] = axis == 2 ? contact.regularization : problem.block(contact).regularization[axis];
 			assert(problem.regularization[row] > 0.0);
-			for(int end = 0; end < 2; ++end)
+			if(BuildJacobian)
 			{
-				if(contact.body[end] >= 0)
+				for(int end = 0; end < 2; ++end)
 				{
-					for(int column = 0; column < 6; ++column)
+					if(contact.body[end] >= 0)
 					{
-						if(problem.contactEntry(contact, end, axis, column) != 0.0)
+						for(int column = 0; column < 6; ++column)
 						{
-							const int entry = columnCounts[6 * contact.body[end] + column]++;
-							problem.jacobian.innerIndexPtr()[entry] = row;
-							problem.jacobian.valuePtr()[entry] = problem.contactEntry(contact, end, axis, column);
+							const double value = problem.contactEntry(contact, end, axis, column);
+							if(value != 0.0)
+							{
+								const int entry = columnCounts[6 * contact.body[end] + column]++;
+								problem.jacobian.innerIndexPtr()[entry] = row;
+								problem.jacobian.valuePtr()[entry] = value;
+							}
 						}
 					}
 				}
@@ -522,6 +570,23 @@ static void prepareProblemInternal(Problem& problem)
 		}
 	}
 	assert(nextRow == rows);
+	problem.scalarContactRuns.clear();
+	if(problem.isUnilateral())
+	{
+		reserveStorage(problem.scalarContactRuns, std::uint32_t(contactCount));
+		for(int first = 0; first < contactCount;)
+		{
+			const CompactContact& contact = problem.contacts[first];
+			int end = first + 1;
+			while(end < contactCount && problem.contacts[end].body[0] == contact.body[0] && problem.contacts[end].body[1] == contact.body[1])
+			{
+				++end;
+			}
+			const ScalarContactRun run = { first, end };
+			problem.scalarContactRuns.push_back(run);
+			first = end;
+		}
+	}
 	problem.prepared = true;
 	prepareHessianTopology(problem);
 	problem.preparationGeneration = nextPreparationGeneration();
@@ -529,12 +594,30 @@ static void prepareProblemInternal(Problem& problem)
 
 void prepareProblem(Problem& problem) noexcept
 {
-	prepareProblemInternal<true>(problem);
+	prepareProblemInternal<true, true>(problem);
 }
 
 void prepareProblemFromColumnCounts(Problem& problem) noexcept
 {
-	prepareProblemInternal<false>(problem);
+	prepareProblemInternal<false, true>(problem);
+}
+
+void prepareCompactProblemFromColumnCounts(Problem& problem) noexcept
+{
+	bool compact = problem.contactBlocks.empty() && problem.scalarBounds.empty() && problem.patches.empty();
+	const int contactCount = int(problem.contacts.size());
+	for(int i = 0; compact && i < contactCount; ++i)
+	{
+		compact = problem.contacts[i].block == 0;
+	}
+	if(compact)
+	{
+		prepareProblemInternal<false, false>(problem);
+	}
+	else
+	{
+		prepareProblemInternal<true, true>(problem);
+	}
 }
 
 double computeResidual(const Problem& problem, ConstVector impulse)
@@ -543,14 +626,33 @@ double computeResidual(const Problem& problem, ConstVector impulse)
 	const int rowCount = problem.rowCount();
 	VectorStorage bodyVelocity(columnCount);
 	bodyVelocity.setZero();
-	const int* outer = problem.jacobian.outerIndexPtr();
-	const int* inner = problem.jacobian.innerIndexPtr();
-	const double* values = problem.jacobian.valuePtr();
-	for(int column = 0; column < columnCount; ++column)
+	if(problem.compactJacobian)
 	{
-		for(int entry = outer[column]; entry < outer[column + 1]; ++entry)
+		const int contactCount = int(problem.contacts.size());
+		for(int i = 0; i < contactCount; ++i)
 		{
-			bodyVelocity[column] += values[entry] * impulse[inner[entry]];
+			const CompactContact& contact = problem.contacts[i];
+			const double scale = impulse[contact.row];
+			for(int end = 0; end < 2; ++end)
+			{
+				if(contact.body[end] >= 0)
+				{
+					addScaled6(bodyVelocity.data() + 6 * contact.body[end], contact.jacobian[end].data(), scale);
+				}
+			}
+		}
+	}
+	else
+	{
+		const int* outer = problem.jacobian.outerIndexPtr();
+		const int* inner = problem.jacobian.innerIndexPtr();
+		const double* values = problem.jacobian.valuePtr();
+		for(int column = 0; column < columnCount; ++column)
+		{
+			for(int entry = outer[column]; entry < outer[column + 1]; ++entry)
+			{
+				bodyVelocity[column] += values[entry] * impulse[inner[entry]];
+			}
 		}
 	}
 	VectorStorage velocity(rowCount);
@@ -558,12 +660,35 @@ double computeResidual(const Problem& problem, ConstVector impulse)
 	{
 		velocity[row] = problem.freeVelocity[row] + problem.regularization[row] * impulse[row];
 	}
-	for(int column = 0; column < columnCount; ++column)
+	if(problem.compactJacobian)
 	{
-		const double value = bodyVelocity[column];
-		for(int entry = outer[column]; entry < outer[column + 1]; ++entry)
+		const int contactCount = int(problem.contacts.size());
+		for(int i = 0; i < contactCount; ++i)
 		{
-			velocity[inner[entry]] += values[entry] * value;
+			const CompactContact& contact = problem.contacts[i];
+			double value = 0.0;
+			for(int end = 0; end < 2; ++end)
+			{
+				if(contact.body[end] >= 0)
+				{
+					value += dot6(contact.jacobian[end].data(), bodyVelocity.data() + 6 * contact.body[end]);
+				}
+			}
+			velocity[contact.row] += value;
+		}
+	}
+	else
+	{
+		const int* outer = problem.jacobian.outerIndexPtr();
+		const int* inner = problem.jacobian.innerIndexPtr();
+		const double* values = problem.jacobian.valuePtr();
+		for(int column = 0; column < columnCount; ++column)
+		{
+			const double value = bodyVelocity[column];
+			for(int entry = outer[column]; entry < outer[column + 1]; ++entry)
+			{
+				velocity[inner[entry]] += values[entry] * value;
+			}
 		}
 	}
 	double error = 0.0;
@@ -654,6 +779,7 @@ struct HessianStorage
 {
 	SparseStorage matrix;
 	std::vector<BodyBlock> blocks;
+	std::vector<std::uint64_t> pairs;
 };
 
 // Jacobian rows often contain exact zeros. Skip zero columns while keeping
@@ -667,6 +793,45 @@ static void addOuterProduct(BodyBlock& block, const Vec6& left, const Vec6& righ
 			addScaled6(block.data() + 6 * axis, left.data(), weight * right[axis]);
 		}
 	}
+}
+
+template<int Count>
+static NEWTON_FORCE_INLINE void addScaledTail(double* NEWTON_RESTRICT destination, const double* NEWTON_RESTRICT source, double scale)
+{
+#if defined(NEWTON_AVX2_FMA)
+	const __m256d multiplier = _mm256_set1_pd(scale);
+	int offset = 0;
+	if(Count >= 4)
+	{
+		_mm256_storeu_pd(destination, _mm256_fmadd_pd(multiplier, _mm256_loadu_pd(source), _mm256_loadu_pd(destination)));
+		offset = 4;
+	}
+	if(Count - offset >= 2)
+	{
+		_mm_storeu_pd(destination + offset, _mm_fmadd_pd(_mm256_castpd256_pd128(multiplier), _mm_loadu_pd(source + offset), _mm_loadu_pd(destination + offset)));
+		offset += 2;
+	}
+	if(Count - offset == 1)
+	{
+		destination[offset] += scale * source[offset];
+	}
+#else
+	for(int i = 0; i < Count; ++i)
+	{
+		destination[i] += scale * source[i];
+	}
+#endif
+}
+
+static void addLowerOuterProduct(BodyBlock& block, const Vec6& vector, double weight)
+{
+	const double* source = vector.data();
+	if(source[0] != 0.0) addScaledTail<6>(block.data(), source, weight * source[0]);
+	if(source[1] != 0.0) addScaledTail<5>(block.data() + 7, source + 1, weight * source[1]);
+	if(source[2] != 0.0) addScaledTail<4>(block.data() + 14, source + 2, weight * source[2]);
+	if(source[3] != 0.0) addScaledTail<3>(block.data() + 21, source + 3, weight * source[3]);
+	if(source[4] != 0.0) addScaledTail<2>(block.data() + 28, source + 4, weight * source[4]);
+	if(source[5] != 0.0) block(5, 5) += weight * source[5] * source[5];
 }
 
 static void addJacobianProduct(BodyBlock& block, const Jacobian& left, const Mat3& weight, const Jacobian& right)
@@ -736,58 +901,84 @@ static const Sparse& makeHessian(const Problem& problem, const Curvature& weight
 		}
 	}
 	const std::uint32_t contactCount = std::uint32_t(problem.contacts.size());
-	for(std::uint32_t i = 0; i < contactCount; ++i)
+	if(problem.isUnilateral())
 	{
-		const CompactContact& contact = problem.contacts[i];
-		const int a = contact.body[0], b = contact.body[1];
-		const int cross = problem.hessianContactBlocks[i];
-		if(contact.block > 0)
+		for(std::uint32_t i = 0; i < contactCount; ++i)
 		{
-			const Mat3& weight = weights.coupled[problem.coupledIndex(contact)];
-			if(weight.isZero(0.0))
+			const CompactContact& contact = problem.contacts[i];
+			const double weight = weights.diagonal[contact.row];
+			if(weight == 0.0)
 			{
 				continue;
 			}
-			// Reconstruct each used endpoint once, then reuse it for diagonal
-			// and cross contributions. Scalar rows need no reconstruction.
-			Jacobian jacobian[2];
 			for(int end = 0; end < 2; ++end)
 			{
 				if(contact.body[end] >= 0)
 				{
-					jacobian[end] = problem.contactJacobian(contact, end);
-					addJacobianProduct(storage.blocks[problem.hessianDiagonalBlocks[contact.body[end]]], jacobian[end], weight, jacobian[end]);
+					addLowerOuterProduct(storage.blocks[problem.hessianDiagonalBlocks[contact.body[end]]], contact.jacobian[end], weight);
 				}
 			}
+			const int a = contact.body[0], b = contact.body[1];
 			if(a >= 0 && b >= 0)
 			{
 				const int low = a < b ? 0 : 1;
-				addJacobianProduct(storage.blocks[cross], jacobian[1 - low], weight, jacobian[low]);
+				addOuterProduct(storage.blocks[problem.hessianContactBlocks[i]], contact.jacobian[1 - low], contact.jacobian[low], weight);
 			}
 		}
-		else
+	}
+	else
+	{
+		for(std::uint32_t i = 0; i < contactCount; ++i)
 		{
-			const int first = contact.rowCount() == 1 ? 2 : 0;
-			for(int axis = first; axis < 3; ++axis)
+			const CompactContact& contact = problem.contacts[i];
+			const int a = contact.body[0], b = contact.body[1];
+			const int cross = problem.hessianContactBlocks[i];
+			if(contact.block > 0)
 			{
-				const double weight = weights.diagonal[contact.row + axis - first];
-				if(weight == 0.0)
+				const Mat3& weight = weights.coupled[problem.coupledIndex(contact)];
+				if(weight.isZero(0.0))
 				{
 					continue;
 				}
-				Vec6 jacobian[2];
+				Jacobian jacobian[2];
 				for(int end = 0; end < 2; ++end)
 				{
 					if(contact.body[end] >= 0)
 					{
-						jacobian[end] = problem.contactRow(contact, end, axis);
-						addOuterProduct(storage.blocks[problem.hessianDiagonalBlocks[contact.body[end]]], jacobian[end], jacobian[end], weight);
+						jacobian[end] = problem.contactJacobian(contact, end);
+						addJacobianProduct(storage.blocks[problem.hessianDiagonalBlocks[contact.body[end]]], jacobian[end], weight, jacobian[end]);
 					}
 				}
 				if(a >= 0 && b >= 0)
 				{
 					const int low = a < b ? 0 : 1;
-					addOuterProduct(storage.blocks[cross], jacobian[1 - low], jacobian[low], weight);
+					addJacobianProduct(storage.blocks[cross], jacobian[1 - low], weight, jacobian[low]);
+				}
+			}
+			else
+			{
+				const int first = contact.rowCount() == 1 ? 2 : 0;
+				for(int axis = first; axis < 3; ++axis)
+				{
+					const double weight = weights.diagonal[contact.row + axis - first];
+					if(weight == 0.0)
+					{
+						continue;
+					}
+					Vec6 jacobian[2];
+					for(int end = 0; end < 2; ++end)
+					{
+						if(contact.body[end] >= 0)
+						{
+							jacobian[end] = problem.contactRow(contact, end, axis);
+							addOuterProduct(storage.blocks[problem.hessianDiagonalBlocks[contact.body[end]]], jacobian[end], jacobian[end], weight);
+						}
+					}
+					if(a >= 0 && b >= 0)
+					{
+						const int low = a < b ? 0 : 1;
+						addOuterProduct(storage.blocks[cross], jacobian[1 - low], jacobian[low], weight);
+					}
 				}
 			}
 		}
@@ -817,10 +1008,15 @@ static const Sparse& makeHessian(const Problem& problem, const Curvature& weight
 		}
 	}
 	SparseStorage& matrix = storage.matrix;
-	matrix.resize(size, size);
+	const bool sameStructure = storage.pairs == pairs;
 	// Sorted body pairs emit 21 entries per diagonal block and 36 per
 	// off-diagonal block, including structural zeros required by rank updates.
-	matrix.resizeNonZeros(int(pairCount) * 36 - bodies * 15);
+	if(!sameStructure)
+	{
+		matrix.resize(size, size);
+		matrix.resizeNonZeros(int(pairCount) * 36 - bodies * 15);
+		storage.pairs = pairs;
+	}
 	int* outer = matrix.outerIndexPtr();
 	int* inner = matrix.innerIndexPtr();
 	double* values = matrix.valuePtr();
@@ -835,21 +1031,30 @@ static const Sparse& makeHessian(const Problem& problem, const Curvature& weight
 		}
 		for(int axis = 0; axis < 6; ++axis)
 		{
-			outer[6 * body + axis] = entry;
+			if(!sameStructure)
+			{
+				outer[6 * body + axis] = entry;
+			}
 			for(std::uint32_t pair = begin; pair < end; ++pair)
 			{
 				const int second = int(std::uint32_t(pairs[pair]));
 				const int first = second == body ? axis : 0;
 				for(int row = first; row < 6; ++row)
 				{
-					inner[entry] = second * 6 + row;
+					if(!sameStructure)
+					{
+						inner[entry] = second * 6 + row;
+					}
 					values[entry++] = storage.blocks[pair](row, axis);
 				}
 			}
 		}
 		begin = end;
 	}
-	outer[size] = entry;
+	if(!sameStructure)
+	{
+		outer[size] = entry;
+	}
 	return matrix;
 }
 
@@ -912,22 +1117,50 @@ static bool solveDenseReference(const Sparse& matrix, ConstVector gradient, Muta
 	return true;
 }
 
+static void evaluateUnilateralImpulses(ConstVector contactVelocity, ConstVector inverseRoot, MutableVector impulse, Curvature* weights)
+{
+	const int rowCount = contactVelocity.size();
+#if defined(NEWTON_AVX2_FMA)
+	const __m256d zero = _mm256_setzero_pd();
+	int row = 0;
+	if(weights)
+	{
+		for(; row + 4 <= rowCount; row += 4)
+		{
+			const __m256d root = _mm256_loadu_pd(inverseRoot.data() + row);
+			const __m256d velocity = _mm256_loadu_pd(contactVelocity.data() + row);
+			const __m256d active = _mm256_cmp_pd(velocity, zero, _CMP_LT_OQ);
+			const __m256d drive = _mm256_max_pd(zero, _mm256_mul_pd(_mm256_sub_pd(zero, root), velocity));
+			_mm256_storeu_pd(impulse.data() + row, _mm256_mul_pd(root, drive));
+			_mm256_storeu_pd(weights->diagonal.data() + row, _mm256_and_pd(active, _mm256_mul_pd(root, root)));
+		}
+	}
+	else
+	{
+		for(; row + 4 <= rowCount; row += 4)
+		{
+			const __m256d root = _mm256_loadu_pd(inverseRoot.data() + row);
+			const __m256d velocity = _mm256_loadu_pd(contactVelocity.data() + row);
+			const __m256d drive = _mm256_max_pd(zero, _mm256_mul_pd(_mm256_sub_pd(zero, root), velocity));
+			_mm256_storeu_pd(impulse.data() + row, _mm256_mul_pd(root, drive));
+		}
+	}
+	for(; row < rowCount; ++row)
+#else
+	for(int row = 0; row < rowCount; ++row)
+#endif
+	{
+		impulse[row] = inverseRoot[row] * std::max(0.0, -inverseRoot[row] * contactVelocity[row]);
+		if(weights)
+		{
+			weights->diagonal[row] = contactVelocity[row] < 0.0 ? inverseRoot[row] * inverseRoot[row] : 0.0;
+		}
+	}
+}
+
 static bool evaluateImpulses(const Problem& problem, ConstVector contactVelocity, ConstVector inverseRoot, MutableVector impulse, Curvature* weights, PatchScratch& scratch)
 {
 	ConstVector compliance = problem.regularization;
-	if(problem.isUnilateral())
-	{
-		const int rowCount = problem.rowCount();
-		for(int row = 0; row < rowCount; ++row)
-		{
-			impulse[row] = inverseRoot[row] * std::max(0.0, -inverseRoot[row] * contactVelocity[row]);
-			if(weights)
-			{
-				weights->diagonal[row] = contactVelocity[row] < 0.0 ? inverseRoot[row] * inverseRoot[row] : 0.0;
-			}
-		}
-		return true;
-	}
 	std::uint32_t nextPatch = 0;
 	const std::uint32_t patchCount = std::uint32_t(problem.patches.size());
 	const int contactCount = int(problem.contacts.size());
@@ -1022,6 +1255,51 @@ static bool evaluateImpulses(const Problem& problem, ConstVector contactVelocity
 
 // These calls use distinct solver-owned input/output buffers. The prepared
 // Jacobian is compressed CSC with strictly increasing row indices per column.
+static void multiplyJacobianScalarContacts(const Problem& problem, ConstVector vector, MutableVector product)
+{
+	const double* NEWTON_RESTRICT input = vector.data();
+	double* NEWTON_RESTRICT output = product.data();
+	const CompactContact* NEWTON_RESTRICT contacts = problem.contacts.data();
+	const int runCount = int(problem.scalarContactRuns.size());
+	for(int runIndex = 0; runIndex < runCount; ++runIndex)
+	{
+		const ScalarContactRun& run = problem.scalarContactRuns[runIndex];
+		const int body0 = contacts[run.first].body[0];
+		const int body1 = contacts[run.first].body[1];
+		if(body0 >= 0 && body1 >= 0)
+		{
+			const double* NEWTON_RESTRICT input0 = input + 6 * body0;
+			const double* NEWTON_RESTRICT input1 = input + 6 * body1;
+			for(int i = run.first; i < run.end; ++i)
+			{
+				const CompactContact& contact = contacts[i];
+				assert(contact.row == i);
+				output[i] = dot6Pair(contact.jacobian[0].data(), input0, contact.jacobian[1].data(), input1);
+			}
+		}
+		else if(body0 >= 0)
+		{
+			const double* NEWTON_RESTRICT input0 = input + 6 * body0;
+			for(int i = run.first; i < run.end; ++i)
+			{
+				const CompactContact& contact = contacts[i];
+				assert(contact.row == i);
+				output[i] = dot6(contact.jacobian[0].data(), input0);
+			}
+		}
+		else
+		{
+			const double* NEWTON_RESTRICT input1 = input + 6 * body1;
+			for(int i = run.first; i < run.end; ++i)
+			{
+				const CompactContact& contact = contacts[i];
+				assert(contact.row == i);
+				output[i] = dot6(contact.jacobian[1].data(), input1);
+			}
+		}
+	}
+}
+
 static void multiplyJacobianCscSerial(const Problem& problem, ConstVector vector, MutableVector product)
 {
 	const double* NEWTON_RESTRICT values = problem.jacobian.valuePtr();
@@ -1097,6 +1375,11 @@ static void evaluateContactVelocityChunk(void* context, int index)
 
 static void multiplyJacobianCsc(const Problem& problem, ConstVector vector, MutableVector product, ParallelExecutor* parallelExecutor)
 {
+	if(problem.isUnilateral())
+	{
+		multiplyJacobianScalarContacts(problem, vector, product);
+		return;
+	}
 	if(parallelExecutor != NULL && problem.bodyCount() >= 500)
 	{
 		const int workers = parallelExecutor->acquireWorkerCount();
@@ -1136,6 +1419,94 @@ static void evaluateGradientColumns(const Problem& problem, const double* NEWTON
 	}
 }
 
+static void evaluateGradientScalarContacts(const Problem& problem, const double* NEWTON_RESTRICT impulse, const double* NEWTON_RESTRICT velocity, double* NEWTON_RESTRICT gradient)
+{
+	const int columnCount = int(problem.jacobian.cols());
+	std::fill_n(gradient, columnCount, 0.0);
+#if defined(NEWTON_AVX2_FMA)
+	const int runCount = int(problem.scalarContactRuns.size());
+	for(int runIndex = 0; runIndex < runCount; ++runIndex)
+	{
+		const ScalarContactRun& run = problem.scalarContactRuns[runIndex];
+		const int i = run.first, end = run.end;
+		const CompactContact& firstContact = problem.contacts[i];
+		assert(firstContact.row == i);
+		if(end - i > 1 && firstContact.body[0] != firstContact.body[1])
+		{
+			const int body0 = firstContact.body[0], body1 = firstContact.body[1];
+			__m256d gradient0First = _mm256_setzero_pd(), gradient1First = _mm256_setzero_pd();
+			__m128d gradient0End = _mm_setzero_pd(), gradient1End = _mm_setzero_pd();
+			if(body0 >= 0)
+			{
+				gradient0First = _mm256_loadu_pd(gradient + 6 * body0);
+				gradient0End = _mm_loadu_pd(gradient + 6 * body0 + 4);
+			}
+			if(body1 >= 0)
+			{
+				gradient1First = _mm256_loadu_pd(gradient + 6 * body1);
+				gradient1End = _mm_loadu_pd(gradient + 6 * body1 + 4);
+			}
+			for(int contactIndex = i; contactIndex < end; ++contactIndex)
+			{
+				const CompactContact& contact = problem.contacts[contactIndex];
+				assert(contact.row == contactIndex);
+				const __m256d scale = _mm256_set1_pd(impulse[contactIndex]);
+				if(body0 >= 0)
+				{
+					gradient0First = _mm256_fmadd_pd(scale, _mm256_loadu_pd(contact.jacobian[0].data()), gradient0First);
+					gradient0End = _mm_fmadd_pd(_mm256_castpd256_pd128(scale), _mm_loadu_pd(contact.jacobian[0].data() + 4), gradient0End);
+				}
+				if(body1 >= 0)
+				{
+					gradient1First = _mm256_fmadd_pd(scale, _mm256_loadu_pd(contact.jacobian[1].data()), gradient1First);
+					gradient1End = _mm_fmadd_pd(_mm256_castpd256_pd128(scale), _mm_loadu_pd(contact.jacobian[1].data() + 4), gradient1End);
+				}
+			}
+			if(body0 >= 0)
+			{
+				_mm256_storeu_pd(gradient + 6 * body0, gradient0First);
+				_mm_storeu_pd(gradient + 6 * body0 + 4, gradient0End);
+			}
+			if(body1 >= 0)
+			{
+				_mm256_storeu_pd(gradient + 6 * body1, gradient1First);
+				_mm_storeu_pd(gradient + 6 * body1 + 4, gradient1End);
+			}
+			continue;
+		}
+		const double scale = impulse[i];
+		if(firstContact.body[0] >= 0)
+		{
+			addScaled6(gradient + 6 * firstContact.body[0], firstContact.jacobian[0].data(), scale);
+		}
+		if(firstContact.body[1] >= 0)
+		{
+			addScaled6(gradient + 6 * firstContact.body[1], firstContact.jacobian[1].data(), scale);
+		}
+	}
+#else
+	const int contactCount = int(problem.contacts.size());
+	for(int i = 0; i < contactCount; ++i)
+	{
+		const CompactContact& contact = problem.contacts[i];
+		assert(contact.row == i);
+		const double scale = impulse[i];
+		if(contact.body[0] >= 0)
+		{
+			addScaled6(gradient + 6 * contact.body[0], contact.jacobian[0].data(), scale);
+		}
+		if(contact.body[1] >= 0)
+		{
+			addScaled6(gradient + 6 * contact.body[1], contact.jacobian[1].data(), scale);
+		}
+	}
+#endif
+	for(int column = 0; column < columnCount; ++column)
+	{
+		gradient[column] = velocity[column] - gradient[column];
+	}
+}
+
 static void evaluateGradientChunk(void* context, int index)
 {
 	GradientEvaluation& evaluation = *static_cast<GradientEvaluation*>(context);
@@ -1147,6 +1518,11 @@ static void evaluateGradientChunk(void* context, int index)
 
 static void evaluatePrimalGradientCsc(const Problem& problem, ConstVector velocity, ConstVector impulse, MutableVector gradient, ParallelExecutor* parallelExecutor)
 {
+	if(problem.isUnilateral())
+	{
+		evaluateGradientScalarContacts(problem, impulse.data(), velocity.data(), gradient.data());
+		return;
+	}
 	if(parallelExecutor != NULL && problem.bodyCount() >= 500)
 	{
 		const int workers = parallelExecutor->acquireWorkerCount();
@@ -1159,16 +1535,25 @@ static void evaluatePrimalGradientCsc(const Problem& problem, ConstVector veloci
 	}
 	evaluateGradientColumns(problem, impulse.data(), velocity.data(), gradient.data(), 0, int(problem.jacobian.cols()));
 }
-static bool evaluatePrimal(const Problem& problem, ConstVector velocity, ConstVector inverseRoot, MutableVector contactVelocity, MutableVector impulse, MutableVector gradient, Curvature* weights, PatchScratch& scratch, ParallelExecutor* parallelExecutor)
+static bool evaluatePrimalFromContactVelocity(const Problem& problem, ConstVector velocity, ConstVector inverseRoot, ConstVector contactVelocity, MutableVector impulse, MutableVector gradient, Curvature* weights, PatchScratch& scratch, ParallelExecutor* parallelExecutor)
 {
-	multiplyJacobianCsc(problem, velocity, contactVelocity, parallelExecutor);
-	contactVelocity += problem.freeVelocity;
-	if(!evaluateImpulses(problem, contactVelocity, inverseRoot, impulse, weights, scratch))
+	if(problem.isUnilateral())
+	{
+		evaluateUnilateralImpulses(contactVelocity, inverseRoot, impulse, weights);
+	}
+	else if(!evaluateImpulses(problem, contactVelocity, inverseRoot, impulse, weights, scratch))
 	{
 		return false;
 	}
 	evaluatePrimalGradientCsc(problem, velocity, impulse, gradient, parallelExecutor);
 	return true;
+}
+
+static bool evaluatePrimal(const Problem& problem, ConstVector velocity, ConstVector inverseRoot, MutableVector contactVelocity, MutableVector impulse, MutableVector gradient, Curvature* weights, PatchScratch& scratch, ParallelExecutor* parallelExecutor)
+{
+	multiplyJacobianCsc(problem, velocity, contactVelocity, parallelExecutor);
+	contactVelocity += problem.freeVelocity;
+	return evaluatePrimalFromContactVelocity(problem, velocity, inverseRoot, contactVelocity, impulse, gradient, weights, scratch, parallelExecutor);
 }
 
 #include "IncrementalCholesky.h"
@@ -1177,7 +1562,23 @@ static double primalCost(const Problem& problem, ConstVector velocity, ConstVect
 {
 	double quadratic = 0.0;
 	const int rowCount = impulse.size();
+#if defined(NEWTON_AVX2_FMA)
+	int row = 0;
+	for(; row + 4 <= rowCount; row += 4)
+	{
+		const __m256d values = _mm256_loadu_pd(impulse.data() + row);
+		const __m256d products = _mm256_mul_pd(_mm256_mul_pd(values, _mm256_loadu_pd(problem.regularization.data() + row)), values);
+		const __m128d low = _mm256_castpd256_pd128(products);
+		const __m128d high = _mm256_extractf128_pd(products, 1);
+		quadratic += _mm_cvtsd_f64(low);
+		quadratic += _mm_cvtsd_f64(_mm_unpackhi_pd(low, low));
+		quadratic += _mm_cvtsd_f64(high);
+		quadratic += _mm_cvtsd_f64(_mm_unpackhi_pd(high, high));
+	}
+	for(; row < rowCount; ++row)
+#else
 	for(int row = 0; row < rowCount; ++row)
+#endif
 	{
 		quadratic += impulse[row] * problem.regularization[row] * impulse[row];
 	}
@@ -1208,17 +1609,80 @@ struct NewtonStopping
 		return std::sqrt(norm) / (inertiaSum * problem.timestep);
 	}
 
-	double lineThreshold(const Problem& problem, ConstVector direction) const
-	{
-		double norm = 0.0;
-		const int rowCount = direction.size();
-		for(int row = 0; row < rowCount; ++row)
-		{
-			norm += direction[row] * direction[row] * problem.inverseMassDiagonal[row];
-		}
-		return tolerance * lineTolerance * problem.timestep * inertiaSum * std::sqrt(norm);
-	}
 };
+
+struct DirectionMetrics
+{
+	double gradient;
+	double velocity;
+	double squaredNorm;
+	double weightedNorm;
+	double velocityInfinity;
+	double directionInfinity;
+};
+
+static DirectionMetrics evaluateDirectionMetrics(ConstVector gradient, ConstVector velocity, ConstVector direction, ConstVector inverseMassDiagonal)
+{
+	DirectionMetrics result = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+	const int count = direction.size();
+#if defined(NEWTON_AVX2_FMA)
+	int row = 0;
+	for(; row + 4 <= count; row += 4)
+	{
+		const __m256d directionValues = _mm256_loadu_pd(direction.data() + row);
+		const __m256d velocityValues = _mm256_loadu_pd(velocity.data() + row);
+		const __m256d gradientProducts = _mm256_mul_pd(_mm256_loadu_pd(gradient.data() + row), directionValues);
+		const __m256d velocityProducts = _mm256_mul_pd(velocityValues, directionValues);
+		const __m256d normProducts = _mm256_mul_pd(directionValues, directionValues);
+		const __m256d weightedProducts = _mm256_mul_pd(normProducts, _mm256_loadu_pd(inverseMassDiagonal.data() + row));
+		const __m256d signMask = _mm256_set1_pd(-0.0);
+		const __m256d velocityAbsolute = _mm256_andnot_pd(signMask, velocityValues);
+		const __m256d directionAbsolute = _mm256_andnot_pd(signMask, directionValues);
+		const __m128d gradientLow = _mm256_castpd256_pd128(gradientProducts), gradientHigh = _mm256_extractf128_pd(gradientProducts, 1);
+		const __m128d velocityLow = _mm256_castpd256_pd128(velocityProducts), velocityHigh = _mm256_extractf128_pd(velocityProducts, 1);
+		const __m128d normLow = _mm256_castpd256_pd128(normProducts), normHigh = _mm256_extractf128_pd(normProducts, 1);
+		const __m128d weightedLow = _mm256_castpd256_pd128(weightedProducts), weightedHigh = _mm256_extractf128_pd(weightedProducts, 1);
+		result.gradient += _mm_cvtsd_f64(gradientLow);
+		result.gradient += _mm_cvtsd_f64(_mm_unpackhi_pd(gradientLow, gradientLow));
+		result.gradient += _mm_cvtsd_f64(gradientHigh);
+		result.gradient += _mm_cvtsd_f64(_mm_unpackhi_pd(gradientHigh, gradientHigh));
+		result.velocity += _mm_cvtsd_f64(velocityLow);
+		result.velocity += _mm_cvtsd_f64(_mm_unpackhi_pd(velocityLow, velocityLow));
+		result.velocity += _mm_cvtsd_f64(velocityHigh);
+		result.velocity += _mm_cvtsd_f64(_mm_unpackhi_pd(velocityHigh, velocityHigh));
+		result.squaredNorm += _mm_cvtsd_f64(normLow);
+		result.squaredNorm += _mm_cvtsd_f64(_mm_unpackhi_pd(normLow, normLow));
+		result.squaredNorm += _mm_cvtsd_f64(normHigh);
+		result.squaredNorm += _mm_cvtsd_f64(_mm_unpackhi_pd(normHigh, normHigh));
+		result.weightedNorm += _mm_cvtsd_f64(weightedLow);
+		result.weightedNorm += _mm_cvtsd_f64(_mm_unpackhi_pd(weightedLow, weightedLow));
+		result.weightedNorm += _mm_cvtsd_f64(weightedHigh);
+		result.weightedNorm += _mm_cvtsd_f64(_mm_unpackhi_pd(weightedHigh, weightedHigh));
+		const __m128d velocityAbsoluteLow = _mm256_castpd256_pd128(velocityAbsolute), velocityAbsoluteHigh = _mm256_extractf128_pd(velocityAbsolute, 1);
+		const __m128d directionAbsoluteLow = _mm256_castpd256_pd128(directionAbsolute), directionAbsoluteHigh = _mm256_extractf128_pd(directionAbsolute, 1);
+		result.velocityInfinity = std::max(result.velocityInfinity, _mm_cvtsd_f64(velocityAbsoluteLow));
+		result.velocityInfinity = std::max(result.velocityInfinity, _mm_cvtsd_f64(_mm_unpackhi_pd(velocityAbsoluteLow, velocityAbsoluteLow)));
+		result.velocityInfinity = std::max(result.velocityInfinity, _mm_cvtsd_f64(velocityAbsoluteHigh));
+		result.velocityInfinity = std::max(result.velocityInfinity, _mm_cvtsd_f64(_mm_unpackhi_pd(velocityAbsoluteHigh, velocityAbsoluteHigh)));
+		result.directionInfinity = std::max(result.directionInfinity, _mm_cvtsd_f64(directionAbsoluteLow));
+		result.directionInfinity = std::max(result.directionInfinity, _mm_cvtsd_f64(_mm_unpackhi_pd(directionAbsoluteLow, directionAbsoluteLow)));
+		result.directionInfinity = std::max(result.directionInfinity, _mm_cvtsd_f64(directionAbsoluteHigh));
+		result.directionInfinity = std::max(result.directionInfinity, _mm_cvtsd_f64(_mm_unpackhi_pd(directionAbsoluteHigh, directionAbsoluteHigh)));
+	}
+	for(; row < count; ++row)
+#else
+	for(int row = 0; row < count; ++row)
+#endif
+	{
+		result.gradient += gradient[row] * direction[row];
+		result.velocity += velocity[row] * direction[row];
+		result.squaredNorm += direction[row] * direction[row];
+		result.weightedNorm += direction[row] * direction[row] * inverseMassDiagonal[row];
+		result.velocityInfinity = std::max(result.velocityInfinity, std::abs(velocity[row]));
+		result.directionInfinity = std::max(result.directionInfinity, std::abs(direction[row]));
+	}
+	return result;
+}
 
 struct ConvexLineValue
 {
@@ -1227,25 +1691,151 @@ struct ConvexLineValue
 	bool valid;
 };
 
+template<bool ComputeCurvature>
+static ConvexLineValue evaluateUnilateralLine(int rowCount, ConstVector contactVelocity, ConstVector contactDirection, ConstVector inverseRoot, double velocitySlope, double directionNorm, double alpha)
+{
+	ConvexLineValue result = { velocitySlope + alpha * directionNorm, directionNorm, true };
+#if defined(NEWTON_AVX2_FMA)
+	const __m256d zero = _mm256_setzero_pd();
+	const __m256d alphaVector = _mm256_set1_pd(alpha);
+	__m256d slopeSum = zero;
+	__m256d curvatureSum = zero;
+	int row = 0;
+	for(; row + 4 <= rowCount; row += 4)
+	{
+		const __m256d direction = _mm256_loadu_pd(contactDirection.data() + row);
+		const __m256d velocity = _mm256_loadu_pd(contactVelocity.data() + row);
+		const __m256d drive = _mm256_sub_pd(_mm256_sub_pd(zero, velocity), _mm256_mul_pd(alphaVector, direction));
+		const __m256d active = _mm256_cmp_pd(drive, zero, _CMP_GT_OQ);
+		if(_mm256_testz_pd(active, active))
+		{
+			continue;
+		}
+		const __m256d root = _mm256_loadu_pd(inverseRoot.data() + row);
+		const __m256d slope = _mm256_and_pd(active, _mm256_mul_pd(direction, _mm256_mul_pd(root, _mm256_mul_pd(root, drive))));
+		slopeSum = _mm256_add_pd(slopeSum, slope);
+		if(ComputeCurvature)
+		{
+			const __m256d inverseCompliance = _mm256_mul_pd(root, root);
+			const __m256d curvature = _mm256_and_pd(active, _mm256_mul_pd(direction, _mm256_mul_pd(inverseCompliance, direction)));
+			curvatureSum = _mm256_add_pd(curvatureSum, curvature);
+		}
+	}
+	const __m128d slopeLow = _mm256_castpd256_pd128(slopeSum);
+	const __m128d slopeHigh = _mm256_extractf128_pd(slopeSum, 1);
+	result.slope -= _mm_cvtsd_f64(slopeLow) + _mm_cvtsd_f64(_mm_unpackhi_pd(slopeLow, slopeLow)) +
+		_mm_cvtsd_f64(slopeHigh) + _mm_cvtsd_f64(_mm_unpackhi_pd(slopeHigh, slopeHigh));
+	if(ComputeCurvature)
+	{
+		const __m128d curvatureLow = _mm256_castpd256_pd128(curvatureSum);
+		const __m128d curvatureHigh = _mm256_extractf128_pd(curvatureSum, 1);
+		result.curvature += _mm_cvtsd_f64(curvatureLow) + _mm_cvtsd_f64(_mm_unpackhi_pd(curvatureLow, curvatureLow)) +
+			_mm_cvtsd_f64(curvatureHigh) + _mm_cvtsd_f64(_mm_unpackhi_pd(curvatureHigh, curvatureHigh));
+	}
+	for(; row < rowCount; ++row)
+#else
+	for(int row = 0; row < rowCount; ++row)
+#endif
+	{
+		const double direction = contactDirection[row];
+		const double drive = -contactVelocity[row] - alpha * direction;
+		if(drive > 0.0)
+		{
+			const double root = inverseRoot[row];
+			result.slope -= direction * (root * (root * drive));
+			if(ComputeCurvature)
+			{
+				const double inverseCompliance = root * root;
+				result.curvature += direction * (inverseCompliance * direction);
+			}
+		}
+	}
+	return result;
+}
+
+// The objective/gradient evaluation immediately preceding a line search has
+// already projected the impulses and assembled the active curvature diagonal.
+// Reusing those values at alpha == 0 avoids reconstructing both from contact
+// velocity while retaining the same row order and arithmetic grouping.
+static ConvexLineValue evaluateUnilateralInitialLine(int rowCount, ConstVector contactDirection, ConstVector impulse, ConstVector diagonal, double velocitySlope, double directionNorm)
+{
+	ConvexLineValue result = { velocitySlope, directionNorm, true };
+#if defined(NEWTON_AVX2_FMA)
+	__m256d slopeSum = _mm256_setzero_pd();
+	__m256d curvatureSum = _mm256_setzero_pd();
+	int row = 0;
+	for(; row + 4 <= rowCount; row += 4)
+	{
+		const __m256d inverseCompliance = _mm256_loadu_pd(diagonal.data() + row);
+		const __m256i inverseComplianceBits = _mm256_castpd_si256(inverseCompliance);
+		if(_mm256_testz_si256(inverseComplianceBits, inverseComplianceBits))
+		{
+			continue;
+		}
+		const __m256d direction = _mm256_loadu_pd(contactDirection.data() + row);
+		const __m256d slope = _mm256_mul_pd(direction, _mm256_loadu_pd(impulse.data() + row));
+		slopeSum = _mm256_add_pd(slopeSum, slope);
+		const __m256d curvature = _mm256_mul_pd(direction, _mm256_mul_pd(inverseCompliance, direction));
+		curvatureSum = _mm256_add_pd(curvatureSum, curvature);
+	}
+	const __m128d slopeLow = _mm256_castpd256_pd128(slopeSum);
+	const __m128d slopeHigh = _mm256_extractf128_pd(slopeSum, 1);
+	result.slope -= _mm_cvtsd_f64(slopeLow) + _mm_cvtsd_f64(_mm_unpackhi_pd(slopeLow, slopeLow)) +
+		_mm_cvtsd_f64(slopeHigh) + _mm_cvtsd_f64(_mm_unpackhi_pd(slopeHigh, slopeHigh));
+	const __m128d curvatureLow = _mm256_castpd256_pd128(curvatureSum);
+	const __m128d curvatureHigh = _mm256_extractf128_pd(curvatureSum, 1);
+	result.curvature += _mm_cvtsd_f64(curvatureLow) + _mm_cvtsd_f64(_mm_unpackhi_pd(curvatureLow, curvatureLow)) +
+		_mm_cvtsd_f64(curvatureHigh) + _mm_cvtsd_f64(_mm_unpackhi_pd(curvatureHigh, curvatureHigh));
+	for(; row < rowCount; ++row)
+#else
+	for(int row = 0; row < rowCount; ++row)
+#endif
+	{
+		const double direction = contactDirection[row];
+		result.slope -= direction * impulse[row];
+		result.curvature += direction * (diagonal[row] * direction);
+	}
+	return result;
+}
+
+static bool staysInUnilateralSegment(int rowCount, ConstVector contactVelocity, ConstVector contactDirection, double alpha)
+{
+#if defined(NEWTON_AVX2_FMA)
+	const __m256d zero = _mm256_setzero_pd();
+	const __m256d alphaVector = _mm256_set1_pd(alpha);
+	int row = 0;
+	for(; row + 4 <= rowCount; row += 4)
+	{
+		const __m256d velocity = _mm256_loadu_pd(contactVelocity.data() + row);
+		const __m256d direction = _mm256_loadu_pd(contactDirection.data() + row);
+		const __m256d candidateVelocity = _mm256_fmadd_pd(alphaVector, direction, velocity);
+		const __m256d initiallyActive = _mm256_cmp_pd(velocity, zero, _CMP_LT_OQ);
+		const __m256d initiallyInactive = _mm256_cmp_pd(velocity, zero, _CMP_GE_OQ);
+		const __m256d crossedActive = _mm256_and_pd(initiallyActive, _mm256_cmp_pd(candidateVelocity, zero, _CMP_GT_OQ));
+		const __m256d crossedInactive = _mm256_and_pd(initiallyInactive, _mm256_cmp_pd(candidateVelocity, zero, _CMP_LT_OQ));
+		if(_mm256_movemask_pd(_mm256_or_pd(crossedActive, crossedInactive)) != 0)
+		{
+			return false;
+		}
+	}
+	for(; row < rowCount; ++row)
+#else
+	for(int row = 0; row < rowCount; ++row)
+#endif
+	{
+		const double velocity = contactVelocity[row];
+		const double candidateVelocity = velocity + alpha * contactDirection[row];
+		if((velocity < 0.0 && candidateVelocity > 0.0) || (velocity >= 0.0 && candidateVelocity < 0.0))
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
 static ConvexLineValue evaluateConvexLine(const Problem& problem, ConstVector contactVelocity, ConstVector contactDirection, ConstVector compliance, ConstVector inverseRoot, double velocitySlope, double directionNorm, double alpha, PatchScratch& scratch)
 {
 	ConvexLineValue result = { velocitySlope + alpha * directionNorm, directionNorm, true };
-	if(problem.isUnilateral())
-	{
-		const int rowCount = problem.rowCount();
-		for(int row = 0; row < rowCount; ++row)
-		{
-			const double direction = contactDirection[row];
-			const double drive = -contactVelocity[row] - alpha * direction;
-			if(drive > 0.0)
-			{
-				const double root = inverseRoot[row];
-				result.slope -= direction * (root * (root * drive));
-				result.curvature += direction * (root * root * direction);
-			}
-		}
-		return result;
-	}
 	std::uint32_t nextPatch = 0;
 	const std::uint32_t patchCount = std::uint32_t(problem.patches.size());
 	const int contactCount = int(problem.contacts.size());
@@ -1325,13 +1915,18 @@ static ConvexLineValue evaluateConvexLine(const Problem& problem, ConstVector co
 	return result;
 }
 
-static bool searchConvex(const Problem& problem, ConstVector velocity, ConstVector direction, ConstVector contactVelocity, ConstVector inverseRoot, MutableVector contactDirection, int& evaluations, PatchScratch& scratch, ParallelExecutor* parallelExecutor, double slopeTolerance, double& alphaResult)
+static bool searchConvex(const Problem& problem, ConstVector direction, ConstVector contactVelocity, ConstVector impulse, const Curvature& weights, ConstVector inverseRoot, MutableVector contactDirection, int& evaluations, PatchScratch& scratch, ParallelExecutor* parallelExecutor, double velocitySlope, double directionNorm, double slopeTolerance, double& alphaResult)
 {
 	// Reuse the contact velocity from the current objective/gradient evaluation.
 	ConstVector compliance = problem.regularization;
 	multiplyJacobianCsc(problem, direction, contactDirection, parallelExecutor);
-	const double velocitySlope = velocity.dot(direction), directionNorm = direction.squaredNorm();
-	const ConvexLineValue initial = evaluateConvexLine(problem, contactVelocity, contactDirection, compliance, inverseRoot, velocitySlope, directionNorm, 0.0, scratch);
+	const bool unilateral = problem.isUnilateral();
+	const auto evaluate = [&](double alpha)
+	{
+		return unilateral ? evaluateUnilateralLine<true>(problem.rowCount(), contactVelocity, contactDirection, inverseRoot, velocitySlope, directionNorm, alpha) :
+			evaluateConvexLine(problem, contactVelocity, contactDirection, compliance, inverseRoot, velocitySlope, directionNorm, alpha, scratch);
+	};
+	const ConvexLineValue initial = unilateral ? evaluateUnilateralInitialLine(problem.rowCount(), contactDirection, impulse, weights.diagonal, velocitySlope, directionNorm) : evaluate(0.0);
 	++evaluations;
 	if(!initial.valid)
 	{
@@ -1342,8 +1937,21 @@ static bool searchConvex(const Problem& problem, ConstVector velocity, ConstVect
 		alphaResult = 0.0;
 		return true;
 	}
+	const double initialCandidate = -initial.slope / initial.curvature;
+	if(unilateral && staysInUnilateralSegment(problem.rowCount(), contactVelocity, contactDirection, initialCandidate))
+	{
+		alphaResult = initialCandidate;
+		return true;
+	}
+	const auto evaluateUpper = [&](double alpha, bool computeCurvature)
+	{
+		return unilateral ? (computeCurvature ? evaluateUnilateralLine<true>(problem.rowCount(), contactVelocity, contactDirection, inverseRoot, velocitySlope, directionNorm, alpha) :
+			evaluateUnilateralLine<false>(problem.rowCount(), contactVelocity, contactDirection, inverseRoot, velocitySlope, directionNorm, alpha)) :
+			evaluateConvexLine(problem, contactVelocity, contactDirection, compliance, inverseRoot, velocitySlope, directionNorm, alpha, scratch);
+	};
 	double lower = 0.0, upper = 1.0;
-	ConvexLineValue atUpper = evaluateConvexLine(problem, contactVelocity, contactDirection, compliance, inverseRoot, velocitySlope, directionNorm, upper, scratch);
+	bool upperHasCurvature = unilateral && initialCandidate >= upper;
+	ConvexLineValue atUpper = evaluateUpper(upper, upperHasCurvature);
 	++evaluations;
 	if(!atUpper.valid)
 	{
@@ -1353,7 +1961,8 @@ static bool searchConvex(const Problem& problem, ConstVector velocity, ConstVect
 	{
 		lower = upper;
 		upper *= 2.0;
-		atUpper = evaluateConvexLine(problem, contactVelocity, contactDirection, compliance, inverseRoot, velocitySlope, directionNorm, upper, scratch);
+		upperHasCurvature = unilateral && initialCandidate >= upper;
+		atUpper = evaluateUpper(upper, upperHasCurvature);
 		++evaluations;
 		if(!atUpper.valid)
 		{
@@ -1363,8 +1972,9 @@ static bool searchConvex(const Problem& problem, ConstVector velocity, ConstVect
 	double alpha = clampValue(-initial.slope / initial.curvature, lower, upper);
 	for(int i = 0; i < 50; ++i)
 	{
-		const ConvexLineValue value = evaluateConvexLine(problem, contactVelocity, contactDirection, compliance, inverseRoot, velocitySlope, directionNorm, alpha, scratch);
-		++evaluations;
+		const bool reuseUpper = i == 0 && alpha == upper && upperHasCurvature;
+		const ConvexLineValue value = reuseUpper ? atUpper : evaluate(alpha);
+		evaluations += !reuseUpper;
 		if(!value.valid)
 		{
 			return false;
@@ -1506,7 +2116,7 @@ static SolveStatus::Enum solveNewtonInternal(const Problem& problem, const Setti
 			// This independent check is outside performance runs. It catches errors
 			// in signed updates and permutation by rebuilding the current Hessian.
 			HessianStorage referenceStorage;
-			const Sparse& matrix = makeHessian(problem, weights, referenceStorage);
+			const Sparse& matrix = makeHessian(problem, factor.currentWeights(), referenceStorage);
 			Vector expected;
 			if(!solveDenseReference(matrix, gradient, expected))
 			{
@@ -1526,21 +2136,24 @@ static SolveStatus::Enum solveNewtonInternal(const Problem& problem, const Setti
 		}
 		// Very stiff constraints can leave a cancellation residual after motion
 		// has converged. Stop when the computed correction reaches roundoff.
-		if(direction.infinityNorm() <= 1.0e-14 * std::max(1.0, velocity.infinityNorm()))
+		DirectionMetrics directionMetrics = evaluateDirectionMetrics(gradient, velocity, direction, problem.inverseMassDiagonal);
+		if(directionMetrics.directionInfinity <= 1.0e-14 * std::max(1.0, directionMetrics.velocityInfinity))
 		{
 			result.stopReason = 5;
 			break;
 		}
-		if(gradient.dot(direction) >= 0.0)
+		if(directionMetrics.gradient >= 0.0)
 		{
 			for(int row = 0; row < bodies; ++row)
 			{
 				direction[row] = -gradient[row];
 			}
+			directionMetrics = evaluateDirectionMetrics(gradient, velocity, direction, problem.inverseMassDiagonal);
 		}
 		const Clock::time_point lineStart = profileStart(settings.profile);
 		double alpha;
-		if(!searchConvex(problem, velocity, direction, contactVelocity, inverseRoot, workspace.contactDirection, result.lineSearchEvaluations, workspace.patchScratch, settings.parallelExecutor, stopping.lineThreshold(problem, direction), alpha))
+		const double lineThreshold = stopping.tolerance * stopping.lineTolerance * problem.timestep * stopping.inertiaSum * std::sqrt(directionMetrics.weightedNorm);
+		if(!searchConvex(problem, direction, contactVelocity, impulse, factor.currentWeights(), inverseRoot, workspace.contactDirection, result.lineSearchEvaluations, workspace.patchScratch, settings.parallelExecutor, directionMetrics.velocity, directionMetrics.squaredNorm, lineThreshold, alpha))
 		{
 			return SolveStatus::eNUMERICAL_FAILURE;
 		}
@@ -1559,7 +2172,20 @@ static SolveStatus::Enum solveNewtonInternal(const Problem& problem, const Setti
 		velocity.swap(nextVelocity);
 		result.iterations = iteration + 1;
 		evaluationStart = profileStart(settings.profile);
-		if(!evaluatePrimal(problem, velocity, inverseRoot, contactVelocity, impulse, gradient, &weights, workspace.patchScratch, settings.parallelExecutor))
+		// The line search has already computed J * direction. Reuse it for
+		// J * (velocity + alpha * direction), periodically rebuilding from
+		// velocity to bound accumulated floating-point error.
+		const bool refreshContactVelocity = (iteration & 7) == 7;
+		if(!refreshContactVelocity)
+		{
+			for(int row = 0; row < rows; ++row)
+			{
+				contactVelocity[row] += alpha * workspace.contactDirection[row];
+			}
+		}
+		if(!(refreshContactVelocity ?
+			evaluatePrimal(problem, velocity, inverseRoot, contactVelocity, impulse, gradient, &weights, workspace.patchScratch, settings.parallelExecutor) :
+			evaluatePrimalFromContactVelocity(problem, velocity, inverseRoot, contactVelocity, impulse, gradient, &weights, workspace.patchScratch, settings.parallelExecutor)))
 		{
 			return SolveStatus::eNUMERICAL_FAILURE;
 		}

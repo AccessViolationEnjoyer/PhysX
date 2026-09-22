@@ -97,6 +97,13 @@ struct Patch
 	double friction; // May change between solves without rebuilding the Jacobian.
 };
 
+struct ScalarContactRun
+{
+	int first;
+	int end;
+};
+
+
 struct Problem
 {
 	std::string name;
@@ -109,13 +116,16 @@ struct Problem
 	std::vector<Patch> patches;
 	bool hasFiniteBounds = false;
 	bool prepared = false;
+	bool compactJacobian = false;
 	// Core-assigned identity of prepared equations; bounds edits also invalidate continuation.
 	std::uint64_t preparationGeneration = 0;
 	SparseStorage jacobian;
 	std::vector<int> columnCursors;
 	std::vector<int> rowContact;
 	std::vector<int> coupledContacts;
+	std::vector<ScalarContactRun> scalarContactRuns;
 	std::vector<std::uint64_t> hessianPairs;
+	std::vector<int> hessianPairLookup;
 	std::vector<int> hessianContactBlocks;
 	std::vector<int> hessianDiagonalBlocks;
 	int equalityRows = 0;
@@ -134,9 +144,54 @@ struct Problem
 		scalarBounds.clear();
 		patches.clear();
 		prepared = false;
+		compactJacobian = false;
 	}
 	// Returns the new contact index; [0,MAX_IMPULSE] uses the ordinary scalar record.
-	int addScalarContact(const CompactContact& input, double lowerImpulse, double upperImpulse);
+	NEWTON_FORCE_INLINE int addScalarContact(const CompactContact& input, double lowerImpulse, double upperImpulse)
+	{
+		const CompactContact contact = input;
+		int block = 0;
+		if(lowerImpulse != 0.0 || upperImpulse != MAX_IMPULSE)
+		{
+			const ScalarBounds limits = { lowerImpulse, upperImpulse };
+			block = CompactContact::SCALAR_BOUNDS_TAG - int(scalarBounds.size());
+			reserveStorage(scalarBounds, std::uint32_t(scalarBounds.size()) + 1);
+			scalarBounds.push_back(limits);
+		}
+		reserveStorage(contacts, std::uint32_t(contacts.size()) + 1);
+		const int index = int(contacts.size());
+		contacts.push_back(contact);
+		contacts.back().row = 0;
+		contacts.back().block = block;
+		prepared = false;
+		return index;
+	}
+	// Native preparation can construct hot scalar rows directly in retained
+	// storage, avoiding a second 128-byte contact copy per emitted row.
+	NEWTON_FORCE_INLINE CompactContact& beginScalarContact()
+	{
+		reserveStorage(contacts, std::uint32_t(contacts.size()) + 1);
+		contacts.emplace_back();
+		CompactContact& contact = contacts.back();
+		contact.row = 0;
+		contact.block = 0;
+		prepared = false;
+		return contact;
+	}
+	NEWTON_FORCE_INLINE void cancelScalarContact()
+	{
+		contacts.pop_back();
+	}
+	NEWTON_FORCE_INLINE void finishScalarContact(double lowerImpulse, double upperImpulse)
+	{
+		if(lowerImpulse != 0.0 || upperImpulse != MAX_IMPULSE)
+		{
+			const ScalarBounds limits = { lowerImpulse, upperImpulse };
+			contacts.back().block = CompactContact::SCALAR_BOUNDS_TAG - int(scalarBounds.size());
+			reserveStorage(scalarBounds, std::uint32_t(scalarBounds.size()) + 1);
+			scalarBounds.push_back(limits);
+		}
+	}
 	// Change an existing bounded scalar sidecar without rebuilding J or allocating.
 	// Grouped patch rows keep their group contract; only ungrouped rows use this API.
 	void setScalarBounds(int contactIndex, double lowerImpulse, double upperImpulse) noexcept;
@@ -240,6 +295,9 @@ void prepareProblem(Problem& problem) noexcept;
 // addContact does not count. This call consumes columnCursors into CSC cursors;
 // reset and recount before each preparation.
 void prepareProblemFromColumnCounts(Problem& problem) noexcept;
+// Native scalar-unilateral systems can solve directly from compact contact rows
+// without materializing the duplicate CSC Jacobian. Other shapes fall back.
+void prepareCompactProblemFromColumnCounts(Problem& problem) noexcept;
 
 // Optional diagnostic; kept outside simulation solve timing.
 double computeResidual(const Problem& problem, ConstVector impulse);

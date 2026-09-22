@@ -45,29 +45,29 @@ namespace Dy
 // the one-byte static/sliding state stored in PhysX's existing friction stream.
 static const PxU8 NEWTON_FRICTION_STATE_MARKER = 0xff;
 
-static double dotNewtonContact(const PxVec3& a, const PxVec3& b)
+static PX_FORCE_INLINE double dotNewtonContact(const PxVec3& a, const PxVec3& b)
 {
 	return double(a.x) * b.x + double(a.y) * b.y + double(a.z) * b.z;
 }
 
-static bool hasContactImpulseLimit(PxReal maxImpulse)
+static PX_FORCE_INLINE bool hasContactImpulseLimit(PxReal maxImpulse)
 {
 	// PxsRigidCore uses 1e32f as its unlimited default.
 	return maxImpulse < 1.0e32f;
 }
 
-static double contactSpeed(const PxVec3& linear0, const PxVec3& angularVelocity0, const PxVec3& linear1, const PxVec3& angularVelocity1, const PxVec3& direction, const PxVec3& angular0, const PxVec3& angular1)
+static PX_FORCE_INLINE double contactSpeed(const PxVec3& linear0, const PxVec3& angularVelocity0, const PxVec3& linear1, const PxVec3& angularVelocity1, const PxVec3& direction, const PxVec3& angular0, const PxVec3& angular1)
 {
 	return dotNewtonContact(direction, linear0) - dotNewtonContact(direction, linear1) +
 		dotNewtonContact(angular0, angularVelocity0) - dotNewtonContact(angular1, angularVelocity1);
 }
 
-static double contactSpeed(const PxSolverBodyData& body0, const PxSolverBodyData& body1, const PxVec3& direction, const PxVec3& angular0, const PxVec3& angular1)
+static PX_FORCE_INLINE double contactSpeed(const PxSolverBodyData& body0, const PxSolverBodyData& body1, const PxVec3& direction, const PxVec3& angular0, const PxVec3& angular1)
 {
 	return contactSpeed(body0.linearVelocity, body0.angularVelocity, body1.linearVelocity, body1.angularVelocity, direction, angular0, angular1);
 }
 
-static void contactJacobian(newton::Vec6& jacobian, const PxSolverBodyData& body, const PxVec3& direction, const PxVec3& angular, PxI32 bodyIndex, double rootInverseMass, double sign, const PxU8* lockFlags)
+static PX_FORCE_INLINE void contactJacobian(newton::Vec6& jacobian, const PxSolverBodyData& body, const PxVec3& direction, const PxVec3& angular, PxI32 bodyIndex, double rootInverseMass, double sign, const PxU8* lockFlags)
 {
 	if(bodyIndex < 0)
 	{
@@ -76,15 +76,29 @@ static void contactJacobian(newton::Vec6& jacobian, const PxSolverBodyData& body
 	}
 	const double linearScale = sign * rootInverseMass;
 	const PxMat33& inertia = body.sqrtInvInertia;
+	const PxU8 locks = lockFlags ? lockFlags[bodyIndex] : 0;
+	if(!locks)
+	{
+		jacobian[0] = linearScale * direction[0];
+		jacobian[1] = linearScale * direction[1];
+		jacobian[2] = linearScale * direction[2];
+		jacobian[3] = sign * (double(inertia.column0[0]) * angular.x +
+			double(inertia.column1[0]) * angular.y + double(inertia.column2[0]) * angular.z);
+		jacobian[4] = sign * (double(inertia.column0[1]) * angular.x +
+			double(inertia.column1[1]) * angular.y + double(inertia.column2[1]) * angular.z);
+		jacobian[5] = sign * (double(inertia.column0[2]) * angular.x +
+			double(inertia.column1[2]) * angular.y + double(inertia.column2[2]) * angular.z);
+		return;
+	}
 	for(PxU32 axis = 0; axis < 3; ++axis)
 	{
-		jacobian[axis] = lockFlags && (lockFlags[bodyIndex] & (1 << axis)) ? 0.0 : linearScale * direction[axis];
+		jacobian[axis] = locks & (1 << axis) ? 0.0 : linearScale * direction[axis];
 		jacobian[axis + 3] = sign * (double(inertia.column0[axis]) * angular.x +
 			double(inertia.column1[axis]) * angular.y + double(inertia.column2[axis]) * angular.z);
 	}
 }
 
-static double prepareContactJacobian(newton::CompactContact& row, const PxSolverBodyData& body0, const PxSolverBodyData& body1, PxI32 bodyIndex0, PxI32 bodyIndex1, double rootInverseMass0, double rootInverseMass1, const PxVec3& direction, const PxVec3& angular0, const PxVec3& angular1, const PxU8* lockFlags)
+static PX_FORCE_INLINE double prepareContactJacobian(newton::CompactContact& row, const PxSolverBodyData& body0, const PxSolverBodyData& body1, PxI32 bodyIndex0, PxI32 bodyIndex1, double rootInverseMass0, double rootInverseMass1, const PxVec3& direction, const PxVec3& angular0, const PxVec3& angular1, const PxU8* lockFlags)
 {
 	row.body[0] = bodyIndex0;
 	row.body[1] = bodyIndex1;
@@ -93,7 +107,7 @@ static double prepareContactJacobian(newton::CompactContact& row, const PxSolver
 	return row.jacobian[0].squaredNorm() + row.jacobian[1].squaredNorm();
 }
 
-static void applyContactSlop(PxVec3& vector, double slop)
+static PX_FORCE_INLINE void applyContactSlop(PxVec3& vector, double slop)
 {
 	for(PxU32 axis = 0; axis < 3; ++axis)
 	{
@@ -104,7 +118,7 @@ static void applyContactSlop(PxVec3& vector, double slop)
 	}
 }
 
-static void contactTangents(const PxVec3& normal, const PxVec3& relativeVelocity, PxVec3& tangent0, PxVec3& tangent1)
+static PX_FORCE_INLINE void contactTangents(const PxVec3& normal, const PxVec3& relativeVelocity, PxVec3& tangent0, PxVec3& tangent1)
 {
 	tangent0 = relativeVelocity - normal * normal.dot(relativeVelocity);
 	if(tangent0.magnitudeSquared() <= 0.0001f)
@@ -170,17 +184,18 @@ static void extractNewtonContacts(PxsContactManagerOutput& contactOutput, PxCont
 	}
 }
 
-static void appendContactRow(const PxVec3& direction, const PxVec3& angular0, const PxVec3& angular1, double initialSpeed, double freeSpeed, double targetSpeed, double positionError, double stiffness, double damping, double impedance, double regularization, const PxSolverBodyData& body0, const PxSolverBodyData& body1, PxI32 bodyIndex0, PxI32 bodyIndex1, double rootInverseMass0, double rootInverseMass1, const NewtonContactSettings& settings, newton::Problem& problem, double upperImpulse)
+static PX_FORCE_INLINE void appendContactRow(const PxVec3& direction, const PxVec3& angular0, const PxVec3& angular1, double initialSpeed, double freeSpeed, double targetSpeed, double positionError, double stiffness, double damping, double impedance, double regularization, const PxSolverBodyData& body0, const PxSolverBodyData& body1, PxI32 bodyIndex0, PxI32 bodyIndex1, double rootInverseMass0, double rootInverseMass1, const NewtonContactSettings& settings, newton::Problem& problem, double upperImpulse)
 {
-	newton::CompactContact row;
+	newton::CompactContact& row = problem.beginScalarContact();
 	if(prepareContactJacobian(row, body0, body1, bodyIndex0, bodyIndex1, rootInverseMass0, rootInverseMass1, direction, angular0, angular1, settings.bodyLockFlags) == 0.0)
 	{
+		problem.cancelScalarContact();
 		return;
 	}
 	row.freeVelocity = freeSpeed - initialSpeed + settings.timestep *
 		(damping * (initialSpeed - targetSpeed) + stiffness * impedance * positionError);
 	row.regularization = regularization;
-	problem.addScalarContact(row, 0.0, upperImpulse);
+	problem.finishScalarContact(0.0, upperImpulse);
 }
 
 static bool prepareCompliantNormal(const PxContactPoint& contact, const PxVec3& normal, const PxVec3& angular0, const PxVec3& angular1, double penetration, const PxSolverBodyData& body0, const PxSolverBodyData& body1, PxI32 bodyIndex0, PxI32 bodyIndex1, double rootInverseMass0, double rootInverseMass1, const NewtonContactSettings& settings, newton::CompactContact& row)
@@ -202,13 +217,14 @@ static bool prepareCompliantNormal(const PxContactPoint& contact, const PxVec3& 
 
 static void appendCompliantNormal(const PxContactPoint& contact, const PxVec3& normal, const PxVec3& angular0, const PxVec3& angular1, double penetration, const PxSolverBodyData& body0, const PxSolverBodyData& body1, PxI32 bodyIndex0, PxI32 bodyIndex1, double rootInverseMass0, double rootInverseMass1, const NewtonContactSettings& settings, newton::Problem& problem)
 {
-	newton::CompactContact row;
+	newton::CompactContact& row = problem.beginScalarContact();
 	if(!prepareCompliantNormal(contact, normal, angular0, angular1, penetration, body0, body1, bodyIndex0, bodyIndex1, rootInverseMass0, rootInverseMass1, settings, row))
 	{
+		problem.cancelScalarContact();
 		return;
 	}
 	const double upper = hasContactImpulseLimit(contact.maxImpulse) ? contact.maxImpulse : newton::MAX_IMPULSE;
-	problem.addScalarContact(row, 0.0, upper);
+	problem.finishScalarContact(0.0, upper);
 }
 
 static void appendCompliantFriction(const PxContactPoint& contact, const PxVec3& normalAngular0, const PxVec3& normalAngular1, double penetration, const PxVec3& arm0, const PxVec3& arm1, const PxSolverBodyData& body0, const PxSolverBodyData& body1, PxI32 bodyIndex0, PxI32 bodyIndex1, double rootInverseMass0, double rootInverseMass1, PxReal offsetSlop, double friction, const NewtonContactSettings& settings, newton::Problem& problem, PxVec3& tangent0, PxVec3& tangent1)

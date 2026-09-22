@@ -484,6 +484,7 @@ static void prepareNewtonRows(NewtonSolver& solver, NewtonIslandWorkspace& works
 {
 	newton::Problem& problem = workspace.problem;
 	problem.clearContacts();
+	problem.columnCursors.clear();
 	workspace.joints.clear();
 	workspace.contacts.clear();
 	const PxReal timestep = context.getDt();
@@ -598,7 +599,7 @@ static bool solveNewtonRows(NewtonSolver& solver, NewtonIslandWorkspace& workspa
 		PX_PROFILE_ZONE("Dynamics.newtonPrepare", context.getContextId());
 		prepareNewtonBodies(solver, workspace, threadContext, bodyData, bodyCount, timestep);
 		prepareNewtonRows(solver, workspace, context, threadContext, allBodyData, firstBodyIndex, bodyCount);
-		newton::prepareProblem(workspace.problem);
+		newton::prepareCompactProblemFromColumnCounts(workspace.problem);
 	}
 	threadContext.mAxisConstraintCount = PxU32(workspace.problem.rowCount());
 	{
