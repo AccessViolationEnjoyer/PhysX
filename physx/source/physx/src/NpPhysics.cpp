@@ -356,18 +356,6 @@ PxScene* NpPhysics::createScene(const PxSceneDesc& desc)
 		mutableDesc.flags |= PxSceneFlag::eDISABLE_SLEEPING;
 	}
 
-	// Newton validation must also run in Release before constructing an unsupported scene.
-	if(mutableDesc.solverType != PxSolverType::ePGS && mutableDesc.solverType != PxSolverType::eTGS && mutableDesc.solverType != PxSolverType::eNEWTON)
-	{
-		mFoundation.error(PxErrorCode::eINVALID_PARAMETER, PX_FL, "Physics::createScene: invalid solver type.");
-		return NULL;
-	}
-	if(mutableDesc.solverType == PxSolverType::eNEWTON && !mutableDesc.isValid())
-	{
-		mFoundation.error(PxErrorCode::eINVALID_PARAMETER, PX_FL, "Physics::createScene: invalid Newton scene settings or unsupported GPU/TGS configuration.");
-		return NULL;
-	}
-
 	PX_CHECK_AND_RETURN_NULL(mutableDesc.isValid(), "Physics::createScene: desc.isValid() is false!");
 	const PxTolerancesScale& scale = mPhysics.getTolerancesScale();
 	const PxTolerancesScale& descScale = desc.getTolerancesScale();
@@ -390,8 +378,7 @@ PxScene* NpPhysics::createScene(const PxSceneDesc& desc)
 	}
 
 	// A missing Newton state must fail scene creation rather than select PGS.
-	if(mutableDesc.solverType == PxSolverType::eNEWTON &&
-		npScene->getScScene().getSolverType() != PxSolverType::eNEWTON)
+	if(mutableDesc.solverType == PxSolverType::eNEWTON && npScene->getScScene().getSolverType() != PxSolverType::eNEWTON)
 	{
 		PX_DELETE(npScene);
 		mFoundation.error(PxErrorCode::eOUT_OF_MEMORY, PX_FL, "Unable to create Newton scene. Solver state allocation failed.");

@@ -109,16 +109,11 @@ struct NewtonContactRows
 	}
 };
 
-const char* prepareNewtonContacts(PxsContactManager& manager, PxsContactManagerOutput& contactOutput,
-	const PxSolverBodyData& body0, const PxSolverBodyData& body1, PxI32 bodyIndex0, PxI32 bodyIndex1,
-	const NewtonContactSettings& settings, ThreadContext& threadContext,
-	newton::Problem& problem, NewtonContactRows& output);
+void prepareNewtonContacts(PxsContactManager& manager, PxsContactManagerOutput& contactOutput, const PxSolverBodyData& body0, const PxSolverBodyData& body1, PxI32 bodyIndex0, PxI32 bodyIndex1, const NewtonContactSettings& settings, ThreadContext& threadContext, newton::Problem& problem, NewtonContactRows& output);
 
-void writebackNewtonContacts(const NewtonContactRows& rows, const newton::Problem& problem,
-	const newton::Result& result, DynamicsContext& context);
+void writebackNewtonContacts(const NewtonContactRows& rows, const newton::Problem& problem, const newton::Result& result, DynamicsContext& context);
 
-bool updateNewtonDilatancyBias(NewtonContactRows& rows, newton::Problem& problem,
-	const newton::Result& result, PxReal velocityTolerance);
+bool updateNewtonDilatancyBias(NewtonContactRows& rows, newton::Problem& problem, const newton::Result& result, PxReal velocityTolerance);
 }
 }
 

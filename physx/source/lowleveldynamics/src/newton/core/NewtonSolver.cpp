@@ -1,5 +1,6 @@
 #include "NewtonSolver.h"
 #include <atomic>
+#include <cassert>
 #include "NewtonPatchProjection.h"
 #include <algorithm>
 #include <cmath>
@@ -94,8 +95,7 @@ static Vec3 weightedImpulse(const Vec3& drive, const double* NEWTON_RESTRICT com
 
 	const double scaledFriction = friction * compliance[0] * inverseRoot[0] * inverseRoot[2];
 	Mat3 projectionDerivative;
-	Vec3 impulse = inverseRoot.cwiseProduct(projectPyramid(inverseRoot.cwiseProduct(drive),
-		scaledFriction, derivative ? &projectionDerivative : NULL));
+	Vec3 impulse = inverseRoot.cwiseProduct(projectPyramid(inverseRoot.cwiseProduct(drive), scaledFriction, derivative ? &projectionDerivative : NULL));
 	if(derivative)
 	{
 		for(int column = 0; column < 3; ++column)
@@ -157,8 +157,7 @@ struct PatchScratch
 	}
 };
 
-static bool projectGroup(const Problem& problem, const Patch& patch, const double* velocity,
-	double* impulse, double* diagonal, double* coupling, PatchScratch& scratch, PatchProjectionResult& result)
+static bool projectGroup(const Problem& problem, const Patch& patch, const double* velocity, double* impulse, double* diagonal, double* coupling, PatchScratch& scratch, PatchProjectionResult& result)
 {
 	const int firstRow = problem.contacts[patch.firstContact].row;
 	for(int i = 0; i < patch.normalCount; ++i)
@@ -170,11 +169,8 @@ static bool projectGroup(const Problem& problem, const Patch& patch, const doubl
 	{
 		scratch.friction[i] = patch.friction;
 	}
-	const PatchProjectionInput input = { patch.normalCount, patch.tangentCount, velocity,
-		problem.regularization.data() + firstRow, scratch.cap.data(), velocity + patch.normalCount,
-		problem.regularization.data() + firstRow + patch.normalCount, scratch.friction };
-	const PatchProjectionOutput output = { impulse, impulse + patch.normalCount, diagonal,
-		diagonal ? diagonal + patch.normalCount : NULL, coupling };
+	const PatchProjectionInput input = { patch.normalCount, patch.tangentCount, velocity, problem.regularization.data() + firstRow, scratch.cap.data(), velocity + patch.normalCount, problem.regularization.data() + firstRow + patch.normalCount, scratch.friction };
+	const PatchProjectionOutput output = { impulse, impulse + patch.normalCount, diagonal, diagonal ? diagonal + patch.normalCount : NULL, coupling };
 	return projectPatchUnchecked(input, output, result);
 }
 
@@ -222,26 +218,22 @@ int Problem::addScalarContact(const CompactContact& input, double lowerImpulse, 
 	return index;
 }
 
-bool Problem::setScalarBounds(int contactIndex, double lowerImpulse, double upperImpulse) noexcept
+void Problem::setScalarBounds(int contactIndex, double lowerImpulse, double upperImpulse) noexcept
 {
-	if(contactIndex < 0 || contactIndex >= int(contacts.size()) || !(lowerImpulse <= upperImpulse) ||
-	   lowerImpulse == MAX_IMPULSE || upperImpulse == -MAX_IMPULSE || !contacts[contactIndex].hasScalarBounds())
-	{
-		return false;
-	}
+	assert(contactIndex >= 0 && contactIndex < int(contacts.size()));
+	assert(lowerImpulse <= upperImpulse && lowerImpulse != MAX_IMPULSE && upperImpulse != -MAX_IMPULSE);
+	assert(contacts[contactIndex].hasScalarBounds());
+#ifndef NDEBUG
 	const std::uint32_t patchCount = std::uint32_t(patches.size());
 	for(std::uint32_t i = 0; i < patchCount; ++i)
 	{
-		if(contactIndex >= patches[i].firstContact &&
-		   contactIndex < patches[i].firstContact + patches[i].normalCount + patches[i].tangentCount)
-		{
-			return false;
-		}
+		assert(!(contactIndex >= patches[i].firstContact && contactIndex < patches[i].firstContact + patches[i].normalCount + patches[i].tangentCount));
 	}
+#endif
 	ScalarBounds& limits = scalarBounds[std::uint32_t(CompactContact::SCALAR_BOUNDS_TAG - contacts[contactIndex].block)];
 	if(limits.lower == lowerImpulse && limits.upper == upperImpulse)
 	{
-		return true;
+		return;
 	}
 	const bool wasEquality = limits.lower == -MAX_IMPULSE && limits.upper == MAX_IMPULSE;
 	const bool isEquality = lowerImpulse == -MAX_IMPULSE && upperImpulse == MAX_IMPULSE;
@@ -256,7 +248,6 @@ bool Problem::setScalarBounds(int contactIndex, double lowerImpulse, double uppe
 	{
 		hasFiniteBounds = true;
 	}
-	return true;
 }
 
 int Problem::addPatch(int firstContact, int normalCount, int tangentCount, double friction)
@@ -307,39 +298,17 @@ void Problem::addContact(const Contact& input)
 	contacts.push_back(contact);
 }
 
+#ifndef NDEBUG
 static bool validContact(const Problem& problem, const CompactContact& contact)
 {
-	if(contact.body[0] < -1 || contact.body[1] < -1 || contact.body[0] >= problem.bodyCount() ||
-	   contact.body[1] >= problem.bodyCount() || (contact.body[0] >= 0 && contact.body[0] == contact.body[1]))
-	{
-		return false;
-	}
-	if(contact.hasScalarBounds())
-	{
-		const std::uint32_t index = std::uint32_t(CompactContact::SCALAR_BOUNDS_TAG - contact.block);
-		if(index >= problem.scalarBounds.size())
-		{
-			return false;
-		}
-		const ScalarBounds& limits = problem.scalarBounds[index];
-		return limits.lower <= limits.upper && limits.lower < MAX_IMPULSE && limits.upper > -MAX_IMPULSE;
-	}
-	if(contact.block)
-	{
-		const std::uint32_t index = std::uint32_t(contact.block > 0 ? contact.block - 1 : -contact.block - 1);
-		if(index >= problem.contactBlocks.size())
-		{
-			return false;
-		}
-		const ContactBlock& block = problem.contactBlocks[index];
-		if(contact.block > 0 && (block.friction < 0.0 || block.maxNormalImpulse < 0.0 ||
-								 block.regularization[0] != block.regularization[1]))
-		{
-			return false;
-		}
-	}
-	return true;
+	const bool validBodies = contact.body[0] >= -1 && contact.body[1] >= -1 && contact.body[0] < problem.bodyCount() && contact.body[1] < problem.bodyCount() && (contact.body[0] < 0 || contact.body[0] != contact.body[1]);
+	const std::uint32_t scalarIndex = std::uint32_t(CompactContact::SCALAR_BOUNDS_TAG - contact.block);
+	const bool validScalarBounds = !contact.hasScalarBounds() || (scalarIndex < problem.scalarBounds.size() && problem.scalarBounds[scalarIndex].lower <= problem.scalarBounds[scalarIndex].upper && problem.scalarBounds[scalarIndex].lower < MAX_IMPULSE && problem.scalarBounds[scalarIndex].upper > -MAX_IMPULSE);
+	const std::uint32_t blockIndex = std::uint32_t(contact.block > 0 ? contact.block - 1 : -std::int64_t(contact.block) - 1);
+	const bool validBlock = !contact.block || (blockIndex < problem.contactBlocks.size() && (contact.block < 0 || (problem.contactBlocks[blockIndex].friction >= 0.0 && problem.contactBlocks[blockIndex].maxNormalImpulse >= 0.0 && problem.contactBlocks[blockIndex].regularization[0] == problem.contactBlocks[blockIndex].regularization[1])));
+	return validBodies && validScalarBounds && validBlock;
 }
+#endif
 
 static std::uint64_t bodyPairKey(int body0, int body1)
 {
@@ -393,7 +362,7 @@ static void prepareHessianTopology(Problem& problem)
 }
 
 template<bool CountEntries>
-static bool prepareProblemInternal(Problem& problem)
+static void prepareProblemInternal(Problem& problem)
 {
 	// Every three-row contact owns one block; scalar contacts own none.
 	const int rows = int(problem.contacts.size()) + 2 * int(problem.contactBlocks.size());
@@ -402,42 +371,33 @@ static bool prepareProblemInternal(Problem& problem)
 	problem.equalityRows = 0;
 	problem.hasFiniteBounds = !problem.patches.empty();
 	problem.prepared = false;
-	if(problem.massDiagonal.size() != problem.bodyCount() * 6 ||
-	   (problem.massDiagonal.size() && problem.massDiagonal.minCoeff() <= 0.0))
-	{
-		return false;
-	}
+	assert(problem.massDiagonal.size() == problem.bodyCount() * 6);
+	assert(!problem.massDiagonal.size() || problem.massDiagonal.minCoeff() > 0.0);
 	const int massCount = problem.massDiagonal.size();
 	problem.inverseMassDiagonal.resize(massCount);
 	for(int i = 0; i < massCount; ++i)
 	{
 		problem.inverseMassDiagonal[i] = 1.0 / problem.massDiagonal[i];
 	}
-	int previousPatchEnd = 0;
 	const std::uint32_t patchCount = std::uint32_t(problem.patches.size());
 	const int contactCount = int(problem.contacts.size());
+#ifndef NDEBUG
+	int previousPatchEnd = 0;
 	for(std::uint32_t i = 0; i < patchCount; ++i)
 	{
 		const Patch& patch = problem.patches[i];
-		if(patch.normalCount <= 0 || patch.tangentCount < 0 || patch.tangentCount > 4 ||
-		   patch.firstContact < previousPatchEnd || patch.firstContact > contactCount ||
-		   patch.normalCount > contactCount - patch.firstContact - patch.tangentCount ||
-		   patch.friction < 0.0)
-		{
-			return false;
-		}
+		assert(patch.friction >= 0.0);
+		assert(patch.normalCount > 0 && patch.tangentCount >= 0 && patch.tangentCount <= 4 && patch.firstContact >= previousPatchEnd && patch.firstContact <= contactCount && patch.normalCount <= contactCount - patch.firstContact - patch.tangentCount);
 		previousPatchEnd = patch.firstContact + patch.normalCount + patch.tangentCount;
 	}
+#endif
 	if(CountEntries)
 	{
 		columnCounts.assign(problem.bodyCount() * 6, 0);
 		for(int i = 0; i < contactCount; ++i)
 		{
 			const CompactContact& contact = problem.contacts[i];
-			if(!validContact(problem, contact))
-			{
-				return false;
-			}
+			assert(validContact(problem, contact));
 			const int first = contact.rowCount() == 1 ? 2 : 0;
 			for(int end = 0; end < 2; ++end)
 			{
@@ -454,10 +414,7 @@ static bool prepareProblemInternal(Problem& problem)
 			}
 		}
 	}
-	if(columnCounts.size() != std::uint32_t(problem.bodyCount() * 6))
-	{
-		return false;
-	}
+	assert(columnCounts.size() == std::uint32_t(problem.bodyCount() * 6));
 	problem.freeVelocity.resize(rows);
 	problem.regularization.resize(rows);
 	reserveStorage(problem.rowContact, std::uint32_t(rows));
@@ -472,10 +429,7 @@ static bool prepareProblemInternal(Problem& problem)
 	{
 		problem.jacobian.outerIndexPtr()[column] = entries;
 		const int count = columnCounts[column];
-		if(count < 0 || count > std::numeric_limits<int>::max() - entries)
-		{
-			return false;
-		}
+		assert(count >= 0 && count <= std::numeric_limits<int>::max() - entries);
 		columnCounts[column] = entries;
 		entries += count;
 	}
@@ -488,43 +442,31 @@ static bool prepareProblemInternal(Problem& problem)
 		CompactContact& contact = problem.contacts[i];
 		if(!CountEntries)
 		{
-			if(!validContact(problem, contact))
-			{
-				return false;
-			}
+			assert(validContact(problem, contact));
 		}
 		while(nextPatch < patchCount && i >= problem.patches[nextPatch].firstContact + problem.patches[nextPatch].normalCount + problem.patches[nextPatch].tangentCount)
 		{
 			++nextPatch;
 		}
-		const Patch* patch = nextPatch < patchCount && i >= problem.patches[nextPatch].firstContact ?
-			&problem.patches[nextPatch] : NULL;
+		const Patch* patch = nextPatch < patchCount && i >= problem.patches[nextPatch].firstContact ? &problem.patches[nextPatch] : NULL;
 		if(patch)
 		{
+#ifndef NDEBUG
 			const CompactContact& first = problem.contacts[patch->firstContact];
-			if(contact.rowCount() != 1 || contact.body[0] != first.body[0] || contact.body[1] != first.body[1])
-			{
-				return false;
-			}
+			assert(contact.rowCount() == 1 && contact.body[0] == first.body[0] && contact.body[1] == first.body[1]);
+#endif
 			if(i < patch->firstContact + patch->normalCount)
 			{
-				if(contact.hasScalarBounds() && (problem.bounds(contact).lower != 0.0 || problem.bounds(contact).upper < 0.0))
-				{
-					return false;
-				}
+				assert(!contact.hasScalarBounds() || (problem.bounds(contact).lower == 0.0 && problem.bounds(contact).upper >= 0.0));
 			}
-			else if(!contact.hasScalarBounds() || problem.bounds(contact).lower != -MAX_IMPULSE ||
-					problem.bounds(contact).upper != MAX_IMPULSE)
+			else
 			{
-				return false;
+				assert(contact.hasScalarBounds() && problem.bounds(contact).lower == -MAX_IMPULSE && problem.bounds(contact).upper == MAX_IMPULSE);
 			}
 		}
 		contact.row = nextRow;
 		nextRow += contact.rowCount();
-		if(nextRow > rows)
-		{
-			return false;
-		}
+		assert(nextRow <= rows);
 		if(contact.hasScalarBounds())
 		{
 			const ScalarBounds& limits = problem.bounds(contact);
@@ -561,10 +503,7 @@ static bool prepareProblemInternal(Problem& problem)
 			problem.rowContact[row] = i;
 			problem.freeVelocity[row] = axis == 2 ? contact.freeVelocity : problem.block(contact).freeVelocity[axis];
 			problem.regularization[row] = axis == 2 ? contact.regularization : problem.block(contact).regularization[axis];
-			if(!(problem.regularization[row] > 0.0))
-			{
-				return false;
-			}
+			assert(problem.regularization[row] > 0.0);
 			for(int end = 0; end < 2; ++end)
 			{
 				if(contact.body[end] >= 0)
@@ -582,23 +521,20 @@ static bool prepareProblemInternal(Problem& problem)
 			}
 		}
 	}
-	problem.prepared = nextRow == rows;
-	if(problem.prepared)
-	{
-		prepareHessianTopology(problem);
-		problem.preparationGeneration = nextPreparationGeneration();
-	}
-	return problem.prepared;
+	assert(nextRow == rows);
+	problem.prepared = true;
+	prepareHessianTopology(problem);
+	problem.preparationGeneration = nextPreparationGeneration();
 }
 
-SolveStatus::Enum prepareProblem(Problem& problem) noexcept
+void prepareProblem(Problem& problem) noexcept
 {
-	return prepareProblemInternal<true>(problem) ? SolveStatus::eSUCCESS : SolveStatus::eINVALID_INPUT;
+	prepareProblemInternal<true>(problem);
 }
 
-SolveStatus::Enum prepareProblemFromColumnCounts(Problem& problem) noexcept
+void prepareProblemFromColumnCounts(Problem& problem) noexcept
 {
-	return prepareProblemInternal<false>(problem) ? SolveStatus::eSUCCESS : SolveStatus::eINVALID_INPUT;
+	prepareProblemInternal<false>(problem);
 }
 
 double computeResidual(const Problem& problem, ConstVector impulse)
@@ -670,9 +606,7 @@ double computeResidual(const Problem& problem, ConstVector impulse)
 			{
 				scratch.friction[row] = patch.friction;
 			}
-			const PatchProjectionInput input = { patch.normalCount, patch.tangentCount, scratch.velocity.data(),
-				unitRegularization.data(), scratch.cap.data(), scratch.velocity.data() + patch.normalCount,
-				unitRegularization.data() + patch.normalCount, scratch.friction };
+			const PatchProjectionInput input = { patch.normalCount, patch.tangentCount, scratch.velocity.data(), unitRegularization.data(), scratch.cap.data(), scratch.velocity.data() + patch.normalCount, unitRegularization.data() + patch.normalCount, scratch.friction };
 			const PatchProjectionOutput output = { scratch.impulse.data(), scratch.impulse.data() + patch.normalCount, NULL, NULL, NULL };
 			PatchProjectionResult projection;
 			if(!projectPatchUnchecked(input, output, projection))
@@ -700,16 +634,14 @@ double computeResidual(const Problem& problem, ConstVector impulse)
 		if(c.rowCount() == 1)
 		{
 			const double trial = impulse[c.row] - velocity[c.row] / response;
-			const double projected = c.hasScalarBounds() ?
-				clampValue(trial, problem.bounds(c).lower, problem.bounds(c).upper) : std::max(0.0, trial);
+			const double projected = c.hasScalarBounds() ? clampValue(trial, problem.bounds(c).lower, problem.bounds(c).upper) : std::max(0.0, trial);
 			error = std::max(error, response * std::abs(impulse[c.row] - projected));
 		}
 		else
 		{
 			const Vec3 trial = impulse.segment<3>(c.row) - velocity.segment<3>(c.row) / response;
 			const double unit[3] = { 1.0, 1.0, 1.0 };
-			const Vec3 projected = c.block < 0 ? trial : weightedImpulse(trial, unit, unit,
-				problem.block(c).friction, NULL, false, problem.block(c).maxNormalImpulse);
+			const Vec3 projected = c.block < 0 ? trial : weightedImpulse(trial, unit, unit, problem.block(c).friction, NULL, false, problem.block(c).maxNormalImpulse);
 			error = std::max(error, response * (impulse.segment<3>(c.row) - projected).cwiseAbs().maxCoeff());
 		}
 	}
@@ -737,8 +669,7 @@ static void addOuterProduct(BodyBlock& block, const Vec6& left, const Vec6& righ
 	}
 }
 
-static void addJacobianProduct(BodyBlock& block, const Jacobian& left, const Mat3& weight,
-	const Jacobian& right)
+static void addJacobianProduct(BodyBlock& block, const Jacobian& left, const Mat3& weight, const Jacobian& right)
 {
 	for(int column = 0; column < 6; ++column)
 	{
@@ -750,12 +681,9 @@ static void addJacobianProduct(BodyBlock& block, const Jacobian& left, const Mat
 		const __m256d multiplier0 = _mm256_set1_pd(weighted0);
 		const __m256d multiplier1 = _mm256_set1_pd(weighted1);
 		const __m256d multiplier2 = _mm256_set1_pd(weighted2);
-		__m256d value = _mm256_mul_pd(multiplier0,
-			_mm256_set_pd(left(0, 3), left(0, 2), left(0, 1), left(0, 0)));
-		value = _mm256_fmadd_pd(multiplier1,
-			_mm256_set_pd(left(1, 3), left(1, 2), left(1, 1), left(1, 0)), value);
-		value = _mm256_fmadd_pd(multiplier2,
-			_mm256_set_pd(left(2, 3), left(2, 2), left(2, 1), left(2, 0)), value);
+		__m256d value = _mm256_mul_pd(multiplier0, _mm256_set_pd(left(0, 3), left(0, 2), left(0, 1), left(0, 0)));
+		value = _mm256_fmadd_pd(multiplier1, _mm256_set_pd(left(1, 3), left(1, 2), left(1, 1), left(1, 0)), value);
+		value = _mm256_fmadd_pd(multiplier2, _mm256_set_pd(left(2, 3), left(2, 2), left(2, 1), left(2, 0)), value);
 		double* destination = block.data() + 6 * column;
 		_mm256_storeu_pd(destination, _mm256_add_pd(_mm256_loadu_pd(destination), value));
 		const __m128d multiplier0End = _mm256_castpd256_pd128(multiplier0);
@@ -828,8 +756,7 @@ static const Sparse& makeHessian(const Problem& problem, const Curvature& weight
 				if(contact.body[end] >= 0)
 				{
 					jacobian[end] = problem.contactJacobian(contact, end);
-					addJacobianProduct(storage.blocks[problem.hessianDiagonalBlocks[contact.body[end]]],
-						jacobian[end], weight, jacobian[end]);
+					addJacobianProduct(storage.blocks[problem.hessianDiagonalBlocks[contact.body[end]]], jacobian[end], weight, jacobian[end]);
 				}
 			}
 			if(a >= 0 && b >= 0)
@@ -854,8 +781,7 @@ static const Sparse& makeHessian(const Problem& problem, const Curvature& weight
 					if(contact.body[end] >= 0)
 					{
 						jacobian[end] = problem.contactRow(contact, end, axis);
-						addOuterProduct(storage.blocks[problem.hessianDiagonalBlocks[contact.body[end]]],
-							jacobian[end], jacobian[end], weight);
+						addOuterProduct(storage.blocks[problem.hessianDiagonalBlocks[contact.body[end]]], jacobian[end], jacobian[end], weight);
 					}
 				}
 				if(a >= 0 && b >= 0)
@@ -986,8 +912,7 @@ static bool solveDenseReference(const Sparse& matrix, ConstVector gradient, Muta
 	return true;
 }
 
-static bool evaluateImpulses(const Problem& problem, ConstVector contactVelocity, ConstVector inverseRoot,
-	MutableVector impulse, Curvature* weights, PatchScratch& scratch)
+static bool evaluateImpulses(const Problem& problem, ConstVector contactVelocity, ConstVector inverseRoot, MutableVector impulse, Curvature* weights, PatchScratch& scratch)
 {
 	ConstVector compliance = problem.regularization;
 	if(problem.isUnilateral())
@@ -1013,8 +938,7 @@ static bool evaluateImpulses(const Problem& problem, ConstVector contactVelocity
 			const Patch& group = problem.patches[nextPatch];
 			const int first = problem.contacts[i].row;
 			PatchProjectionResult projection;
-			if(!projectGroup(problem, group, contactVelocity.data() + first, impulse.data() + first,
-							 weights ? weights->diagonal.data() + first : NULL, weights ? scratch.coupling : NULL, scratch, projection))
+			if(!projectGroup(problem, group, contactVelocity.data() + first, impulse.data() + first, weights ? weights->diagonal.data() + first : NULL, weights ? scratch.coupling : NULL, scratch, projection))
 			{
 				return false;
 			}
@@ -1089,9 +1013,7 @@ static bool evaluateImpulses(const Problem& problem, ConstVector contactVelocity
 		}
 		else
 		{
-			const Vec3 value = weightedImpulse(-contactVelocity.segment<3>(row), compliance.data() + row, inverseRoot.data() + row,
-				problem.block(contact).friction, weights ? &weights->coupled[problem.coupledIndex(contact)] : NULL,
-				false, problem.block(contact).maxNormalImpulse);
+			const Vec3 value = weightedImpulse(-contactVelocity.segment<3>(row), compliance.data() + row, inverseRoot.data() + row, problem.block(contact).friction, weights ? &weights->coupled[problem.coupledIndex(contact)] : NULL, false, problem.block(contact).maxNormalImpulse);
 			storeVector<3>(impulse.data() + row, value);
 		}
 	}
@@ -1173,8 +1095,7 @@ static void evaluateContactVelocityChunk(void* context, int index)
 	}
 }
 
-static void multiplyJacobianCsc(const Problem& problem, ConstVector vector, MutableVector product,
-	ParallelExecutor* parallelExecutor)
+static void multiplyJacobianCsc(const Problem& problem, ConstVector vector, MutableVector product, ParallelExecutor* parallelExecutor)
 {
 	if(parallelExecutor != NULL && problem.bodyCount() >= 500)
 	{
@@ -1224,8 +1145,7 @@ static void evaluateGradientChunk(void* context, int index)
 	evaluateGradientColumns(*evaluation.problem, evaluation.impulse, evaluation.velocity, evaluation.gradient, first, last);
 }
 
-static void evaluatePrimalGradientCsc(const Problem& problem, ConstVector velocity,
-	ConstVector impulse, MutableVector gradient, ParallelExecutor* parallelExecutor)
+static void evaluatePrimalGradientCsc(const Problem& problem, ConstVector velocity, ConstVector impulse, MutableVector gradient, ParallelExecutor* parallelExecutor)
 {
 	if(parallelExecutor != NULL && problem.bodyCount() >= 500)
 	{
@@ -1239,8 +1159,7 @@ static void evaluatePrimalGradientCsc(const Problem& problem, ConstVector veloci
 	}
 	evaluateGradientColumns(problem, impulse.data(), velocity.data(), gradient.data(), 0, int(problem.jacobian.cols()));
 }
-static bool evaluatePrimal(const Problem& problem, ConstVector velocity, ConstVector inverseRoot,
-	MutableVector contactVelocity, MutableVector impulse, MutableVector gradient, Curvature* weights, PatchScratch& scratch, ParallelExecutor* parallelExecutor)
+static bool evaluatePrimal(const Problem& problem, ConstVector velocity, ConstVector inverseRoot, MutableVector contactVelocity, MutableVector impulse, MutableVector gradient, Curvature* weights, PatchScratch& scratch, ParallelExecutor* parallelExecutor)
 {
 	multiplyJacobianCsc(problem, velocity, contactVelocity, parallelExecutor);
 	contactVelocity += problem.freeVelocity;
@@ -1276,10 +1195,7 @@ struct NewtonStopping
 	double inertiaSum;
 	double costScale;
 
-	NewtonStopping(const Problem& problem, const Settings& settings)
-		: tolerance(settings.tolerance), lineTolerance(settings.lineTolerance),
-		inertiaSum(problem.massDiagonal.sum()),
-		costScale(1.0 / (inertiaSum * problem.timestep * problem.timestep)) {}
+	NewtonStopping(const Problem& problem, const Settings& settings) : tolerance(settings.tolerance), lineTolerance(settings.lineTolerance), inertiaSum(problem.massDiagonal.sum()), costScale(1.0 / (inertiaSum * problem.timestep * problem.timestep)) {}
 
 	double gradientNorm(const Problem& problem, ConstVector gradient) const
 	{
@@ -1311,8 +1227,7 @@ struct ConvexLineValue
 	bool valid;
 };
 
-static ConvexLineValue evaluateConvexLine(const Problem& problem, ConstVector contactVelocity, ConstVector contactDirection,
-	ConstVector compliance, ConstVector inverseRoot, double velocitySlope, double directionNorm, double alpha, PatchScratch& scratch)
+static ConvexLineValue evaluateConvexLine(const Problem& problem, ConstVector contactVelocity, ConstVector contactDirection, ConstVector compliance, ConstVector inverseRoot, double velocitySlope, double directionNorm, double alpha, PatchScratch& scratch)
 {
 	ConvexLineValue result = { velocitySlope + alpha * directionNorm, directionNorm, true };
 	if(problem.isUnilateral())
@@ -1346,8 +1261,7 @@ static ConvexLineValue evaluateConvexLine(const Problem& problem, ConstVector co
 				scratch.velocity[row] = contactVelocity[first + row] + alpha * contactDirection[first + row];
 			}
 			PatchProjectionResult projection;
-			if(!projectGroup(problem, group, scratch.velocity.data(), scratch.impulse.data(), scratch.diagonal.data(),
-				scratch.coupling, scratch, projection))
+			if(!projectGroup(problem, group, scratch.velocity.data(), scratch.impulse.data(), scratch.diagonal.data(), scratch.coupling, scratch, projection))
 			{
 				result.valid = false;
 				return result;
@@ -1402,8 +1316,7 @@ static ConvexLineValue evaluateConvexLine(const Problem& problem, ConstVector co
 		{
 			const Vec3 direction = contactDirection.segment<3>(row);
 			Mat3 derivative;
-			const Vec3 impulse = weightedImpulse(-contactVelocity.segment<3>(row) - alpha * direction,
-				compliance.data() + row, inverseRoot.data() + row, problem.block(contact).friction, &derivative, contact.block < 0, problem.block(contact).maxNormalImpulse);
+			const Vec3 impulse = weightedImpulse(-contactVelocity.segment<3>(row) - alpha * direction, compliance.data() + row, inverseRoot.data() + row, problem.block(contact).friction, &derivative, contact.block < 0, problem.block(contact).maxNormalImpulse);
 			result.slope -= direction.dot(impulse);
 			result.curvature += direction.dot(derivative * direction);
 		}
@@ -1412,16 +1325,13 @@ static ConvexLineValue evaluateConvexLine(const Problem& problem, ConstVector co
 	return result;
 }
 
-static bool searchConvex(const Problem& problem, ConstVector velocity, ConstVector direction,
-	ConstVector contactVelocity, ConstVector inverseRoot, MutableVector contactDirection, int& evaluations,
-	PatchScratch& scratch, ParallelExecutor* parallelExecutor, double slopeTolerance, double& alphaResult)
+static bool searchConvex(const Problem& problem, ConstVector velocity, ConstVector direction, ConstVector contactVelocity, ConstVector inverseRoot, MutableVector contactDirection, int& evaluations, PatchScratch& scratch, ParallelExecutor* parallelExecutor, double slopeTolerance, double& alphaResult)
 {
 	// Reuse the contact velocity from the current objective/gradient evaluation.
 	ConstVector compliance = problem.regularization;
 	multiplyJacobianCsc(problem, direction, contactDirection, parallelExecutor);
 	const double velocitySlope = velocity.dot(direction), directionNorm = direction.squaredNorm();
-	const ConvexLineValue initial = evaluateConvexLine(problem, contactVelocity, contactDirection, compliance, inverseRoot,
-		velocitySlope, directionNorm, 0.0, scratch);
+	const ConvexLineValue initial = evaluateConvexLine(problem, contactVelocity, contactDirection, compliance, inverseRoot, velocitySlope, directionNorm, 0.0, scratch);
 	++evaluations;
 	if(!initial.valid)
 	{
@@ -1433,8 +1343,7 @@ static bool searchConvex(const Problem& problem, ConstVector velocity, ConstVect
 		return true;
 	}
 	double lower = 0.0, upper = 1.0;
-	ConvexLineValue atUpper = evaluateConvexLine(problem, contactVelocity, contactDirection, compliance, inverseRoot,
-		velocitySlope, directionNorm, upper, scratch);
+	ConvexLineValue atUpper = evaluateConvexLine(problem, contactVelocity, contactDirection, compliance, inverseRoot, velocitySlope, directionNorm, upper, scratch);
 	++evaluations;
 	if(!atUpper.valid)
 	{
@@ -1444,8 +1353,7 @@ static bool searchConvex(const Problem& problem, ConstVector velocity, ConstVect
 	{
 		lower = upper;
 		upper *= 2.0;
-		atUpper = evaluateConvexLine(problem, contactVelocity, contactDirection, compliance, inverseRoot,
-			velocitySlope, directionNorm, upper, scratch);
+		atUpper = evaluateConvexLine(problem, contactVelocity, contactDirection, compliance, inverseRoot, velocitySlope, directionNorm, upper, scratch);
 		++evaluations;
 		if(!atUpper.valid)
 		{
@@ -1455,15 +1363,13 @@ static bool searchConvex(const Problem& problem, ConstVector velocity, ConstVect
 	double alpha = clampValue(-initial.slope / initial.curvature, lower, upper);
 	for(int i = 0; i < 50; ++i)
 	{
-		const ConvexLineValue value = evaluateConvexLine(problem, contactVelocity, contactDirection, compliance, inverseRoot,
-			velocitySlope, directionNorm, alpha, scratch);
+		const ConvexLineValue value = evaluateConvexLine(problem, contactVelocity, contactDirection, compliance, inverseRoot, velocitySlope, directionNorm, alpha, scratch);
 		++evaluations;
 		if(!value.valid)
 		{
 			return false;
 		}
-		if(std::abs(value.slope) <= (slopeTolerance > 0.0 ? slopeTolerance :
-			1.0e-10 * std::max(1.0, std::abs(initial.slope))))
+		if(std::abs(value.slope) <= (slopeTolerance > 0.0 ? slopeTolerance : 1.0e-10 * std::max(1.0, std::abs(initial.slope))))
 		{
 			alphaResult = alpha;
 			return true;
@@ -1493,25 +1399,15 @@ struct WorkspaceData
 	std::uint64_t continuationGeneration = 0;
 };
 
-static SolveStatus::Enum solveNewtonInternal(const Problem& problem, const Settings& settings, Result& result,
-	WorkspaceData& workspace, const Result* previous, bool continuation)
+static SolveStatus::Enum solveNewtonInternal(const Problem& problem, const Settings& settings, Result& result, WorkspaceData& workspace, const Result* previous, bool continuation)
 {
 	static_cast<SolverStatistics&>(result) = SolverStatistics();
 	const int expectedSize = problem.bodyCount() * 6;
-	if(!problem.prepared || !(problem.timestep > 0.0) || settings.iterations < 0 ||
-	   settings.tolerance < 0.0 || settings.lineTolerance < 0.0 ||
-	   problem.massDiagonal.size() != expectedSize || problem.jacobian.cols() != expectedSize ||
-	   problem.jacobian.rows() != problem.rowCount() || problem.regularization.size() != problem.rowCount() ||
-	   (previous && previous->primal.size() != expectedSize))
-	{
-		return SolveStatus::eINVALID_INPUT;
-	}
+	assert(settings.iterations >= 0 && settings.tolerance >= 0.0 && settings.lineTolerance >= 0.0);
+	assert(problem.prepared && problem.timestep > 0.0 && problem.massDiagonal.size() == expectedSize && problem.jacobian.cols() == expectedSize && problem.jacobian.rows() == problem.rowCount() && problem.regularization.size() == problem.rowCount() && (!previous || previous->primal.size() == expectedSize));
 	if(expectedSize == 0)
 	{
-		if(problem.rowCount() != 0)
-		{
-			return SolveStatus::eINVALID_INPUT;
-		}
+		assert(problem.rowCount() == 0);
 		result.primal.resize(0);
 		result.impulse.resize(0);
 		result.stopReason = 1;
@@ -1644,9 +1540,7 @@ static SolveStatus::Enum solveNewtonInternal(const Problem& problem, const Setti
 		}
 		const Clock::time_point lineStart = profileStart(settings.profile);
 		double alpha;
-		if(!searchConvex(problem, velocity, direction, contactVelocity, inverseRoot, workspace.contactDirection,
-			result.lineSearchEvaluations, workspace.patchScratch, settings.parallelExecutor,
-			stopping.lineThreshold(problem, direction), alpha))
+		if(!searchConvex(problem, velocity, direction, contactVelocity, inverseRoot, workspace.contactDirection, result.lineSearchEvaluations, workspace.patchScratch, settings.parallelExecutor, stopping.lineThreshold(problem, direction), alpha))
 		{
 			return SolveStatus::eNUMERICAL_FAILURE;
 		}
@@ -1700,12 +1594,10 @@ Workspace& Workspace::operator=(Workspace&& other) noexcept
 	return *this;
 }
 
-static SolveStatus::Enum solveNewtonWorkspace(const Problem& problem, const Settings& settings, Result& result,
-	WorkspaceData& data, const Result* previous, bool continuation) noexcept
+static SolveStatus::Enum solveNewtonWorkspace(const Problem& problem, const Settings& settings, Result& result, WorkspaceData& data, const Result* previous, bool continuation) noexcept
 {
 	const Clock::time_point start = Clock::now();
-	const bool reuse = continuation && data.continuationProblem == &problem &&
-		data.continuationGeneration == problem.preparationGeneration;
+	const bool reuse = continuation && data.continuationProblem == &problem && data.continuationGeneration == problem.preparationGeneration;
 	data.continuationProblem = NULL;
 	data.continuationGeneration = 0;
 	result.status = solveNewtonInternal(problem, settings, result, data, previous, reuse);
@@ -1718,14 +1610,12 @@ static SolveStatus::Enum solveNewtonWorkspace(const Problem& problem, const Sett
 	return result.status;
 }
 
-SolveStatus::Enum solveNewton(const Problem& problem, const Settings& settings, Result& result,
-	Workspace& workspace, const Result* previous) noexcept
+SolveStatus::Enum solveNewton(const Problem& problem, const Settings& settings, Result& result, Workspace& workspace, const Result* previous) noexcept
 {
 	return solveNewtonWorkspace(problem, settings, result, *workspace.m_data, previous, false);
 }
 
-SolveStatus::Enum continueNewton(const Problem& problem, const Settings& settings, Result& result,
-	Workspace& workspace, const Result* previous) noexcept
+SolveStatus::Enum continueNewton(const Problem& problem, const Settings& settings, Result& result, Workspace& workspace, const Result* previous) noexcept
 {
 	return solveNewtonWorkspace(problem, settings, result, *workspace.m_data, previous, true);
 }

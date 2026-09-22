@@ -55,8 +55,7 @@ struct TestContext
 		return physics.createScene(desc);
 	}
 
-	PxRigidDynamic* box(PxScene& scene, PxMaterial& material, const PxTransform& pose,
-		PxVec3 halfSize = PxVec3(0.5f), PxReal mass = 1.0f)
+	PxRigidDynamic* box(PxScene& scene, PxMaterial& material, const PxTransform& pose, PxVec3 halfSize = PxVec3(0.5f), PxReal mass = 1.0f)
 	{
 		PxRigidDynamic* body = PxCreateDynamic(physics, pose, PxBoxGeometry(halfSize), material, 1.0f);
 		PxRigidBodyExt::setMassAndUpdateInertia(*body, mass);
@@ -270,15 +269,42 @@ int main(int argc, char** argv)
 	TestContext context = {*physics, *dispatcher, solver, argc > 4 ? PxReal(std::atof(argv[4])) : 1e-8f};
 	PxSetProfilerCallback(&profiler);
 	const bool all = std::strcmp(selection, "all") == 0;
-	if(all || std::strcmp(selection, "free") == 0) freeFall(context, *material);
-	if(all || std::strcmp(selection, "spring") == 0) spring(context, *material, false);
-	if(all || std::strcmp(selection, "cap") == 0) spring(context, *material, true);
-	if(all || std::strcmp(selection, "limit") == 0) limits(context, *material);
-	if(all || std::strcmp(selection, "box") == 0) restingBox(context, *material);
-	if(all || std::strcmp(selection, "mass") == 0) massRatio(context, *material);
-	if(all || std::strcmp(selection, "break") == 0) breakage(context, *material);
-	if(all || std::strcmp(selection, "warm") == 0) locksAndWarmStart(context, *material);
-	if(all || std::strcmp(selection, "cable") == 0) cable(context, *material);
+	if(all || std::strcmp(selection, "free") == 0)
+	{
+		freeFall(context, *material);
+	}
+	if(all || std::strcmp(selection, "spring") == 0)
+	{
+		spring(context, *material, false);
+	}
+	if(all || std::strcmp(selection, "cap") == 0)
+	{
+		spring(context, *material, true);
+	}
+	if(all || std::strcmp(selection, "limit") == 0)
+	{
+		limits(context, *material);
+	}
+	if(all || std::strcmp(selection, "box") == 0)
+	{
+		restingBox(context, *material);
+	}
+	if(all || std::strcmp(selection, "mass") == 0)
+	{
+		massRatio(context, *material);
+	}
+	if(all || std::strcmp(selection, "break") == 0)
+	{
+		breakage(context, *material);
+	}
+	if(all || std::strcmp(selection, "warm") == 0)
+	{
+		locksAndWarmStart(context, *material);
+	}
+	if(all || std::strcmp(selection, "cable") == 0)
+	{
+		cable(context, *material);
+	}
 	PxSetProfilerCallback(NULL);
 	const int islandCount = profiler.islandCount.load();
 	const double inverseIslandCount = islandCount ? 1.0 / islandCount : 0.0;

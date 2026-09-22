@@ -1,6 +1,7 @@
 #ifndef NEWTON_PATCH_PROJECTION_H
 #define NEWTON_PATCH_PROJECTION_H
 
+#include <cassert>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -55,39 +56,25 @@ struct PatchProjectionResult
 };
 
 template<bool ValidateInput>
-inline bool projectPatchInternal(const PatchProjectionInput& input, const PatchProjectionOutput& output,
-	PatchProjectionResult& result)
+inline bool projectPatchInternal(const PatchProjectionInput& input, const PatchProjectionOutput& output, PatchProjectionResult& result)
 {
+#ifndef NDEBUG
 	if(ValidateInput)
 	{
-		if(input.normalCount < 0 || input.tangentCount < 0 || input.tangentCount > 4)
-		{
-			return false;
-		}
-		if(input.normalCount && (!input.normalVelocity || !input.normalRegularization || !input.normalCap || !output.normalImpulse))
-		{
-			return false;
-		}
-		if(input.tangentCount && (!input.tangentVelocity || !input.tangentRegularization || !input.friction || !output.tangentImpulse))
-		{
-			return false;
-		}
+		assert(input.normalCount >= 0 && input.tangentCount >= 0 && input.tangentCount <= 4);
+		assert(!input.normalCount || (input.normalVelocity && input.normalRegularization && input.normalCap && output.normalImpulse));
+		assert(!input.tangentCount || (input.tangentVelocity && input.tangentRegularization && input.friction && output.tangentImpulse));
 
 		for(int i = 0; i < input.normalCount; ++i)
 		{
-			if(input.normalRegularization[i] <= 0.0 || input.normalCap[i] < 0.0)
-			{
-				return false;
-			}
+			assert(input.normalRegularization[i] > 0.0 && input.normalCap[i] >= 0.0);
 		}
 		for(int j = 0; j < input.tangentCount; ++j)
 		{
-			if(input.tangentRegularization[j] <= 0.0 || input.friction[j] < 0.0)
-			{
-				return false;
-			}
+			assert(input.tangentRegularization[j] > 0.0 && input.friction[j] >= 0.0);
 		}
 	}
+#endif
 	const double maximum = (std::numeric_limits<double>::max)();
 	// For a common normal shift q, n_i = clamp((q-s_i)/R_i,0,cap_i).
 	// Stationarity gives q = sum(mu_j * max(|s_j|-R_j*mu_j*N(q),0)).
@@ -242,16 +229,14 @@ inline bool projectPatchInternal(const PatchProjectionInput& input, const PatchP
 	return true;
 }
 
-inline bool projectPatch(const PatchProjectionInput& input, const PatchProjectionOutput& output,
-	PatchProjectionResult& result)
+inline bool projectPatch(const PatchProjectionInput& input, const PatchProjectionOutput& output, PatchProjectionResult& result)
 {
 	return projectPatchInternal<true>(input, output, result);
 }
 
 // Internal prepared-input entry. Counts, pointers, positive R, nonnegative caps
 // and nonnegative friction have already been validated.
-inline bool projectPatchUnchecked(const PatchProjectionInput& input, const PatchProjectionOutput& output,
-	PatchProjectionResult& result)
+inline bool projectPatchUnchecked(const PatchProjectionInput& input, const PatchProjectionOutput& output, PatchProjectionResult& result)
 {
 	return projectPatchInternal<false>(input, output, result);
 }

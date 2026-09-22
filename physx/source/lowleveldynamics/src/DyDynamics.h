@@ -94,10 +94,7 @@ class DynamicsContext : public DynamicsContextBase
 {
 	PX_NOCOPY(DynamicsContext)
 public:
-										DynamicsContext(PxcNpMemBlockPool* memBlockPool, Cm::FlushPool& taskPool,
-														PxvSimStats& simStats, Cm::VirtualAllocatorCallback& allocator,
-														PxsMaterialManager* materialManager, IG::SimpleIslandManager& islandManager,
-														PxU64 contextID, PxReal maxBiasCoefficient, PxReal lengthScale, PxSceneFlags sceneFlags, const PxSceneDesc* newtonDesc);
+										DynamicsContext(PxcNpMemBlockPool* memBlockPool, Cm::FlushPool& taskPool, PxvSimStats& simStats, Cm::VirtualAllocatorCallback& allocator, PxsMaterialManager* materialManager, IG::SimpleIslandManager& islandManager, PxU64 contextID, PxReal maxBiasCoefficient, PxReal lengthScale, PxSceneFlags sceneFlags, const PxSceneDesc* newtonSceneDescription);
 
 	virtual								~DynamicsContext();
 

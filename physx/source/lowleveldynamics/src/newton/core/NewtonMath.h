@@ -32,10 +32,8 @@ NEWTON_FORCE_INLINE void addScaled6(double* NEWTON_RESTRICT destination, const d
 {
 #if defined(NEWTON_AVX2_FMA)
 	const __m256d multiplier = _mm256_set1_pd(scale);
-	_mm256_storeu_pd(destination, _mm256_fmadd_pd(multiplier, _mm256_loadu_pd(source),
-		_mm256_loadu_pd(destination)));
-	_mm_storeu_pd(destination + 4, _mm_fmadd_pd(_mm256_castpd256_pd128(multiplier),
-		_mm_loadu_pd(source + 4), _mm_loadu_pd(destination + 4)));
+	_mm256_storeu_pd(destination, _mm256_fmadd_pd(multiplier, _mm256_loadu_pd(source), _mm256_loadu_pd(destination)));
+	_mm_storeu_pd(destination + 4, _mm_fmadd_pd(_mm256_castpd256_pd128(multiplier), _mm_loadu_pd(source + 4), _mm_loadu_pd(destination + 4)));
 #elif defined(NEWTON_X86_SIMD)
 	const __m128d multiplier = _mm_set1_pd(scale);
 	_mm_storeu_pd(destination, _mm_add_pd(_mm_loadu_pd(destination), _mm_mul_pd(multiplier, _mm_loadu_pd(source))));
@@ -53,10 +51,8 @@ NEWTON_FORCE_INLINE void subtractScaled6(double* NEWTON_RESTRICT destination, co
 {
 #if defined(NEWTON_AVX2_FMA)
 	const __m256d multiplier = _mm256_set1_pd(scale);
-	_mm256_storeu_pd(destination, _mm256_fnmadd_pd(multiplier, _mm256_loadu_pd(source),
-		_mm256_loadu_pd(destination)));
-	_mm_storeu_pd(destination + 4, _mm_fnmadd_pd(_mm256_castpd256_pd128(multiplier),
-		_mm_loadu_pd(source + 4), _mm_loadu_pd(destination + 4)));
+	_mm256_storeu_pd(destination, _mm256_fnmadd_pd(multiplier, _mm256_loadu_pd(source), _mm256_loadu_pd(destination)));
+	_mm_storeu_pd(destination + 4, _mm_fnmadd_pd(_mm256_castpd256_pd128(multiplier), _mm_loadu_pd(source + 4), _mm_loadu_pd(destination + 4)));
 #elif defined(NEWTON_X86_SIMD)
 	const __m128d multiplier = _mm_set1_pd(scale);
 	_mm_storeu_pd(destination, _mm_sub_pd(_mm_loadu_pd(destination), _mm_mul_pd(multiplier, _mm_loadu_pd(source))));
@@ -79,8 +75,7 @@ NEWTON_FORCE_INLINE void subtractMatrixVector6(double* NEWTON_RESTRICT destinati
 	{
 		const __m256d multiplier = _mm256_set1_pd(vector[column]);
 		first = _mm256_fnmadd_pd(multiplier, _mm256_loadu_pd(matrix + 6 * column), first);
-		second = _mm_fnmadd_pd(_mm256_castpd256_pd128(multiplier),
-			_mm_loadu_pd(matrix + 6 * column + 4), second);
+		second = _mm_fnmadd_pd(_mm256_castpd256_pd128(multiplier), _mm_loadu_pd(matrix + 6 * column + 4), second);
 	}
 	_mm256_storeu_pd(destination, first);
 	_mm_storeu_pd(destination + 4, second);
@@ -309,15 +304,13 @@ NEWTON_FORCE_INLINE void updateCholesky6(double* NEWTON_RESTRICT factor, double*
 	const __m256d inverse = _mm256_set1_pd(inverseC), update = _mm256_set1_pd(signedSC);
 	const __m256d cosine = _mm256_set1_pd(c), sine = _mm256_set1_pd(s);
 	const __m256d oldWork = _mm256_loadu_pd(work);
-	const __m256d nextFactor = _mm256_fmadd_pd(update, oldWork,
-		_mm256_mul_pd(inverse, _mm256_loadu_pd(factor)));
+	const __m256d nextFactor = _mm256_fmadd_pd(update, oldWork, _mm256_mul_pd(inverse, _mm256_loadu_pd(factor)));
 	_mm256_storeu_pd(factor, nextFactor);
 	_mm256_storeu_pd(work, _mm256_fmsub_pd(cosine, oldWork, _mm256_mul_pd(sine, nextFactor)));
 	const __m128d inverseEnd = _mm256_castpd256_pd128(inverse), updateEnd = _mm256_castpd256_pd128(update);
 	const __m128d cosineEnd = _mm256_castpd256_pd128(cosine), sineEnd = _mm256_castpd256_pd128(sine);
 	const __m128d oldWorkEnd = _mm_loadu_pd(work + 4);
-	const __m128d nextFactorEnd = _mm_fmadd_pd(updateEnd, oldWorkEnd,
-		_mm_mul_pd(inverseEnd, _mm_loadu_pd(factor + 4)));
+	const __m128d nextFactorEnd = _mm_fmadd_pd(updateEnd, oldWorkEnd, _mm_mul_pd(inverseEnd, _mm_loadu_pd(factor + 4)));
 	_mm_storeu_pd(factor + 4, nextFactorEnd);
 	_mm_storeu_pd(work + 4, _mm_fmsub_pd(cosineEnd, oldWorkEnd, _mm_mul_pd(sineEnd, nextFactorEnd)));
 #elif defined(NEWTON_X86_SIMD)
@@ -326,8 +319,7 @@ NEWTON_FORCE_INLINE void updateCholesky6(double* NEWTON_RESTRICT factor, double*
 	for(int axis = 0; axis < 6; axis += 2)
 	{
 		const __m128d oldWork = _mm_loadu_pd(work + axis);
-		const __m128d nextFactor = _mm_add_pd(_mm_mul_pd(inverse, _mm_loadu_pd(factor + axis)),
-			_mm_mul_pd(update, oldWork));
+		const __m128d nextFactor = _mm_add_pd(_mm_mul_pd(inverse, _mm_loadu_pd(factor + axis)), _mm_mul_pd(update, oldWork));
 		_mm_storeu_pd(factor + axis, nextFactor);
 		_mm_storeu_pd(work + axis, _mm_sub_pd(_mm_mul_pd(cosine, oldWork), _mm_mul_pd(sine, nextFactor)));
 	}
@@ -501,9 +493,7 @@ public:
 	template<int R = Rows, int C = Columns>
 	typename std::enable_if<R == 3 && C == 1, Matrix>::type cross(const Matrix& other) const
 	{
-		return Matrix(m_values[1] * other[2] - m_values[2] * other[1],
-			m_values[2] * other[0] - m_values[0] * other[2],
-			m_values[0] * other[1] - m_values[1] * other[0]);
+		return Matrix(m_values[1] * other[2] - m_values[2] * other[1], m_values[2] * other[0] - m_values[0] * other[2], m_values[0] * other[1] - m_values[1] * other[0]);
 	}
 	double maxCoeff() const
 	{

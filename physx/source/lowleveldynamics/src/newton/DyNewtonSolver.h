@@ -48,9 +48,7 @@ void destroyNewtonSolver(NewtonSolver* solver);
 
 // Advance even on empty updates: recycled island node indices must not inherit an old warm start.
 void beginNewtonUpdate(NewtonSolver& solver, PxU32 nodeCount);
-bool solveNewtonIsland(NewtonSolver& solver, DynamicsContext& context, ThreadContext& threadContext,
-	PxSolverBody* bodies, PxSolverBodyData* bodyData, PxU32 firstBodyIndex, PxU32 bodyCount,
-	PxBaseTask* continuation, PxU32 workerCount);
+bool solveNewtonIsland(NewtonSolver& solver, DynamicsContext& context, ThreadContext& threadContext, PxSolverBody* bodies, PxSolverBodyData* bodyData, PxU32 firstBodyIndex, PxU32 bodyCount, PxBaseTask* continuation, PxU32 workerCount);
 void saveNewtonPoses(NewtonSolver& solver, PxsBodyCore* const* bodies, const PxU32* nodeIndices, PxU32 bodyCount);
 }
 }

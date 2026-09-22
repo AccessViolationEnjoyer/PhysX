@@ -109,15 +109,12 @@ public:
 		{
 			const PatchCurvature& current = weights.patches[i];
 			const PatchCurvature& previous = m_weights.patches[i];
-			bool changed = current.normalCoefficient != previous.normalCoefficient ||
-				current.crossCoefficient != previous.crossCoefficient || current.tangentCoefficient != previous.tangentCoefficient;
+			bool changed = current.normalCoefficient != previous.normalCoefficient || current.crossCoefficient != previous.crossCoefficient || current.tangentCoefficient != previous.tangentCoefficient;
 			for(int end = 0; end < 2; ++end)
 			{
-				changed = changed || !current.normal[end].equals(previous.normal[end]) ||
-						  !current.tangent[end].equals(previous.tangent[end]);
+				changed = changed || !current.normal[end].equals(previous.normal[end]) || !current.tangent[end].equals(previous.tangent[end]);
 			}
-			if(changed && (!appendPatchUpdates(current, problem.patches[i].firstContact, 1.0) ||
-				!appendPatchUpdates(previous, problem.patches[i].firstContact, -1.0)))
+			if(changed && (!appendPatchUpdates(current, problem.patches[i].firstContact, 1.0) || !appendPatchUpdates(previous, problem.patches[i].firstContact, -1.0)))
 			{
 				result.updateMs += profileElapsed(m_profile, start);
 				++result.factorFallbacks;
@@ -377,10 +374,7 @@ private:
 		if(m_size == 0)
 		{
 			const Clock::time_point symbolicStart = profileStart(m_profile);
-			const bool samePattern = m_outer.size() == std::uint32_t(matrix.outerSize() + 1) &&
-				m_inner.size() == std::uint32_t(matrix.nonZeros()) &&
-				std::equal(m_outer.begin(), m_outer.end(), matrix.outerIndexPtr()) &&
-				std::equal(m_inner.begin(), m_inner.end(), matrix.innerIndexPtr());
+			const bool samePattern = m_outer.size() == std::uint32_t(matrix.outerSize() + 1) && m_inner.size() == std::uint32_t(matrix.nonZeros()) && std::equal(m_outer.begin(), m_outer.end(), matrix.outerIndexPtr()) && std::equal(m_inner.begin(), m_inner.end(), matrix.innerIndexPtr());
 			if(!samePattern)
 			{
 				changedPattern = true;
@@ -501,8 +495,7 @@ private:
 			idx_t count = idx_t(bodies);
 			idx_t options[METIS_NOPTIONS];
 			Newton_METIS_SetDefaultOptions(options);
-			const int result = Newton_METIS_NodeND(&count, m_metisOuter.data(), m_metisInner.data(), NULL,
-				options, m_bodyOrder.data(), m_metisInverse.data());
+			const int result = Newton_METIS_NodeND(&count, m_metisOuter.data(), m_metisInner.data(), NULL, options, m_bodyOrder.data(), m_metisInverse.data());
 			if(result != METIS_OK)
 			{
 				for(int body = 0; body < bodies; ++body)
@@ -562,9 +555,7 @@ private:
 			m_smallEliminated[selected] = 1;
 			for(int body = 0; body < bodies; ++body)
 			{
-				if(m_smallEliminated[body] ||
-				   !(m_smallAdjacency[std::uint32_t(selected) * std::uint32_t(words) + std::uint32_t(body / 64)] &
-					 (std::uint64_t(1) << (body % 64))))
+				if(m_smallEliminated[body] || !(m_smallAdjacency[std::uint32_t(selected) * std::uint32_t(words) + std::uint32_t(body / 64)] & (std::uint64_t(1) << (body % 64))))
 				{
 					continue;
 				}

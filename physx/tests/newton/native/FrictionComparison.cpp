@@ -75,15 +75,22 @@ public:
 	virtual void onContactModify(PxContactModifyPair* const pairs, PxU32 count) PX_OVERRIDE
 	{
 		if(velocity.isZero())
+		{
 			return;
+		}
 		for(PxU32 pairIndex = 0; pairIndex < count; ++pairIndex)
 		{
 			PxContactModifyPair& pair = pairs[pairIndex];
 			if(pair.actor[0] != floor && pair.actor[1] != floor)
+			{
 				continue;
+			}
 			const PxVec3 target = pair.actor[0] == floor ? -velocity : velocity;
-			for(PxU32 point = 0; point < pair.contacts.size(); ++point)
+			const PxU32 contactCount = pair.contacts.size();
+			for(PxU32 point = 0; point < contactCount; ++point)
+			{
 				pair.contacts.setTargetVelocity(point, target);
+			}
 		}
 	}
 };
@@ -157,8 +164,7 @@ public:
 	}
 };
 
-PxFilterFlags comparisonFilter(PxFilterObjectAttributes, PxFilterData, PxFilterObjectAttributes, PxFilterData,
-	PxPairFlags& flags, const void*, PxU32)
+PxFilterFlags comparisonFilter(PxFilterObjectAttributes, PxFilterData, PxFilterObjectAttributes, PxFilterData, PxPairFlags& flags, const void*, PxU32)
 {
 	flags = PxPairFlag::eCONTACT_DEFAULT | PxPairFlag::eMODIFY_CONTACTS | PxPairFlag::eNOTIFY_TOUCH_FOUND |
 		PxPairFlag::eNOTIFY_TOUCH_PERSISTS | PxPairFlag::eNOTIFY_CONTACT_POINTS;
@@ -188,12 +194,13 @@ struct ComparisonContext
 		return physics.createScene(desc);
 	}
 
-	PxRigidDynamic* body(PxScene& targetScene, PxMaterial& material, const PxGeometry& geometry,
-		const PxTransform& pose, PxReal mass)
+	PxRigidDynamic* body(PxScene& targetScene, PxMaterial& material, const PxGeometry& geometry, const PxTransform& pose, PxReal mass)
 	{
 		PxRigidDynamic* actor = PxCreateDynamic(physics, pose, geometry, material, 1.0f);
 		if(!actor)
+		{
 			return NULL;
+		}
 		if(!PxRigidBodyExt::setMassAndUpdateInertia(*actor, mass))
 		{
 			actor->release();
@@ -255,12 +262,12 @@ double floorClearance(FrictionCase::Enum selection, const PxTransform& pose, con
 	return double(normal.dot(pose.p)) - extent;
 }
 
-void recordTrajectory(ComparisonContext& context, FrictionCase::Enum selection, PxU32 frame,
-	PxRigidDynamic* const* actors, PxU32 bodyCount, const PxVec3* initialPositions,
-	const PxVec3& normal, const PxVec3& tangent, const ImpulseRecorder& recorder)
+void recordTrajectory(ComparisonContext& context, FrictionCase::Enum selection, PxU32 frame, PxRigidDynamic* const* actors, PxU32 bodyCount, const PxVec3* initialPositions, const PxVec3& normal, const PxVec3& tangent, const ImpulseRecorder& recorder)
 {
 	if(!context.trajectory)
+	{
 		return;
+	}
 	for(PxU32 bodyIndex = 0; bodyIndex < bodyCount; ++bodyIndex)
 	{
 		const PxTransform pose = actors[bodyIndex]->getGlobalPose();
@@ -440,10 +447,14 @@ int main(int argc, char** argv)
 	for(int index = 0; index < FrictionCase::eCOUNT; ++index)
 	{
 		if(std::strcmp(argv[1], CASE_NAMES[index]) == 0)
+		{
 			selected = index;
+		}
 	}
 	if((!all && selected < 0) || (std::strcmp(argv[2], "pgs") != 0 && std::strcmp(argv[2], "newton") != 0))
+	{
 		return 2;
+	}
 	ComparisonSettings settings;
 	settings.solver = std::strcmp(argv[2], "pgs") == 0 ? PxSolverType::ePGS : PxSolverType::eNEWTON;
 	settings.solverName = argv[2];
@@ -455,12 +466,10 @@ int main(int argc, char** argv)
 	settings.dynamicFriction = argc > 9 ? PxReal(std::atof(argv[9])) : .5f;
 	settings.positionIterations = argc > 10 ? PxU32(std::atoi(argv[10])) : 98;
 	settings.velocityIterations = argc > 11 ? PxU32(std::atoi(argv[11])) : 2;
-	if(!PxIsFinite(settings.speed) || !settings.steps || settings.steps > 1000000 || settings.threads > 128 ||
-		!PxIsFinite(settings.regularization) || settings.regularization <= 0.0f ||
-		!PxIsFinite(settings.staticFriction) || settings.staticFriction < 0.0f ||
-		!PxIsFinite(settings.dynamicFriction) || settings.dynamicFriction < 0.0f ||
-		!settings.positionIterations || settings.positionIterations > 255 || settings.velocityIterations > 255)
+	if(!PxIsFinite(settings.speed) || !settings.steps || settings.steps > 1000000 || settings.threads > 128 || !PxIsFinite(settings.regularization) || settings.regularization <= 0.0f || !PxIsFinite(settings.staticFriction) || settings.staticFriction < 0.0f || !PxIsFinite(settings.dynamicFriction) || settings.dynamicFriction < 0.0f || !settings.positionIterations || settings.positionIterations > 255 || settings.velocityIterations > 255)
+	{
 		return 2;
+	}
 	FILE* trajectory = NULL;
 	if(std::strcmp(argv[3], "-") != 0)
 	{
@@ -479,14 +488,20 @@ int main(int argc, char** argv)
 	PxFoundation* foundation = PxCreateFoundation(PX_PHYSICS_VERSION, allocator, errors);
 	if(!foundation)
 	{
-		if(trajectory) std::fclose(trajectory);
+		if(trajectory)
+		{
+			std::fclose(trajectory);
+		}
 		return 1;
 	}
 	PxPhysics* physics = PxCreatePhysics(PX_PHYSICS_VERSION, *foundation, PxTolerancesScale());
 	if(!physics)
 	{
 		foundation->release();
-		if(trajectory) std::fclose(trajectory);
+		if(trajectory)
+		{
+			std::fclose(trajectory);
+		}
 		return 1;
 	}
 	const bool extensions = PxInitExtensions(*physics, NULL);
@@ -501,15 +516,25 @@ int main(int argc, char** argv)
 		for(int index = 0; index < FrictionCase::eCOUNT; ++index)
 		{
 			if(all || selected == index)
+			{
 				valid = runCase(context, FrictionCase::Enum(index)) && valid;
+			}
 		}
 	}
-	if(dispatcher) dispatcher->release();
-	if(extensions) PxCloseExtensions();
+	if(dispatcher)
+	{
+		dispatcher->release();
+	}
+	if(extensions)
+	{
+		PxCloseExtensions();
+	}
 	physics->release();
 	foundation->release();
 	if(trajectory && std::fclose(trajectory) != 0)
+	{
 		valid = false;
+	}
 	return valid && errors.count.load() == 0 ? 0 : 1;
 }
 

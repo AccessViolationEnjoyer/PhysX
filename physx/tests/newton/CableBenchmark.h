@@ -16,13 +16,18 @@ static void multiplyCableJacobian(const Problem& problem, const Vector& vector, 
 	const int* outer = jacobian.outerIndexPtr();
 	const int* inner = jacobian.innerIndexPtr();
 	const double* values = jacobian.valuePtr();
+	const int columnCount = jacobian.cols();
 	product.setZero(transpose ? jacobian.cols() : jacobian.rows());
-	for(int column = 0; column < jacobian.cols(); ++column)
+	for(int column = 0; column < columnCount; ++column)
+	{
 		for(int entry = outer[column]; entry < outer[column + 1]; ++entry)
+		{
 			if(transpose)
 				product[column] += values[entry] * vector[inner[entry]];
 			else
 				product[inner[entry]] += values[entry] * vector[column];
+		}
+	}
 }
 
 static void makeCableProblem(Problem& problem, const std::vector<Vec3>& positions, const std::vector<Eigen::Quaterniond>& rotations,
@@ -39,8 +44,10 @@ static void makeCableProblem(Problem& problem, const std::vector<Vec3>& position
 	problem.freeBodyVelocity = velocity;
 	problem.freeBodyVelocity[6 * (links - 1) + 1] -= dt * inverseRootMass; // Constant 1 N tip force.
 	if(gravity)
+	{
 		for(int i = 0; i < links; ++i)
 			problem.freeBodyVelocity[6 * i + 1] -= 9.81 * dt / inverseRootMass;
+	}
 	for(int i = 0; i < links; ++i)
 	{
 		const Vec3 base = i ? positions[i - 1] : Vec3::Zero();
@@ -62,8 +69,8 @@ static void makeCableProblem(Problem& problem, const std::vector<Vec3>& position
 			c.friction = 0.0;
 			c.jacobian[0].setZero();
 			c.jacobian[1].setZero();
-			for(int axis = 0; axis < 3; ++axis)
-			{
+				for(int axis = 0; axis < 3; ++axis)
+				{
 				if(angular)
 				{
 					c.jacobian[0](axis, axis + 3) = inverseRootInertia;
@@ -80,7 +87,9 @@ static void makeCableProblem(Problem& problem, const std::vector<Vec3>& position
 						c.jacobian[1](axis, axis) = -inverseRootMass;
 						const Vec3 angularJacobian = Vec3::Unit(axis).cross(arm) * inverseRootInertia;
 						for(int column = 0; column < 3; ++column)
+						{
 							c.jacobian[1](axis, column + 3) = double(float(angularJacobian[column]));
+						}
 					}
 					// Positive anchor compliance keeps the primal Hessian finite.
 					// Measure drift to check its effect on the cable geometry.
@@ -91,7 +100,9 @@ static void makeCableProblem(Problem& problem, const std::vector<Vec3>& position
 			}
 			c.freeVelocity += c.jacobian[0] * loadVector<6>(problem.freeBodyVelocity.data() + 6 * i);
 			if(i)
+			{
 				c.freeVelocity += c.jacobian[1] * loadVector<6>(problem.freeBodyVelocity.data() + 6 * (i - 1));
+			}
 			problem.addContact(c);
 		}
 	}
@@ -104,7 +115,10 @@ static int benchmarkCable(int links, int steps, const char* path, const Settings
 	const double dt = 0.01, anchorRegularization = 1.0e-9;
 	const bool warm = true, gravity = false;
 	if(links < 1 || steps < 2)
-		throw std::runtime_error("Invalid cable benchmark parameters");
+	{
+		std::fprintf(stderr, "Invalid cable benchmark parameters\n");
+		return 1;
+	}
 
 	omp_set_dynamic(0);
 	std::vector<Vec3> positions(links);
@@ -114,7 +128,14 @@ static int benchmarkCable(int links, int steps, const char* path, const Settings
 	Vector velocity = Vector::Zero(links * 6);
 	std::ofstream trajectory;
 	if(path)
+	{
 		trajectory.open(path);
+		if(!trajectory)
+		{
+			std::fprintf(stderr, "Cannot write cable trajectory\n");
+			return 1;
+		}
+	}
 	trajectory << "step,time,tip_deflection,anchor_error,equation_residual,step_ms,solve_ms,iterations,factors,rank_updates,reused_factors\n";
 	Result previous, result;
 	Problem problem;
@@ -129,15 +150,20 @@ static int benchmarkCable(int links, int steps, const char* path, const Settings
 		solveNewton(problem, settings, result, warm && step ? &previous : NULL);
 
 		multiplyCableJacobian(problem, result.impulse, response, true);
-		for(int row = 0; row < velocity.size(); ++row)
+		const int velocityCount = velocity.size();
+		for(int row = 0; row < velocityCount; ++row)
+		{
 			velocity[row] = problem.freeBodyVelocity[row] + result.primal[row];
+		}
 		for(int i = 0; i < links; ++i)
 		{
 			positions[i] += dt * std::sqrt(10.0) * velocity.segment<3>(6 * i);
 			const Vec3 angular = 200.0 * dt * velocity.segment<3>(6 * i + 3);
 			const double angle = angular.norm();
-			if(angle > 0.0)
+		if(angle > 0.0)
+			{
 				rotations[i] = (Eigen::Quaterniond(Eigen::AngleAxisd(angle, cableVector(angular / angle))) * rotations[i]).normalized();
+			}
 		}
 		const double stepMs = elapsed(start);
 		if(step >= std::min(60, steps / 2))
@@ -148,11 +174,17 @@ static int benchmarkCable(int links, int steps, const char* path, const Settings
 		Vector equation;
 		multiplyCableJacobian(problem, result.primal, equation, false);
 		finalResidual = 0.0;
-		for(int row = 0; row < result.primal.size(); ++row)
+		const int primalCount = result.primal.size();
+		for(int row = 0; row < primalCount; ++row)
+		{
 			finalResidual = std::max(finalResidual, std::abs(result.primal[row] - response[row]));
-		for(int row = 0; row < equation.size(); ++row)
+		}
+		const int equationCount = equation.size();
+		for(int row = 0; row < equationCount; ++row)
+		{
 			finalResidual = std::max(finalResidual, std::abs(equation[row] + problem.freeVelocity[row] +
 				problem.regularization[row] * result.impulse[row]));
+		}
 		maximumResidual = std::max(maximumResidual, finalResidual);
 		double anchorError = 0.0;
 		for(int i = 0; i < links; ++i)
@@ -167,7 +199,8 @@ static int benchmarkCable(int links, int steps, const char* path, const Settings
 		{
 			std::printf("CABLE_DIVERGED,step=%d,time=%.9g,tip=%.12g,anchor_error=%.12g,residual=%.12g,solve_ms=%.6f\n",
 			step, (step + 1) * dt, -positions.back()[1], anchorError, finalResidual, result.elapsedMs);
-			throw std::runtime_error("Cable simulation diverged");
+			std::fprintf(stderr, "Cable simulation diverged\n");
+			return 1;
 		}
 		trajectory << std::setprecision(12) << step << ',' << (step + 1) * dt << ',' << -positions.back()[1] << ','
 			<< anchorError << ',' << finalResidual << ',' << stepMs << ',' << result.elapsedMs << ',' << result.iterations << ','

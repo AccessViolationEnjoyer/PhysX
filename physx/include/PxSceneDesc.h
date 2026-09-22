@@ -734,7 +734,7 @@ public:
 	/**
 	\brief Newton convergence tolerance for the normalized gradient and cost improvement.
 
-	Only used by PxSolverType::eNEWTON. Must be finite and greater than zero.
+	Only used by PxSolverType::eNEWTON. Must be greater than zero.
 	Lower values request a more accurate solve, subject to newtonMaxIterations.
 	Native friction corrections also test a row-normalized compliant velocity residual
 	divided by the timestep against this value.
@@ -751,7 +751,7 @@ public:
 	physical softness: it is not an exact zero-compliance constraint or just a
 	factorization tolerance. Smaller values reduce softness but can worsen conditioning.
 	Rows with physical spring compliance retain their specified spring law.
-	Must be finite and greater than zero.
+	Must be greater than zero.
 
 	<b>Default:</b> 1e-4
 	*/
@@ -1206,22 +1206,32 @@ PX_INLINE bool PxSceneDesc::isValid() const
 		return false;
 
 	if(solverType != PxSolverType::ePGS && solverType != PxSolverType::eTGS && solverType != PxSolverType::eNEWTON)
+	{
 		return false;
+	}
 
 	if(solverType != PxSolverType::eTGS && (flags & PxSceneFlag::eENABLE_EXTERNAL_FORCES_EVERY_ITERATION_TGS))
+	{
 		return false;
+	}
 
+#if PX_CHECKED
 	if(solverType == PxSolverType::eNEWTON)
 	{
 		if(newtonMaxIterations == 0 || newtonMaxIterations > 0x7fffffffu)
+		{
 			return false;
-		if(!PxIsFinite(newtonTolerance) || newtonTolerance <= 0.0f)
+		}
+		if(newtonTolerance <= 0.0f)
+		{
 			return false;
-		if(!PxIsFinite(newtonRegularization) || newtonRegularization <= 0.0f)
+		}
+		if(newtonRegularization <= 0.0f)
+		{
 			return false;
-		if(flags & (PxSceneFlag::eENABLE_GPU_DYNAMICS | PxSceneFlag::eENABLE_DIRECT_GPU_API))
-			return false;
+		}
 	}
+#endif
 
 #if PX_SUPPORT_GPU_PHYSX
 	if(!PxIsPowerOfTwo(gpuMaxNumPartitions))

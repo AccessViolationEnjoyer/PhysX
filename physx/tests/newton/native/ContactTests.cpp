@@ -55,7 +55,8 @@ public:
 		for(PxU32 pairIndex = 0; pairIndex < count; ++pairIndex)
 		{
 			PxContactModifyPair& pair = pairs[pairIndex];
-			for(PxU32 point = 0; point < pair.contacts.size(); ++point)
+			const PxU32 contactCount = pair.contacts.size();
+			for(PxU32 point = 0; point < contactCount; ++point)
 			{
 				if(mode == eCONVEYOR)
 				{
@@ -104,7 +105,9 @@ public:
 		{
 			const PxContactPair& pair = contactPairs[pairIndex];
 			if(pair.events & (PxPairFlag::eNOTIFY_THRESHOLD_FORCE_FOUND | PxPairFlag::eNOTIFY_THRESHOLD_FORCE_PERSISTS))
+			{
 				++thresholdEvents;
+			}
 			PxContactPairPoint contactPoints[64];
 			const PxU32 pointCount = pair.extractContacts(contactPoints, 64);
 			points += pointCount;
@@ -130,8 +133,7 @@ public:
 	}
 };
 
-PxFilterFlags contactFilter(PxFilterObjectAttributes, PxFilterData, PxFilterObjectAttributes, PxFilterData,
-	PxPairFlags& flags, const void*, PxU32)
+PxFilterFlags contactFilter(PxFilterObjectAttributes, PxFilterData, PxFilterObjectAttributes, PxFilterData, PxPairFlags& flags, const void*, PxU32)
 {
 	flags = PxPairFlag::eCONTACT_DEFAULT | PxPairFlag::eMODIFY_CONTACTS | PxPairFlag::eNOTIFY_TOUCH_FOUND |
 		PxPairFlag::eNOTIFY_TOUCH_PERSISTS | PxPairFlag::eNOTIFY_CONTACT_POINTS |
@@ -206,7 +208,11 @@ void conveyor(ContactContext& context)
 	modifier.targetSpeed = 1.0f;
 	PxMaterial* material = context.physics.createMaterial(0.7f, 0.7f, 0.0f);
 	PxScene* scene = context.createScene(modifier, recorder);
-	if(!scene) { material->release(); return; }
+	if(!scene)
+	{
+		material->release();
+		return;
+	}
 	context.floor(*scene, *material);
 	PxRigidDynamic* actor = context.body(*scene, *material, PxBoxGeometry(PxVec3(0.5f)), PxTransform(PxVec3(0.0f, 0.5f, 0.0f)));
 	lockRotation(*actor);
@@ -246,7 +252,11 @@ void normalCaps(ContactContext& context, bool disabled)
 	modifier.mode = disabled ? ContactModifier::eDISABLED : ContactModifier::eCAPPED;
 	PxMaterial* material = context.physics.createMaterial(0.0f, 0.0f, 0.0f);
 	PxScene* scene = context.createScene(modifier, recorder, PxVec3(0.0f));
-	if(!scene) { material->release(); return; }
+	if(!scene)
+	{
+		material->release();
+		return;
+	}
 	context.floor(*scene, *material);
 	PxRigidDynamic* actor = context.body(*scene, *material, PxBoxGeometry(PxVec3(0.5f)), PxTransform(PxVec3(0.0f, 0.49f, 0.0f)));
 	lockRotation(*actor);
@@ -287,9 +297,15 @@ void compliant(ContactContext& context, bool accelerationSpring)
 	PxMaterial* material = context.physics.createMaterial(0.8f, 0.2f, PxReal(-stiffness));
 	material->setDamping(PxReal(damping));
 	if(accelerationSpring)
+	{
 		material->setFlag(PxMaterialFlag::eCOMPLIANT_ACCELERATION_SPRING, true);
+	}
 	PxScene* scene = context.createScene(modifier, recorder);
-	if(!scene) { material->release(); return; }
+	if(!scene)
+	{
+		material->release();
+		return;
+	}
 	context.floor(*scene, *material);
 	PxRigidDynamic* actor = context.body(*scene, *material, PxSphereGeometry(0.5f), PxTransform(PxVec3(0.0f, 0.5f, 0.0f)), PxReal(mass));
 	lockRotation(*actor);
@@ -346,12 +362,18 @@ void frictionTransition(ContactContext& context)
 	ContactRecorder recorder;
 	PxMaterial* material = context.physics.createMaterial(0.8f, 0.2f, 0.0f);
 	PxScene* scene = context.createScene(modifier, recorder);
-	if(!scene) { material->release(); return; }
+	if(!scene)
+	{
+		material->release();
+		return;
+	}
 	context.floor(*scene, *material);
 	PxRigidDynamic* actor = context.body(*scene, *material, PxBoxGeometry(PxVec3(0.5f)), PxTransform(PxVec3(0.0f, 0.5f, 0.0f)));
 	lockRotation(*actor);
 	for(int frame = 0; frame < 100; ++frame)
+	{
 		step(*scene, recorder);
+	}
 	const double initialX = actor->getGlobalPose().p.x;
 	for(int frame = 0; frame < 100; ++frame)
 	{
@@ -393,7 +415,11 @@ void fastSliding(ContactContext& context)
 	ContactRecorder recorder;
 	PxMaterial* material = context.physics.createMaterial(0.5f, 0.5f, 0.0f);
 	PxScene* scene = context.createScene(modifier, recorder);
-	if(!scene) { material->release(); return; }
+	if(!scene)
+	{
+		material->release();
+		return;
+	}
 	context.floor(*scene, *material);
 	PxRigidDynamic* actor = context.body(*scene, *material, PxBoxGeometry(PxVec3(0.5f)), PxTransform(PxVec3(0.0f, 0.5f, 0.0f)));
 	lockRotation(*actor);
@@ -411,12 +437,16 @@ void fastSliding(ContactContext& context)
 		expectedSpeed = std::max(0.0, expectedSpeed - 0.5 * supportImpulse);
 		expectedDistance += dt * expectedSpeed;
 		if(expectedSpeed == 0.0 && expectedStopFrame == 0)
+		{
 			expectedStopFrame = frame;
+		}
 		step(*scene, recorder);
 		const PxVec3 velocity = actor->getLinearVelocity();
 		const double height = actor->getGlobalPose().p.y;
 		if(std::abs(velocity.x) < 0.001f && actualStopFrame == 0)
+		{
 			actualStopFrame = frame;
+		}
 		minimumHeight = std::min(minimumHeight, height);
 		maximumHeight = std::max(maximumHeight, height);
 		maximumUpwardSpeed = std::max(maximumUpwardSpeed, double(velocity.y));
@@ -534,7 +564,11 @@ void rolling(ContactContext& context, bool cylinder)
 	ContactRecorder recorder;
 	PxMaterial* material = context.physics.createMaterial(0.5f, 0.5f, 0.0f);
 	PxScene* scene = context.createScene(modifier, recorder);
-	if(!scene) { material->release(); return; }
+	if(!scene)
+	{
+		material->release();
+		return;
+	}
 	context.floor(*scene, *material);
 	PxCustomGeometryExt::CylinderCallbacks cylinderCallbacks(1.5f, 0.5f, 2);
 	PxCustomGeometry cylinderGeometry(cylinderCallbacks);
@@ -581,16 +615,46 @@ int main(int argc, char** argv)
 	PxDefaultCpuDispatcher* dispatcher = PxDefaultCpuDispatcherCreate(8);
 	ContactContext context = {*physics, *dispatcher, solver};
 	const bool all = std::strcmp(selection, "all") == 0;
-	if(all || std::strcmp(selection, "conveyor") == 0) conveyor(context);
-	if(all || std::strcmp(selection, "caps") == 0) normalCaps(context, false);
-	if(all || std::strcmp(selection, "disabled") == 0) normalCaps(context, true);
-	if(all || std::strcmp(selection, "compliant") == 0) compliant(context, false);
-	if(all || std::strcmp(selection, "acceleration") == 0) compliant(context, true);
-	if(all || std::strcmp(selection, "friction") == 0) frictionTransition(context);
-	if(all || std::strcmp(selection, "fast_sliding") == 0) fastSliding(context);
-	if(all || std::strcmp(selection, "friction_precision") == 0) frictionPrecision(context);
-	if(all || std::strcmp(selection, "capsule") == 0) rolling(context, false);
-	if(all || std::strcmp(selection, "cylinder") == 0) rolling(context, true);
+	if(all || std::strcmp(selection, "conveyor") == 0)
+	{
+		conveyor(context);
+	}
+	if(all || std::strcmp(selection, "caps") == 0)
+	{
+		normalCaps(context, false);
+	}
+	if(all || std::strcmp(selection, "disabled") == 0)
+	{
+		normalCaps(context, true);
+	}
+	if(all || std::strcmp(selection, "compliant") == 0)
+	{
+		compliant(context, false);
+	}
+	if(all || std::strcmp(selection, "acceleration") == 0)
+	{
+		compliant(context, true);
+	}
+	if(all || std::strcmp(selection, "friction") == 0)
+	{
+		frictionTransition(context);
+	}
+	if(all || std::strcmp(selection, "fast_sliding") == 0)
+	{
+		fastSliding(context);
+	}
+	if(all || std::strcmp(selection, "friction_precision") == 0)
+	{
+		frictionPrecision(context);
+	}
+	if(all || std::strcmp(selection, "capsule") == 0)
+	{
+		rolling(context, false);
+	}
+	if(all || std::strcmp(selection, "cylinder") == 0)
+	{
+		rolling(context, true);
+	}
 	dispatcher->release();
 	PxCloseExtensions();
 	physics->release();

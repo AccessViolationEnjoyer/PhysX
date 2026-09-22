@@ -102,7 +102,9 @@ void initPhysics(bool /*interactive*/)
 void stepPhysics(bool interactive)
 {
 	if(interactive && gPaused && !gSingleStep)
+	{
 		return;
+	}
 
 	gSingleStep = false;
 	gScene->simulate(0.01f);
@@ -157,7 +159,9 @@ int snippetMain(int, const char* const*)
 #else
 	initPhysics(false);
 	for(PxU32 i = 0; i < 300; ++i)
+	{
 		stepPhysics(false);
+	}
 	cleanupPhysics(false);
 #endif
 	return 0;

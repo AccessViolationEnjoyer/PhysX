@@ -116,7 +116,7 @@ static double hardJointFreeVelocity(const Px1DConstraint& row, const NewtonJoint
 
 static double solveImpulse(newton::Problem& problem)
 {
-	check(newton::prepareProblem(problem) == newton::SolveStatus::eSUCCESS, "prepare scalar joint problem");
+	newton::prepareProblem(problem);
 	newton::Result result;
 	newton::Workspace workspace;
 	newton::Settings settings;
@@ -144,7 +144,7 @@ static void testSprings()
 		NewtonJointRows output;
 		newton::Problem problem;
 		initializeProblem(problem);
-		check(!prepareNewtonJoint(constraint, body0, body1, 0, 1, NULL, settings, problem, output), "prepare native spring");
+		prepareNewtonJoint(constraint, body0, body1, 0, 1, NULL, settings, problem, output);
 		const double dt = settings.timestep;
 		const double a = dt * (row.mods.spring.damping + dt * row.mods.spring.stiffness);
 		const double b = dt * (double(row.mods.spring.damping) * row.velocityTarget - double(row.mods.spring.stiffness) * row.geometricError);
@@ -171,7 +171,7 @@ static void testBoundsAndReferences()
 	newton::Problem problem;
 	initializeProblem(problem);
 	NewtonJointRows output;
-	check(!prepareNewtonJoint(constraint, body0, body1, 0, -1, NULL, settings, problem, output), "prepare bounded drive");
+	prepareNewtonJoint(constraint, body0, body1, 0, -1, NULL, settings, problem, output);
 	check(close(solveImpulse(problem), 2.0 * settings.timestep), "drive force limit converted to impulse");
 	check(fixture.extended, "extended limit flag forwarded");
 
@@ -182,7 +182,7 @@ static void testBoundsAndReferences()
 	fixture.rows[0].geometricError = 0.25f;
 	fixture.rows[0].minImpulse = -PX_MAX_F32;
 	fixture.rows[0].maxImpulse = PX_MAX_F32;
-	check(!prepareNewtonJoint(constraint, body0, body1, 0, -1, NULL, settings, problem, output), "prepare hard bilateral");
+	prepareNewtonJoint(constraint, body0, body1, 0, -1, NULL, settings, problem, output);
 	const double expectedHardImpulse = -hardJointFreeVelocity(fixture.rows[0], settings) /
 		(1.0 + settings.regularization);
 	check(close(solveImpulse(problem), expectedHardImpulse), "hard joint uses the MuJoCo reference acceleration");
@@ -195,7 +195,7 @@ static void testBoundsAndReferences()
 	fixture.rows[0].mods.bounce.velocityThreshold = 0.1f;
 	fixture.rows[0].geometricError = -0.1f;
 	const PxSolverBodyData falling = makeBody(1.0f, -2.0f);
-	check(!prepareNewtonJoint(constraint, falling, body1, 0, -1, NULL, settings, problem, output), "prepare restitution joint");
+	prepareNewtonJoint(constraint, falling, body1, 0, -1, NULL, settings, problem, output);
 	check(close(solveImpulse(problem), 3.0 / (1.0 + settings.regularization)), "restitution replaces error and target");
 }
 
@@ -218,7 +218,7 @@ static void testWhiteningAndWriteback()
 	newton::Problem problem;
 	initializeProblem(problem);
 	NewtonJointRows output;
-	check(!prepareNewtonJoint(constraint, body0, body1, 0, -1, &writeback, settings, problem, output), "prepare rotated inertia joint");
+	prepareNewtonJoint(constraint, body0, body1, 0, -1, &writeback, settings, problem, output);
 	const PxVec3 angular = body0.sqrtInvInertia * fixture.rows[0].angular0;
 	check(close(problem.contacts[0].jacobian[0][0], 0.5), "linear inverse mass whitening");
 	for(PxU32 axis = 0; axis < 3; ++axis)
@@ -271,11 +271,11 @@ static void testSlerpDrives()
 			NewtonJointRows output;
 			newton::Problem problem;
 			initializeProblem(problem);
-			check(!prepareNewtonJoint(constraint, body0, body1, 0, -1, NULL, settings, problem, output), "prepare native SLERP drive");
+			prepareNewtonJoint(constraint, body0, body1, 0, -1, NULL, settings, problem, output);
 			check(problem.contacts.size() == 4 && problem.contacts[3].jacobian[0][1] == 1.0 &&
 				close(problem.contacts[3].freeVelocity, hardJointFreeVelocity(fixture.rows[3], settings)),
 				"SLERP preprocessing leaves other rows unchanged");
-			check(newton::prepareProblem(problem) == newton::SolveStatus::eSUCCESS, "prepare SLERP problem");
+			newton::prepareProblem(problem);
 			newton::Result result;
 			newton::Workspace workspace;
 			newton::Settings solveSettings;
@@ -302,7 +302,7 @@ static void testSlerpDrives()
 			constraint.flags |= PxConstraintFlag::eDISABLE_PREPROCESSING;
 			initializeProblem(problem);
 			output.clear();
-			check(!prepareNewtonJoint(constraint, body0, body1, 0, -1, NULL, settings, problem, output), "disable SLERP preprocessing");
+			prepareNewtonJoint(constraint, body0, body1, 0, -1, NULL, settings, problem, output);
 			for(PxU32 axis = 0; axis < 3; ++axis)
 				check(close(problem.contacts[0].jacobian[0][axis + 3], body0.sqrtInvInertia.column0[axis]),
 					"disabled preprocessing preserves callback axes");
@@ -322,20 +322,19 @@ static void testEmptyAndUnsupported()
 	newton::Problem problem;
 	initializeProblem(problem);
 	NewtonJointRows output;
-	check(!prepareNewtonJoint(constraint, body0, body1, 0, -1, NULL, settings, problem, output) && problem.contacts.empty(), "zero spring emits no row");
+	prepareNewtonJoint(constraint, body0, body1, 0, -1, NULL, settings, problem, output);
+	check(problem.contacts.empty(), "zero spring emits no row");
 	fixture.rows[0].minImpulse = 0.5f;
 	fixture.rows[0].maxImpulse = 2.0f;
-	check(!prepareNewtonJoint(constraint, body0, body1, 0, -1, NULL, settings, problem, output), "zero spring with nonzero minimum impulse");
+	prepareNewtonJoint(constraint, body0, body1, 0, -1, NULL, settings, problem, output);
 	check(close(solveImpulse(problem), 0.5), "zero spring obeys explicit nonzero bound");
-	initializeProblem(problem);
-	output.clear();
-	fixture.scales.angular0 = 0.5f;
-	check(prepareNewtonJoint(constraint, body0, body1, 0, -1, NULL, settings, problem, output) != NULL && problem.contacts.empty(), "local mass scaling rejected explicitly");
 	const PxU32 calls = fixture.calls;
 	constraint.flags = PxConstraintFlag::eDISABLE_CONSTRAINT;
-	check(!prepareNewtonJoint(constraint, body0, body1, 0, -1, NULL, settings, problem, output) && fixture.calls == calls, "disabled callback skipped");
+	prepareNewtonJoint(constraint, body0, body1, 0, -1, NULL, settings, problem, output);
+	check(fixture.calls == calls, "disabled callback skipped");
 	constraint.flags = PxConstraintFlag::eBROKEN;
-	check(!prepareNewtonJoint(constraint, body0, body1, 0, -1, NULL, settings, problem, output) && fixture.calls == calls, "broken callback skipped");
+	prepareNewtonJoint(constraint, body0, body1, 0, -1, NULL, settings, problem, output);
+	check(fixture.calls == calls, "broken callback skipped");
 }
 
 int main()

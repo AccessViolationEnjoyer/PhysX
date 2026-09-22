@@ -756,6 +756,7 @@ Sc::Scene::Scene(const PxSceneDesc& desc, PxU64 contextID) :
 
 	mUseGpuDynamics = useGpuDynamics;
 	mUseGpuBp = useGpuBroadphase;
+	PX_ASSERT(desc.solverType != PxSolverType::eNEWTON || !(desc.flags & (PxSceneFlag::eENABLE_GPU_DYNAMICS | PxSceneFlag::eENABLE_DIRECT_GPU_API)));
 
 	mLLContext = PX_NEW(PxsContext)(desc, mTaskManager, mTaskPool, mCudaContextManager, desc.contactPairSlabSize, contextID);
 	

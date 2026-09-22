@@ -24,7 +24,7 @@
 //
 // Copyright (c) 2008-2026 NVIDIA Corporation. All rights reserved.
 // Copyright (c) 2004-2008 AGEIA Technologies, Inc. All rights reserved.
-// Copyright (c) 2001-2004 NovodeX AG. All rights reserved.  
+// Copyright (c) 2001-2004 NovodeX AG. All rights reserved.
 
 #include "DyNewtonConstraintPrep.h"
 #include "DyConstraintPrep.h"
@@ -46,8 +46,7 @@ static double projectNewtonVelocity(const PxSolverBodyData& body, const PxVec3& 
 		double(angular.y) * body.angularVelocity.y + double(angular.z) * body.angularVelocity.z;
 }
 
-static double projectInitialVelocity(const PxSolverBodyData& body, PxI32 bodyIndex,
-	const PxVec3& linear, const PxVec3& angular, const NewtonJointSettings& settings)
+static double projectInitialVelocity(const PxSolverBodyData& body, PxI32 bodyIndex, const PxVec3& linear, const PxVec3& angular, const NewtonJointSettings& settings)
 {
 	if(bodyIndex < 0)
 	{
@@ -59,8 +58,7 @@ static double projectInitialVelocity(const PxSolverBodyData& body, PxI32 bodyInd
 		double(angular.y) * velocity.angular.y + double(angular.z) * velocity.angular.z;
 }
 
-static void setNewtonJointJacobian(newton::Vec6& jacobian, const PxSolverBodyData& body,
-	const PxVec3& linear, const PxVec3& angular, PxI32 bodyIndex, double sign, const PxU8* bodyLockFlags)
+static void setNewtonJointJacobian(newton::Vec6& jacobian, const PxSolverBodyData& body, const PxVec3& linear, const PxVec3& angular, PxI32 bodyIndex, double sign, const PxU8* bodyLockFlags)
 {
 	if(bodyIndex < 0)
 	{
@@ -77,8 +75,7 @@ static void setNewtonJointJacobian(newton::Vec6& jacobian, const PxSolverBodyDat
 	}
 }
 
-static const char* preprocessNewtonSlerp(Px1DConstraint* rows, PxU32 rowCount,
-	const PxSolverBodyData& body0, const PxSolverBodyData& body1, PxI32 bodyIndex0, PxI32 bodyIndex1)
+static void preprocessNewtonSlerp(Px1DConstraint* rows, PxU32 rowCount, const PxSolverBodyData& body0, const PxSolverBodyData& body1, PxI32 bodyIndex0, PxI32 bodyIndex1)
 {
 	Px1DConstraint driveRows[3];
 	PxU32 indices[3];
@@ -89,21 +86,15 @@ static const char* preprocessNewtonSlerp(Px1DConstraint* rows, PxU32 rowCount,
 		{
 			continue;
 		}
-		if(driveCount == 3)
-		{
-			return "Newton SLERP preprocessing requires exactly three drive rows.";
-		}
+		PX_ASSERT(driveCount < 3);
 		indices[driveCount] = i;
 		driveRows[driveCount++] = rows[i];
 	}
 	if(driveCount == 0)
 	{
-		return NULL;
+		return;
 	}
-	if(driveCount != 3)
-	{
-		return "Newton SLERP preprocessing requires exactly three drive rows.";
-	}
+	PX_ASSERT(driveCount == 3);
 
 	// Native SLERP applies acceleration gains and per-axis force caps in response
 	// eigenaxes. Preprocess only this triple; leave other joint rows in their physical axes.
@@ -111,26 +102,18 @@ static const char* preprocessNewtonSlerp(Px1DConstraint* rows, PxU32 rowCount,
 	PX_ALIGN(16, PxVec4) angular0[3];
 	PX_ALIGN(16, PxVec4) angular1[3];
 	const PxMat33 zero(PxZero);
-	preprocessRows(sorted, driveRows, angular0, angular1, 3,
-		bodyIndex0 >= 0 ? body0.sqrtInvInertia : zero,
-		bodyIndex1 >= 0 ? body1.sqrtInvInertia : zero,
-		bodyIndex0 >= 0 ? body0.invMass : 0.0f, bodyIndex1 >= 0 ? body1.invMass : 0.0f,
-		PxConstraintInvMassScale(1.0f, 1.0f, 1.0f, 1.0f), false, true);
+	preprocessRows(sorted, driveRows, angular0, angular1, 3, bodyIndex0 >= 0 ? body0.sqrtInvInertia : zero, bodyIndex1 >= 0 ? body1.sqrtInvInertia : zero, bodyIndex0 >= 0 ? body0.invMass : 0.0f, bodyIndex1 >= 0 ? body1.invMass : 0.0f, PxConstraintInvMassScale(1.0f, 1.0f, 1.0f, 1.0f), false, true);
 	for(PxU32 i = 0; i < 3; ++i)
 	{
 		rows[indices[i]] = driveRows[i];
 	}
-	return NULL;
 }
 
-const char* prepareNewtonJoint(const Constraint& constraint,
-	const PxSolverBodyData& body0, const PxSolverBodyData& body1, PxI32 bodyIndex0, PxI32 bodyIndex1,
-	ConstraintWriteback* writeback, const NewtonJointSettings& settings,
-	newton::Problem& problem, NewtonJointRows& output)
+void prepareNewtonJoint(const Constraint& constraint, const PxSolverBodyData& body0, const PxSolverBodyData& body1, PxI32 bodyIndex0, PxI32 bodyIndex1, ConstraintWriteback* writeback, const NewtonJointSettings& settings, newton::Problem& problem, NewtonJointRows& output)
 {
 	if((constraint.flags & PxConstraintFlag::eBROKEN) || (writeback && writeback->broken))
 	{
-		return NULL;
+		return;
 	}
 
 	NewtonJointWriteback joint;
@@ -151,30 +134,17 @@ const char* prepareNewtonJoint(const Constraint& constraint,
 		const PxTransform& frame1 = constraint.body1 ? constraint.body1->getPose() : identity;
 		PxVec3p anchor0, anchor1, body0WorldOffset;
 		body0WorldOffset = PxVec3(0.0f);
-		rowCount = constraint.solverPrep(rows, body0WorldOffset, MAX_CONSTRAINT_ROWS, massScales,
-			constraint.constantBlock, frame0, frame1,
-			(constraint.flags & PxConstraintFlag::eENABLE_EXTENDED_LIMITS) != 0, anchor0, anchor1);
+		rowCount = constraint.solverPrep(rows, body0WorldOffset, MAX_CONSTRAINT_ROWS, massScales, constraint.constantBlock, frame0, frame1, (constraint.flags & PxConstraintFlag::eENABLE_EXTENDED_LIMITS) != 0, anchor0, anchor1);
 		joint.body0WorldOffset = body0WorldOffset;
-		if(rowCount > MAX_CONSTRAINT_ROWS)
-		{
-			return "Newton joint preparation returned more than MAX_CONSTRAINT_ROWS.";
-		}
+		PX_ASSERT(rowCount <= MAX_CONSTRAINT_ROWS);
 		// Per-constraint mass scaling makes different constraints act through different mass
 		// matrices. It cannot be represented by the shared symmetric Newton objective.
-		if(rowCount && (massScales.linear0 != 1.0f || massScales.angular0 != 1.0f ||
-						massScales.linear1 != 1.0f || massScales.angular1 != 1.0f))
-		{
-			return "Newton does not support joint-local inverse mass or inertia scaling.";
-		}
+		PX_ASSERT(!rowCount || (massScales.linear0 == 1.0f && massScales.angular0 == 1.0f && massScales.linear1 == 1.0f && massScales.angular1 == 1.0f));
 	}
 
 	if((constraint.flags & PxConstraintFlag::eIMPROVED_SLERP) && !(constraint.flags & PxConstraintFlag::eDISABLE_PREPROCESSING))
 	{
-		const char* error = preprocessNewtonSlerp(rows, rowCount, body0, body1, bodyIndex0, bodyIndex1);
-		if(error)
-		{
-			return error;
-		}
+		preprocessNewtonSlerp(rows, rowCount, body0, body1, bodyIndex0, bodyIndex1);
 	}
 
 	const double timestep = settings.timestep;
@@ -204,20 +174,15 @@ const char* prepareNewtonJoint(const Constraint& constraint,
 			continue;
 		}
 
-		const double freeSpeed = projectNewtonVelocity(body0, row.linear0, row.angular0) -
-			projectNewtonVelocity(body1, row.linear1, row.angular1);
-		const double driveScale = (row.flags & Px1DConstraintFlag::eHAS_DRIVE_LIMIT) &&
-			(constraint.flags & PxConstraintFlag::eDRIVE_LIMITS_ARE_FORCES) ? timestep : 1.0;
+		const double freeSpeed = projectNewtonVelocity(body0, row.linear0, row.angular0) - projectNewtonVelocity(body1, row.linear1, row.angular1);
+		const double driveScale = (row.flags & Px1DConstraintFlag::eHAS_DRIVE_LIMIT) && (constraint.flags & PxConstraintFlag::eDRIVE_LIMITS_ARE_FORCES) ? timestep : 1.0;
 		double lower = row.minImpulse == -PX_MAX_F32 ? -newton::MAX_IMPULSE : double(row.minImpulse) * driveScale;
 		double upper = row.maxImpulse == PX_MAX_F32 ? newton::MAX_IMPULSE : double(row.maxImpulse) * driveScale;
 		if(spring)
 		{
 			const double stiffness = row.mods.spring.stiffness;
 			const double damping = row.mods.spring.damping;
-			if(stiffness < 0.0 || damping < 0.0)
-			{
-				return "Newton joint spring stiffness and damping must be nonnegative.";
-			}
+			PX_ASSERT(stiffness >= 0.0 && damping >= 0.0);
 			const double a = timestep * (damping + timestep * stiffness);
 			if(a == 0.0)
 			{
@@ -242,15 +207,13 @@ const char* prepareNewtonJoint(const Constraint& constraint,
 		{
 			contact.regularization = response * settings.regularization;
 			const double bounceSpeed = -double(row.mods.bounce.restitution) * freeSpeed;
-			if((row.flags & Px1DConstraintFlag::eRESTITUTION) &&
-				-freeSpeed > row.mods.bounce.velocityThreshold && bounceSpeed * row.geometricError <= 0.0 && bounceSpeed != 0.0)
+			if((row.flags & Px1DConstraintFlag::eRESTITUTION) && -freeSpeed > row.mods.bounce.velocityThreshold && bounceSpeed * row.geometricError <= 0.0 && bounceSpeed != 0.0)
 			{
 				contact.freeVelocity = freeSpeed - bounceSpeed;
 			}
 			else
 			{
-				const double initialSpeed = projectInitialVelocity(body0, bodyIndex0, row.linear0, row.angular0, settings) -
-					projectInitialVelocity(body1, bodyIndex1, row.linear1, row.angular1, settings);
+				const double initialSpeed = projectInitialVelocity(body0, bodyIndex0, row.linear0, row.angular0, settings) - projectInitialVelocity(body1, bodyIndex1, row.linear1, row.angular1, settings);
 				const double impedance = 1.0 / (1.0 + double(settings.regularization));
 				const double timeConstant = std::max(0.02, 2.0 * timestep);
 				const double damping = 2.0 / (impedance * timeConstant);
@@ -268,7 +231,6 @@ const char* prepareNewtonJoint(const Constraint& constraint,
 	}
 	joint.rowCount = output.rows.size() - joint.firstRow;
 	output.joints.pushBack(joint);
-	return NULL;
 }
 
 void writebackNewtonJoints(const NewtonJointRows& rows, const newton::Problem& problem, const newton::Result& result)
@@ -282,7 +244,8 @@ void writebackNewtonJoints(const NewtonJointRows& rows, const newton::Problem& p
 			continue;
 		}
 		PxVec3 linearImpulse(0.0f), angularImpulse(0.0f);
-		for(PxU32 j = joint.firstRow; j < joint.firstRow + joint.rowCount; ++j)
+		const PxU32 lastRow = joint.firstRow + joint.rowCount;
+		for(PxU32 j = joint.firstRow; j < lastRow; ++j)
 		{
 			const NewtonJointRow& row = rows.rows[j];
 			const PxReal impulse = PxReal(result.impulse[problem.contacts[row.contactIndex].row]);
@@ -292,8 +255,7 @@ void writebackNewtonJoints(const NewtonJointRows& rows, const newton::Problem& p
 		angularImpulse -= joint.body0WorldOffset.cross(linearImpulse);
 		joint.destination->linearImpulse = linearImpulse;
 		joint.destination->angularImpulse = angularImpulse;
-		joint.destination->broken = PxU32(linearImpulse.magnitude() > joint.linearBreakImpulse ||
-			angularImpulse.magnitude() > joint.angularBreakImpulse);
+		joint.destination->broken = PxU32(linearImpulse.magnitude() > joint.linearBreakImpulse || angularImpulse.magnitude() > joint.angularBreakImpulse);
 	}
 }
 }

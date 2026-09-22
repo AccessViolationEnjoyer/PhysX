@@ -51,33 +51,47 @@ public:
 	virtual void* zoneStart(const char* name, bool, uint64_t) PX_OVERRIDE
 	{
 		if(std::strncmp(name, "Dynamics.newton", 15) != 0)
+		{
 			return NULL;
+		}
 		return reinterpret_cast<void*>(uintptr_t(now()));
 	}
 
 	virtual void zoneEnd(void* data, const char* name, bool, uint64_t) PX_OVERRIDE
 	{
 		if(!data)
+		{
 			return;
+		}
 		const uint64_t start = uint64_t(reinterpret_cast<uintptr_t>(data));
 		const uint64_t end = now();
 		if(std::strcmp(name, "Dynamics.newtonIsland") == 0)
 		{
 			uint64_t earliest = firstStart.load();
-			while(start < earliest && !firstStart.compare_exchange_weak(earliest, start)) {}
+			while(start < earliest && !firstStart.compare_exchange_weak(earliest, start))
+			{
+			}
 			uint64_t latest = lastEnd.load();
-			while(end > latest && !lastEnd.compare_exchange_weak(latest, end)) {}
+			while(end > latest && !lastEnd.compare_exchange_weak(latest, end))
+			{
+			}
 			islandTime += end - start;
 			++islandCount;
 		}
 		else if(std::strcmp(name, "Dynamics.newtonPrepare") == 0)
+		{
 			prepareTime += end - start;
+		}
 		else if(std::strcmp(name, "Dynamics.newtonSolve") == 0)
 		{
 			uint64_t earliest = firstSolveStart.load();
-			while(start < earliest && !firstSolveStart.compare_exchange_weak(earliest, start)) {}
+			while(start < earliest && !firstSolveStart.compare_exchange_weak(earliest, start))
+			{
+			}
 			uint64_t latest = lastSolveEnd.load();
-			while(end > latest && !lastSolveEnd.compare_exchange_weak(latest, end)) {}
+			while(end > latest && !lastSolveEnd.compare_exchange_weak(latest, end))
+			{
+			}
 			solveTime += end - start;
 		}
 	}
@@ -88,31 +102,49 @@ public:
 		{
 			iterations += value;
 			int minimum = minimumIterations.load();
-			while(value < minimum && !minimumIterations.compare_exchange_weak(minimum, value)) {}
+			while(value < minimum && !minimumIterations.compare_exchange_weak(minimum, value))
+			{
+			}
 			int maximum = maximumIterations.load();
-			while(value > maximum && !maximumIterations.compare_exchange_weak(maximum, value)) {}
+			while(value > maximum && !maximumIterations.compare_exchange_weak(maximum, value))
+			{
+			}
 		}
 		else if(std::strcmp(name, "Dynamics.newtonRows") == 0)
+		{
 			rows += value;
+		}
 		else if(std::strcmp(name, "Dynamics.newtonFactorizations") == 0)
+		{
 			factors += value;
+		}
 		else if(std::strcmp(name, "Dynamics.newtonRankUpdates") == 0)
+		{
 			updates += value;
+		}
 		else if(std::strcmp(name, "Dynamics.newtonLineEvaluations") == 0)
+		{
 			lineEvaluations += value;
+		}
 		else if(std::strcmp(name, "Dynamics.newtonStatus") == 0 && value == 1)
+		{
 			++iterationLimits;
+		}
 	}
 
 	virtual void recordData(float value, const char* name, uint64_t) PX_OVERRIDE
 	{
 		std::atomic<float>* maximum = NULL;
 		if(std::strcmp(name, "Dynamics.newtonScaledGradient") == 0)
+		{
 			maximum = &scaledGradient;
+		}
 		if(maximum)
 		{
 			float current = maximum->load();
-			while(value > current && !maximum->compare_exchange_weak(current, value)) {}
+			while(value > current && !maximum->compare_exchange_weak(current, value))
+			{
+			}
 		}
 	}
 
@@ -127,5 +159,4 @@ public:
 	}
 };
 #endif
-
 

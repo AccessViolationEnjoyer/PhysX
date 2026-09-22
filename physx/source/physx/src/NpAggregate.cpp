@@ -361,8 +361,7 @@ bool NpAggregate::addArticulation(PxArticulationReducedCoordinate& art)
 
 	PX_CHECK_SCENE_API_WRITE_FORBIDDEN_AND_RETURN_VAL(npScene, "PxAggregate::addArticulation() not allowed while simulation is running. Call will be ignored.", false);
 
-	if(npScene && npScene->getScScene().getSolverType() == PxSolverType::eNEWTON)
-		return outputError<PxErrorCode::eINVALID_OPERATION>(__LINE__, "PxAggregate::addArticulation(): Newton does not support articulations.");
+	PX_ASSERT(!npScene || npScene->getScScene().getSolverType() != PxSolverType::eNEWTON);
 
 	PX_SIMD_GUARD
 

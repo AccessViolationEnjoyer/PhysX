@@ -36,9 +36,13 @@ void dump(const Sample& sample, int trial)
 {
 	std::printf("FAIL trial=%d normals=%d tangents=%d\n", trial, sample.normalCount, sample.tangentCount);
 	for(int i = 0; i < sample.normalCount; ++i)
+	{
 		std::printf("n %.17g %.17g %.17g\n", sample.normalVelocity[i], sample.normalRegularization[i], sample.normalCap[i]);
+	}
 	for(int j = 0; j < sample.tangentCount; ++j)
+	{
 		std::printf("t %.17g %.17g %.17g\n", sample.tangentVelocity[j], sample.tangentRegularization[j], sample.friction[j]);
+	}
 }
 
 bool checkOptimality(const Sample& sample, const Answer& answer, double& maximumError)
@@ -47,7 +51,9 @@ bool checkOptimality(const Sample& sample, const Answer& answer, double& maximum
 	for(int i = 0; i < sample.normalCount; ++i)
 	{
 		if(answer.normal[i] < 0.0 || answer.normal[i] > sample.normalCap[i])
+		{
 			return false;
+		}
 		normalSum += answer.normal[i];
 	}
 	double shift = 0.0;
@@ -59,7 +65,9 @@ bool checkOptimality(const Sample& sample, const Answer& answer, double& maximum
 		const double error = std::abs(reference - answer.tangent[j]) / std::max(1.0, std::abs(reference));
 		maximumError = std::max(maximumError, error);
 		if(error > 1e-11)
+		{
 			return false;
+		}
 		shift += sample.friction[j] * std::max(0.0, std::abs(sample.tangentVelocity[j]) - sample.tangentRegularization[j] * bound);
 	}
 	for(int i = 0; i < sample.normalCount; ++i)
@@ -68,9 +76,13 @@ bool checkOptimality(const Sample& sample, const Answer& answer, double& maximum
 		const double scale = std::max(1.0, std::max(std::abs(sample.normalVelocity[i]), std::abs(shift)));
 		double error = std::abs(residual) / scale;
 		if(answer.normal[i] == 0.0)
+		{
 			error = std::max(0.0, -residual) / scale;
+		}
 		if(answer.normal[i] == sample.normalCap[i])
+		{
 			error = std::min(error, std::max(0.0, residual) / scale);
+		}
 		maximumError = std::max(maximumError, error);
 		if(error > 2e-10)
 		{
@@ -87,7 +99,9 @@ bool enumerateReference(const Sample& sample, const Answer& answer)
 {
 	int normalStates = 1;
 	for(int i = 0; i < sample.normalCount; ++i)
+	{
 		normalStates *= 3;
+	}
 	const int tangentStates = 1 << sample.tangentCount;
 	for(int normalState = 0; normalState < normalStates; ++normalState)
 	{
@@ -105,10 +119,14 @@ bool enumerateReference(const Sample& sample, const Answer& answer)
 				constant -= sample.normalVelocity[i] / sample.normalRegularization[i];
 			}
 			else if(normalMode[i] == 2)
+			{
 				constant += sample.normalCap[i];
+			}
 		}
 		if(!std::isfinite(constant))
+		{
 			continue;
+		}
 		for(int tangentState = 0; tangentState < tangentStates; ++tangentState)
 		{
 			double tangentConstant = 0.0;
@@ -124,7 +142,9 @@ bool enumerateReference(const Sample& sample, const Answer& answer)
 			const double normalSum = (constant + coefficient * tangentConstant) / (1.0 + coefficient * tangentCoefficient);
 			const double shift = tangentConstant - tangentCoefficient * normalSum;
 			if(normalSum < -1e-12 || shift < -1e-12)
+			{
 				continue;
+			}
 			Answer reference = {};
 			bool valid = true;
 			for(int i = 0; i < sample.normalCount; ++i)
@@ -155,13 +175,23 @@ bool enumerateReference(const Sample& sample, const Answer& answer)
 				reference.tangent[j] = (sample.tangentVelocity[j] < 0.0 ? 1.0 : -1.0) * (bounded ? bound : freeImpulse);
 			}
 			if(!valid)
+			{
 				continue;
+			}
 			for(int i = 0; i < sample.normalCount; ++i)
+			{
 				if(std::abs(reference.normal[i] - answer.normal[i]) > 2e-9 * std::max(1.0, std::abs(reference.normal[i])))
+				{
 					return false;
+				}
+			}
 			for(int j = 0; j < sample.tangentCount; ++j)
+			{
 				if(std::abs(reference.tangent[j] - answer.tangent[j]) > 2e-9 * std::max(1.0, std::abs(reference.tangent[j])))
+				{
 					return false;
+				}
+			}
 			return true;
 		}
 	}
@@ -171,11 +201,19 @@ bool enumerateReference(const Sample& sample, const Answer& answer)
 bool samePiece(const Sample& sample, const Answer& a, const Answer& b)
 {
 	for(int i = 0; i < sample.normalCount; ++i)
+	{
 		if(a.normalDiagonal[i] != b.normalDiagonal[i])
+		{
 			return false;
+		}
+	}
 	for(int j = 0; j < sample.tangentCount; ++j)
+	{
 		if(a.tangentDiagonal[j] != b.tangentDiagonal[j] || a.tangentCoupling[j] != b.tangentCoupling[j])
+		{
 			return false;
+		}
+	}
 	return true;
 }
 
@@ -194,9 +232,13 @@ bool checkDerivative(Sample& sample, const Answer& answer, int& checked, double&
 		const bool minusValid = project(sample, minus);
 		velocity = original;
 		if(!plusValid || !minusValid)
+		{
 			return false;
+		}
 		if(!samePiece(sample, answer, plus) || !samePiece(sample, answer, minus))
+		{
 			continue;
+		}
 		for(int row = 0; row < rows; ++row)
 		{
 			const double wn = row < sample.normalCount ? answer.normalDiagonal[row] : 0.0;
@@ -206,7 +248,9 @@ bool checkDerivative(Sample& sample, const Answer& answer, int& checked, double&
 			double predicted = answer.result.inverseCoupling *
 				(-answer.result.boundedTangentRegularization * wn * wm - wn * um - un * wm + answer.result.normalInverseRegularization * un * um);
 			if(row == column)
+			{
 				predicted += row < sample.normalCount ? answer.normalDiagonal[row] : answer.tangentDiagonal[row - sample.normalCount];
+			}
 			const double plusImpulse = row < sample.normalCount ? plus.normal[row] : plus.tangent[row - sample.normalCount];
 			const double minusImpulse = row < sample.normalCount ? minus.normal[row] : minus.tangent[row - sample.normalCount];
 			const double observed = -(plusImpulse - minusImpulse) / (2.0 * step);
@@ -221,7 +265,9 @@ bool checkDerivative(Sample& sample, const Answer& answer, int& checked, double&
 		const double impulse = column < sample.normalCount ? answer.normal[column] : answer.tangent[column - sample.normalCount];
 		const double gradient = (plus.result.cost - minus.result.cost) / (2.0 * step);
 		if(std::abs(gradient + impulse) > 2e-6 * std::max(1.0, std::abs(impulse)))
+		{
 			return false;
+		}
 		++checked;
 	}
 	return true;
@@ -246,7 +292,9 @@ int main()
 			sample.normalRegularization[i] = std::pow(10.0, (trial < 1000 ? 4.0 : 9.0) * unit(random) - (trial < 1000 ? 2.0 : 6.0));
 			sample.normalCap[i] = unit(random) < 0.4 ? (std::numeric_limits<double>::max)() : 3.0 * unit(random);
 			if(trial % 11 == 0)
+			{
 				sample.normalCap[i] = 0.0;
+			}
 		}
 		for(int j = 0; j < sample.tangentCount; ++j)
 		{
@@ -255,9 +303,7 @@ int main()
 			sample.friction[j] = trial % 13 == 0 ? 0.0 : 2.0 * unit(random);
 		}
 		Answer answer;
-		if(!project(sample, answer) || !checkOptimality(sample, answer, maximumKkt) ||
-			(trial < 300 && !enumerateReference(sample, answer)) ||
-			(trial < 1000 && !checkDerivative(sample, answer, derivatives, maximumDerivative)))
+		if(!project(sample, answer) || !checkOptimality(sample, answer, maximumKkt) || (trial < 300 && !enumerateReference(sample, answer)) || (trial < 1000 && !checkDerivative(sample, answer, derivatives, maximumDerivative)))
 		{
 			dump(sample, trial);
 			return 1;

@@ -20,24 +20,26 @@ public:
 		{
 			const bool beltFirst = pairs[i].shape[0]->getSimulationFilterData().word0 != 0;
 			const PxVec3 velocity(beltFirst ? -PxReal(pallet::beltSpeed) : PxReal(pallet::beltSpeed), 0.0f, 0.0f);
-			for(PxU32 j = 0; j < pairs[i].contacts.size(); ++j)
+			const PxU32 contactCount = pairs[i].contacts.size();
+			for(PxU32 j = 0; j < contactCount; ++j)
+			{
 				pairs[i].contacts.setTargetVelocity(j, velocity);
+			}
 		}
 	}
 };
 
-static PxFilterFlags filterShader(PxFilterObjectAttributes, PxFilterData data0,
-	PxFilterObjectAttributes, PxFilterData data1, PxPairFlags& flags, const void*, PxU32)
+static PxFilterFlags filterShader(PxFilterObjectAttributes, PxFilterData data0, PxFilterObjectAttributes, PxFilterData data1, PxPairFlags& flags, const void*, PxU32)
 {
 	flags = PxPairFlag::eCONTACT_DEFAULT;
 	if(data0.word0 || data1.word0)
+	{
 		flags |= PxPairFlag::eMODIFY_CONTACTS;
+	}
 	return PxFilterFlag::eDEFAULT;
 }
 
-static void createScene(PxPhysics& physics, PxScene& scene, PxMaterial& material,
-	const std::vector<pallet::Body>& bodies, PxU32 positionIterations, PxU32 velocityIterations,
-	std::vector<PxRigidDynamic*>* actors)
+static void createScene(PxPhysics& physics, PxScene& scene, PxMaterial& material, const std::vector<pallet::Body>& bodies, PxU32 positionIterations, PxU32 velocityIterations, std::vector<PxRigidDynamic*>* actors)
 {
 	for(int lane = 0; lane < pallet::conveyorCount; ++lane)
 	{
@@ -51,7 +53,8 @@ static void createScene(PxPhysics& physics, PxScene& scene, PxMaterial& material
 		scene.addActor(*belt);
 	}
 
-	for(size_t i = 0; i < bodies.size(); ++i)
+	const size_t bodyCount = bodies.size();
+	for(size_t i = 0; i < bodyCount; ++i)
 	{
 		const pallet::Body& body = bodies[i];
 		PxRigidDynamic* actor = physics.createRigidDynamic(PxTransform(PxVec3(PxReal(body.position[0]),
@@ -66,7 +69,9 @@ static void createScene(PxPhysics& physics, PxScene& scene, PxMaterial& material
 		actor->setName(body.name.c_str());
 		scene.addActor(*actor);
 		if(actors)
+		{
 			actors->push_back(actor);
+		}
 	}
 }
 
@@ -101,7 +106,9 @@ int main(int argc, const char* const* argv)
 	description.flags |= PxSceneFlag::eENABLE_FRICTION_EVERY_ITERATION;
 	NativeNewtonProfiler profiler;
 	if(description.solverType == PxSolverType::eNEWTON)
+	{
 		PxSetProfilerCallback(&profiler);
+	}
 	PxScene* scene = physics->createScene(description);
 	PxMaterial* material = physics->createMaterial(0.5f, 0.5f, 0.0f);
 	const std::vector<pallet::Body> bodies = pallet::createBodies();
@@ -113,7 +120,9 @@ int main(int argc, const char* const* argv)
 		description.solverType == PxSolverType::eNEWTON ? "Newton" : "PGS", bodies.size(), positionIterations, velocityIterations, double(timestep), threads);
 	FILE* profile = description.solverType == PxSolverType::eNEWTON ? pallet::openOutput(std::string(argv[1]) + "-profile.csv") : NULL;
 	if(profile)
+	{
 		fprintf(profile, "step,island_wall_ms,solve_wall_ms,prepare_cpu_ms,solve_cpu_ms,islands,rows,iterations,iteration_limits,scaled_gradient,factorizations,rank_updates,line_evaluations\n");
+	}
 	for(int step = 0; step < steps; ++step)
 	{
 		profiler.reset();
@@ -123,7 +132,8 @@ int main(int argc, const char* const* argv)
 		const double stepMs = pallet::elapsed(start);
 		PxSimulationStatistics statistics;
 		scene->getSimulationStatistics(statistics);
-		for(size_t i = 0; i < actors.size(); ++i)
+		const size_t actorCount = actors.size();
+		for(size_t i = 0; i < actorCount; ++i)
 		{
 			const PxTransform pose = actors[i]->getGlobalPose();
 			const PxMat33 rotation(pose.q);
@@ -133,21 +143,27 @@ int main(int argc, const char* const* argv)
 				poses[i].position[j] = pose.p[j];
 				poses[i].velocity[j] = velocity[j];
 				for(PxU32 k = 0; k < 3; ++k)
+				{
 					poses[i].rotation[j * 3 + k] = rotation(j, k);
+				}
 			}
 		}
 		if(profile)
+		{
 			fprintf(profile, "%d,%.9g,%.9g,%.9g,%.9g,%d,%d,%d,%d,%.9g,%d,%d,%d\n", step + 1,
 				profiler.wallMilliseconds(), profiler.solveWallMilliseconds(),
 				double(profiler.prepareTime.load()) * 1e-6, double(profiler.solveTime.load()) * 1e-6,
 				profiler.islandCount.load(), profiler.rows.load(), profiler.iterations.load(), profiler.iterationLimits.load(),
 				double(profiler.scaledGradient.load()), profiler.factors.load(), profiler.updates.load(), profiler.lineEvaluations.load());
+		}
 		recorder.record(step + 1, (step + 1) * double(timestep), stepMs, profiler.wallMilliseconds(),
 			int(statistics.nbDiscreteContactPairsWithContacts), -1, -1,
 			description.solverType == PxSolverType::eNEWTON ? profiler.iterations.load() : int(positionIterations + velocityIterations), bodies, poses);
 	}
 	if(profile)
+	{
 		fclose(profile);
+	}
 	PxSetProfilerCallback(NULL);
 	scene->release();
 	material->release();
@@ -198,7 +214,9 @@ void initPhysics(bool /*interactive*/)
 void stepPhysics(bool interactive)
 {
 	if(interactive && gPaused && !gSingleStep)
+	{
 		return;
+	}
 
 	gSingleStep = false;
 	gScene->simulate(0.01f);
@@ -241,11 +259,12 @@ int snippetMain(int, const char* const*)
 #else
 	initPhysics(false);
 	for(PxU32 i = 0; i < 2000; ++i)
+	{
 		stepPhysics(false);
+	}
 	cleanupPhysics(false);
 #endif
 	return 0;
 }
 #endif
-
 

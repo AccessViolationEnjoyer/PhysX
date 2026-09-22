@@ -9,7 +9,11 @@ namespace
 int failures = 0;
 void check(bool value, const char* text)
 {
-	if(!value) { std::printf("FAIL %s\n", text); ++failures; }
+	if(!value)
+	{
+		std::printf("FAIL %s\n", text);
+		++failures;
+	}
 }
 class ValidationErrors : public PxErrorCallback
 {
@@ -39,9 +43,14 @@ public:
 		std::lock_guard<std::mutex> lock(mutex);
 		if(expectedText && code == expectedCode && std::strstr(message, expectedText))
 		{
-			++observed; ++expectedTotal; return;
+			++observed;
+			++expectedTotal;
+			return;
 		}
-		if(code == PxErrorCode::eDEBUG_INFO || code == PxErrorCode::ePERF_WARNING) return;
+		if(code == PxErrorCode::eDEBUG_INFO || code == PxErrorCode::ePERF_WARNING)
+		{
+			return;
+		}
 		++unexpected;
 		std::printf("UNEXPECTED %d %s (%s:%d)\n", int(code), message, file, line);
 	}
@@ -60,7 +69,12 @@ PxRigidDynamic* body(PxPhysics& physics, PxMaterial& material, PxReal x)
 {
 	PxRigidDynamic* result = PxCreateDynamic(physics, PxTransform(PxVec3(x, 10.0f, 0.0f)), PxBoxGeometry(PxVec3(0.25f)), material, 1.0f);
 	check(result != NULL, "rigid fixture created");
-	if(result) { result->setLinearDamping(0.0f); result->setAngularDamping(0.0f); result->setSleepThreshold(0.0f); }
+	if(result)
+	{
+		result->setLinearDamping(0.0f);
+		result->setAngularDamping(0.0f);
+		result->setSleepThreshold(0.0f);
+	}
 	return result;
 }
 void usable(PxScene& scene, PxRigidDynamic& probe, PxU32 count)
@@ -85,7 +99,10 @@ void reject(PxPhysics& physics, ValidationErrors& errors, const PxSceneDesc& des
 	errors.end();
 	check(scene == NULL, label);
 	check(physics.getNbScenes() == count, "rejected scene leaves registry unchanged");
-	if(scene) scene->release();
+	if(scene)
+	{
+		scene->release();
+	}
 }
 void settings(PxPhysics& physics, PxDefaultCpuDispatcher& dispatcher, ValidationErrors& errors)
 {
@@ -97,7 +114,10 @@ void settings(PxPhysics& physics, PxDefaultCpuDispatcher& dispatcher, Validation
 	check(defaults.isValid(), "default PGS descriptor valid with required dispatcher and filter");
 	PxScene* pgs = physics.createScene(defaults);
 	check(pgs && pgs->getSolverType() == PxSolverType::ePGS, "default scene creates PGS");
-	if(pgs) pgs->release();
+	if(pgs)
+	{
+		pgs->release();
+	}
 	defaults.newtonMaxIterations = 0;
 	defaults.newtonTolerance = -1.0f;
 	defaults.newtonRegularization = -1.0f;
@@ -141,10 +161,17 @@ void articulations(PxPhysics& physics, PxMaterial& material, ValidationErrors& e
 {
 	PxArticulationReducedCoordinate* articulation = physics.createArticulationReducedCoordinate();
 	check(articulation != NULL, "articulation fixture created");
-	if(!articulation) return;
+	if(!articulation)
+	{
+		return;
+	}
 	PxArticulationLink* link = articulation->createLink(NULL, PxTransform(PxVec3(20.0f, 10.0f, 0.0f)));
 	check(link != NULL, "nonempty articulation created");
-	if(!link) { articulation->release(); return; }
+	if(!link)
+	{
+		articulation->release();
+		return;
+	}
 	check(PxRigidActorExt::createExclusiveShape(*link, PxBoxGeometry(PxVec3(.1f)), material) != NULL, "articulation has valid geometry");
 	link->setMass(1.0f); link->setMassSpaceInertiaTensor(PxVec3(1.0f));
 	errors.begin(PxErrorCode::eINVALID_OPERATION, "Newton does not support articulations");
@@ -205,10 +232,17 @@ int main()
 	PxDefaultAllocator allocator;
 	ValidationErrors errors;
 	PxFoundation* foundation = PxCreateFoundation(PX_PHYSICS_VERSION, allocator, errors);
-	if(!foundation) return 1;
+	if(!foundation)
+	{
+		return 1;
+	}
 	foundation->setReportAllocationNames(true);
 	PxPhysics* physics = PxCreatePhysics(PX_PHYSICS_VERSION, *foundation, PxTolerancesScale());
-	if(!physics) { foundation->release(); return 1; }
+	if(!physics)
+	{
+		foundation->release();
+		return 1;
+	}
 	const bool extensions = PxInitExtensions(*physics, NULL);
 	check(extensions, "extensions initialized");
 	PxDefaultCpuDispatcher* dispatcher = PxDefaultCpuDispatcherCreate(8);
@@ -225,12 +259,27 @@ int main()
 			settings(*physics, *dispatcher, errors); usable(*scene, *probe, 1);
 			articulations(*physics, *material, errors, *scene, *probe);
 		}
-		if(probe) probe->release();
-		if(scene) scene->release();
+		if(probe)
+		{
+			probe->release();
+		}
+		if(scene)
+		{
+			scene->release();
+		}
 	}
-	if(material) material->release();
-	if(dispatcher) dispatcher->release();
-	if(extensions) PxCloseExtensions();
+	if(material)
+	{
+		material->release();
+	}
+	if(dispatcher)
+	{
+		dispatcher->release();
+	}
+	if(extensions)
+	{
+		PxCloseExtensions();
+	}
 	physics->release(); foundation->release();
 	std::printf("Native SDK validation: failures=%d expected_diagnostics=%d unexpected_diagnostics=%d\n", failures, errors.expectedTotal, errors.unexpected);
 	return failures || errors.unexpected ? 1 : 0;

@@ -60,12 +60,9 @@ struct SolverIslandObjects
 	}
 };
 
-Context* createDynamicsContext(	PxcNpMemBlockPool* memBlockPool, Cm::FlushPool& taskPool, PxvSimStats& simStats,
-								Cm::VirtualAllocatorCallback& allocator, PxsMaterialManager* materialManager,
-								IG::SimpleIslandManager& islandManager, PxU64 contextID, PxReal maxBiasCoefficient,
-								PxReal lengthScale, PxSceneFlags sceneFlags, const PxSceneDesc* newtonDesc)
+Context* createDynamicsContext(PxcNpMemBlockPool* memBlockPool, Cm::FlushPool& taskPool, PxvSimStats& simStats, Cm::VirtualAllocatorCallback& allocator, PxsMaterialManager* materialManager, IG::SimpleIslandManager& islandManager, PxU64 contextID, PxReal maxBiasCoefficient, PxReal lengthScale, PxSceneFlags sceneFlags, const PxSceneDesc* newtonSceneDescription)
 {
-	return PX_NEW(DynamicsContext)(memBlockPool, taskPool, simStats, allocator, materialManager, islandManager, contextID, maxBiasCoefficient, lengthScale, sceneFlags, newtonDesc);
+	return PX_NEW(DynamicsContext)(memBlockPool, taskPool, simStats, allocator, materialManager, islandManager, contextID, maxBiasCoefficient, lengthScale, sceneFlags, newtonSceneDescription);
 }
 
 void DynamicsContext::destroy()
@@ -74,19 +71,10 @@ void DynamicsContext::destroy()
 	PX_FREE_THIS;
 }
 
-DynamicsContext::DynamicsContext(	PxcNpMemBlockPool* memBlockPool,
-									Cm::FlushPool& taskPool,
-									PxvSimStats& simStats,
-									Cm::VirtualAllocatorCallback& allocator,
-									PxsMaterialManager* materialManager,
-									IG::SimpleIslandManager& islandManager,
-									PxU64 contextID,
-									PxReal maxBiasCoefficient,
-									PxReal lengthScale,
-									PxSceneFlags sceneFlags, const PxSceneDesc* newtonDesc) :
+DynamicsContext::DynamicsContext(PxcNpMemBlockPool* memBlockPool, Cm::FlushPool& taskPool, PxvSimStats& simStats, Cm::VirtualAllocatorCallback& allocator, PxsMaterialManager* materialManager, IG::SimpleIslandManager& islandManager, PxU64 contextID, PxReal maxBiasCoefficient, PxReal lengthScale, PxSceneFlags sceneFlags, const PxSceneDesc* newtonSceneDescription) :
 	DynamicsContextBase				(memBlockPool, taskPool, simStats, allocator, materialManager, islandManager, contextID, maxBiasCoefficient, lengthScale, sceneFlags),
 	mSolveFrictionEveryIteration	(sceneFlags & PxSceneFlag::eENABLE_FRICTION_EVERY_ITERATION),
-	mNewtonSolver					(newtonDesc ? createNewtonSolver(*newtonDesc) : NULL)
+	mNewtonSolver					(newtonSceneDescription ? createNewtonSolver(*newtonSceneDescription) : NULL)
 {
 	mWorldSolverBody.linearVelocity = PxVec3(0.0f);
 	mWorldSolverBody.angularState = PxVec3(0.0f);
@@ -1215,12 +1203,9 @@ public:
 		const PxU32 bodyCount = mIslandContext.mCounts.bodies;
 		NewtonSolver& solver = *mContext.getNewtonSolver();
 		const PxU32 workerCount = getTaskManager()->getCpuDispatcher()->getWorkerCount();
-		if(solveNewtonIsland(solver, mContext, threadContext, bodies, mContext.mSolverBodyDataPool.begin(),
-			mSolverBodyOffset, bodyCount, getContinuation(), workerCount))
+		if(solveNewtonIsland(solver, mContext, threadContext, bodies, mContext.mSolverBodyDataPool.begin(), mSolverBodyOffset, bodyCount, getContinuation(), workerCount))
 		{
-			integrate(mContext.mIslandManager.getAccurateIslandSim(), mContext.mSolverBodyDataPool.begin() + mSolverBodyOffset + 1,
-				threadContext.mRigidBodyArray, threadContext.motionVelocityArray, bodies, bodyCount, mContext.mDt,
-				mContext.mEnableStabilization, mContext.mIsSleepingDisabled);
+			integrate(mContext.mIslandManager.getAccurateIslandSim(), mContext.mSolverBodyDataPool.begin() + mSolverBodyOffset + 1, threadContext.mRigidBodyArray, threadContext.motionVelocityArray, bodies, bodyCount, mContext.mDt, mContext.mEnableStabilization, mContext.mIsSleepingDisabled);
 			saveNewtonPoses(solver, threadContext.mBodyCoreArray, threadContext.mNodeIndexArray, bodyCount);
 		}
 	}
@@ -1629,8 +1614,7 @@ static void createSolverTaskChain(	DynamicsContext& dynamicContext,
 	{
 		// Start's continuation waits for free velocities and contact modification postprocessing.
 		// Newton consumes the raw descriptors, so PGS partitioning and packed rows are unnecessary.
-		PxsSolverStartTask* startTask = PX_PLACEMENT_NEW(taskPool.allocateNotThreadSafe(sizeof(PxsSolverStartTask)), PxsSolverStartTask)(dynamicContext, *islandContext, objects, solverBodyOffset, dynamicContext.getKinematicCount(),
-			islandManager, bodyRemapTable, materialManager, iterator, useEnhancedDeterminism);
+		PxsSolverStartTask* startTask = PX_PLACEMENT_NEW(taskPool.allocateNotThreadSafe(sizeof(PxsSolverStartTask)), PxsSolverStartTask)(dynamicContext, *islandContext, objects, solverBodyOffset, dynamicContext.getKinematicCount(), islandManager, bodyRemapTable, materialManager, iterator, useEnhancedDeterminism);
 		PxsNewtonSolverTask* solveTask = PX_PLACEMENT_NEW(taskPool.allocateNotThreadSafe(sizeof(PxsNewtonSolverTask)), PxsNewtonSolverTask)(dynamicContext, *islandContext, solverBodyOffset);
 		PxsSolverEndTask* endTask = PX_PLACEMENT_NEW(taskPool.allocateNotThreadSafe(sizeof(PxsSolverEndTask)), PxsSolverEndTask)(dynamicContext, *islandContext, objects, solverBodyOffset, iterator);
 		taskPool.unlock();
@@ -1807,7 +1791,9 @@ void DynamicsContext::update(Cm::FlushPool& /*flushPool*/, PxBaseTask* continuat
 	}
 	const bool hasWork = updateShared(nphase, dt, gravity);
 	if(!hasWork)
+	{
 		return;
+	}
 
 	PX_PROFILE_ZONE("Dynamics.solverQueueTasks", mContextID);
 
@@ -2020,17 +2006,7 @@ void DynamicsContext::mergeResults()
 }
 
 template<bool captureInitialVelocity>
-static void preIntegrationParallel(
-	PxF32 dt,
-	PxsBodyCore*const* bodyArray,					// INOUT: core body attributes
-	PxsRigidBody*const* originalBodyArray,			// IN: original bodies
-	PxU32 const* nodeIndexArray,					// IN: island node index
-	PxU32 bodyCount,								// IN: body count
-	PxSolverBodyData* solverBodyDataPool,			// IN: solver body data pool (space preallocated)
-	Cm::SpatialVector* initialVelocityArray,
-	volatile PxU32* maxSolverPositionIterations,
-	volatile PxU32* maxSolverVelocityIterations,
-	const PxVec3& gravity)
+static void preIntegrationParallel(PxF32 dt, PxsBodyCore*const* bodyArray, PxsRigidBody*const* originalBodyArray, PxU32 const* nodeIndexArray, PxU32 bodyCount, PxSolverBodyData* solverBodyDataPool, Cm::SpatialVector* initialVelocityArray, volatile PxU32* maxSolverPositionIterations, volatile PxU32* maxSolverVelocityIterations, const PxVec3& gravity)
 {
 	PxU32 localMaxPosIter = 0;
 	PxU32 localMaxVelIter = 0;
@@ -2066,28 +2042,20 @@ void PxsPreIntegrateTask::runInternal()
 	PX_PROFILE_ZONE("PreIntegration", mContextID);
 
 	if(mInitialVelocityArray)
+	{
 		preIntegrationParallel<true>(mDt, mBodyArray + mStartIndex, mOriginalBodyArray + mStartIndex, mNodeIndexArray + mStartIndex, mNumToIntegrate,
 			mSolverBodyDataPool + mStartIndex, mInitialVelocityArray + mStartIndex,
 			mMaxSolverPositionIterations, mMaxSolverVelocityIterations, mGravity);
+	}
 	else
+	{
 		preIntegrationParallel<false>(mDt, mBodyArray + mStartIndex, mOriginalBodyArray + mStartIndex, mNodeIndexArray + mStartIndex, mNumToIntegrate,
 			mSolverBodyDataPool + mStartIndex, NULL,
 			mMaxSolverPositionIterations, mMaxSolverVelocityIterations, mGravity);
+	}
 }
 
-void DynamicsContext::preIntegrationParallel(
-	PxF32 dt,
-	PxsBodyCore*const* bodyArray,					// INOUT: core body attributes
-	PxsRigidBody*const* originalBodyArray,			// IN: original bodies
-	PxU32 const* nodeIndexArray,					// IN: island node index
-	PxU32 bodyCount,								// IN: body count
-	PxSolverBody* solverBodyPool,					// IN: solver body pool (space preallocated)
-	PxSolverBodyData* solverBodyDataPool,			// IN: solver body data pool (space preallocated)
-	Cm::SpatialVector* motionVelocityArray,			// OUT: motion velocities
-	PxU32& maxSolverPositionIterations,
-	PxU32& maxSolverVelocityIterations,
-	PxBaseTask& task
-	)
+void DynamicsContext::preIntegrationParallel(PxF32 dt, PxsBodyCore*const* bodyArray, PxsRigidBody*const* originalBodyArray, PxU32 const* nodeIndexArray, PxU32 bodyCount, PxSolverBody* solverBodyPool, PxSolverBodyData* solverBodyDataPool, Cm::SpatialVector* motionVelocityArray, PxU32& maxSolverPositionIterations, PxU32& maxSolverVelocityIterations, PxBaseTask& task)
 {
 	//TODO - make this based on some variables so we can try different configurations
 	const PxU32 IntegrationPerThread = 256;

@@ -46,9 +46,13 @@ static PxVec3 actorColor(const PxRigidActor& actor)
 {
 	const char* name = actor.getName();
 	if(name && std::strstr(name, "anchor"))
+	{
 		return PxVec3(0.2f, 0.8f, 0.25f);
+	}
 	if(name && std::strstr(name, "tip"))
+	{
 		return PxVec3(0.95f, 0.35f, 0.1f);
+	}
 	return PxVec3(0.15f, 0.55f, 0.95f);
 }
 
@@ -66,7 +70,9 @@ void renderCallback()
 		PxArray<PxRigidActor*> actors(actorCount);
 		scene->getActors(actorTypes, reinterpret_cast<PxActor**>(&actors[0]), actorCount);
 		for(PxU32 i = 0; i < actorCount; ++i)
+		{
 			Snippets::renderActors(&actors[i], 1, true, actorColor(*actors[i]));
+		}
 	}
 
 	Snippets::finishRender();

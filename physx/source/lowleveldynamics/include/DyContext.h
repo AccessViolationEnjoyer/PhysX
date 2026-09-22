@@ -294,10 +294,7 @@ protected:
 	bool mBodyStateDirty;
 };
 
-Context* createDynamicsContext(	PxcNpMemBlockPool* memBlockPool, Cm::FlushPool& taskPool, PxvSimStats& simStats,
-								Cm::VirtualAllocatorCallback& allocator, PxsMaterialManager* materialManager,
-								IG::SimpleIslandManager& islandManager, PxU64 contextID, PxReal maxBiasCoefficient,
-								PxReal lengthScale, PxSceneFlags sceneFlags, const PxSceneDesc* newtonDesc = NULL);
+Context* createDynamicsContext(PxcNpMemBlockPool* memBlockPool, Cm::FlushPool& taskPool, PxvSimStats& simStats, Cm::VirtualAllocatorCallback& allocator, PxsMaterialManager* materialManager, IG::SimpleIslandManager& islandManager, PxU64 contextID, PxReal maxBiasCoefficient, PxReal lengthScale, PxSceneFlags sceneFlags, const PxSceneDesc* newtonSceneDescription = NULL);
 
 Context* createTGSDynamicsContext(	PxcNpMemBlockPool* memBlockPool, Cm::FlushPool& taskPool, PxvSimStats& simStats,
 									Cm::VirtualAllocatorCallback& allocator, PxsMaterialManager* materialManager,

@@ -139,7 +139,7 @@ struct Problem
 	int addScalarContact(const CompactContact& input, double lowerImpulse, double upperImpulse);
 	// Change an existing bounded scalar sidecar without rebuilding J or allocating.
 	// Grouped patch rows keep their group contract; only ungrouped rows use this API.
-	bool setScalarBounds(int contactIndex, double lowerImpulse, double upperImpulse) noexcept;
+	void setScalarBounds(int contactIndex, double lowerImpulse, double upperImpulse) noexcept;
 	// Groups must be appended in increasing, nonoverlapping contact order.
 	int addPatch(int firstContact, int normalCount, int tangentCount, double friction);
 	const ScalarBounds& bounds(const CompactContact& contact) const
@@ -232,14 +232,14 @@ struct Settings
 };
 
 // Pack scalar rows and construct J from the contact blocks. Called during constraint preparation.
-SolveStatus::Enum prepareProblem(Problem& problem) noexcept;
+void prepareProblem(Problem& problem) noexcept;
 
 // Producers can count entries while emitting rows: zero 6 * bodyCount() counters,
 // then count the stored nonzero coefficients for each dynamic endpoint. Scalar
 // contacts contribute their normal row; blocks contribute all three rows.
 // addContact does not count. This call consumes columnCursors into CSC cursors;
 // reset and recount before each preparation.
-SolveStatus::Enum prepareProblemFromColumnCounts(Problem& problem) noexcept;
+void prepareProblemFromColumnCounts(Problem& problem) noexcept;
 
 // Optional diagnostic; kept outside simulation solve timing.
 double computeResidual(const Problem& problem, ConstVector impulse);
@@ -269,8 +269,7 @@ private:
 // The caller retains workspace and result storage; previous may alias result.
 // Failures return status without escaping through an engine task. Iteration-limit
 // results remain available for callers that explicitly accept bounded iteration work.
-SolveStatus::Enum solveNewton(const Problem& problem, const Settings& settings, Result& result,
-	Workspace& workspace, const Result* previous = NULL) noexcept;
+SolveStatus::Enum solveNewton(const Problem& problem, const Settings& settings, Result& result, Workspace& workspace, const Result* previous = NULL) noexcept;
 
 // Continue target-only solves of the same prepared problem without discarding the
 // numerical factor. Only freeVelocity and patch friction may change directly;
@@ -279,7 +278,6 @@ SolveStatus::Enum solveNewton(const Problem& problem, const Settings& settings, 
 // solves invalidate reuse automatically. An ordinary solve always starts a new
 // numerical factor, and must begin each new island/timestep in native callers.
 // Existing curvature updates/refactor fallback still produce the exact new H.
-SolveStatus::Enum continueNewton(const Problem& problem, const Settings& settings, Result& result,
-	Workspace& workspace, const Result* previous = NULL) noexcept;
+SolveStatus::Enum continueNewton(const Problem& problem, const Settings& settings, Result& result, Workspace& workspace, const Result* previous = NULL) noexcept;
 }
 #endif

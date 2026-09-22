@@ -5,7 +5,6 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
-#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -96,7 +95,8 @@ struct Metrics
 inline Metrics measure(const std::vector<Body>& bodies, const std::vector<Pose>& poses)
 {
 	Metrics metrics;
-	for(size_t i = 0; i < bodies.size(); ++i)
+	const size_t bodyCount = bodies.size();
+	for(size_t i = 0; i < bodyCount; ++i)
 	{
 		if(bodies[i].kind == PALLET)
 		{
@@ -104,12 +104,15 @@ inline Metrics measure(const std::vector<Body>& bodies, const std::vector<Pose>&
 			metrics.palletSpeed += poses[i].velocity[0] / conveyorCount;
 		}
 		if(bodies[i].kind == BOX)
+		{
 			metrics.minimumBoxHeight = std::min(metrics.minimumBoxHeight, poses[i].position[1]);
+		}
 		if(bodies[i].kind != SHEET)
 			continue;
 		const Pose& sheet = poses[i];
 		const size_t first = size_t(bodies[i].lane * bodiesPerPallet);
-		for(size_t j = first; j < first + bodiesPerPallet; ++j)
+		const size_t last = first + bodiesPerPallet;
+		for(size_t j = first; j < last; ++j)
 		{
 			const Body& box = bodies[j];
 			if(box.kind != BOX || (box.layer != bodies[i].layer && box.layer != bodies[i].layer + 1))
@@ -118,12 +121,16 @@ inline Metrics measure(const std::vector<Body>& bodies, const std::vector<Pose>&
 			for(int axis = 0; axis < 3; ++axis)
 			{
 				for(int k = 0; k < 3; ++k)
+				{
 					distance[axis] += sheet.rotation[k * 3 + axis] * (poses[j].position[k] - sheet.position[k]);
+				}
 				for(int k = 0; k < 3; ++k)
 				{
 					double projection = 0.0;
 					for(int r = 0; r < 3; ++r)
+					{
 						projection += sheet.rotation[r * 3 + axis] * poses[j].rotation[r * 3 + k];
+					}
 					radius[axis] += std::abs(projection) * box.halfSize[k];
 				}
 			}
@@ -134,7 +141,9 @@ inline Metrics measure(const std::vector<Body>& bodies, const std::vector<Pose>&
 			const double penetration = radius[1] + sheetThickness * 0.5 - side * distance[1];
 			metrics.penetration = std::max(metrics.penetration, penetration);
 			if(penetration > sheetThickness)
+			{
 				++metrics.throughSheet;
+			}
 		}
 	}
 	return metrics;
@@ -144,7 +153,9 @@ inline FILE* openOutput(const std::string& path)
 {
 	FILE* file = fopen(path.c_str(), "w");
 	if(!file)
-		throw std::runtime_error("Cannot write " + path);
+	{
+		std::fprintf(stderr, "Cannot write %s\n", path.c_str());
+	}
 	return file;
 }
 
@@ -152,15 +163,38 @@ class Recorder
 {
 	FILE* m_steps;
 	FILE* m_poses;
+	bool m_valid;
 
 public:
 	Recorder(const std::string& prefix, const std::vector<Body>& bodies)
+		: m_steps(NULL), m_poses(NULL), m_valid(true)
 	{
 		m_steps = openOutput(prefix + "-steps.csv");
+		if(!m_steps)
+		{
+			m_valid = false;
+			return;
+		}
 		m_poses = openOutput(prefix + "-poses.csv");
+		if(!m_poses)
+		{
+			fclose(m_steps);
+			m_steps = NULL;
+			m_valid = false;
+			return;
+		}
 		fprintf(m_steps, "step,time,step_ms,solve_ms,contact_pairs,contact_points,rows,iterations,pallet_x,pallet_speed,sheet_overlap_m,through_sheet,minimum_box_y\n");
 		fprintf(m_poses, "step,body,x,y,z,r00,r01,r02,r10,r11,r12,r20,r21,r22\n");
 		FILE* file = openOutput(prefix + "-bodies.csv");
+		if(!file)
+		{
+			fclose(m_steps);
+			fclose(m_poses);
+			m_steps = NULL;
+			m_poses = NULL;
+			m_valid = false;
+			return;
+		}
 		fprintf(file, "body,name,kind,lane,layer,hx,hy,hz,mass\n");
 		for(size_t i = 0; i < bodies.size(); ++i)
 		{
@@ -173,20 +207,32 @@ public:
 
 	~Recorder()
 	{
-		fclose(m_steps);
-		fclose(m_poses);
+		if(m_steps)
+			fclose(m_steps);
+		if(m_poses)
+			fclose(m_poses);
+	}
+
+	bool isValid() const
+	{
+		return m_valid;
 	}
 
 	void record(int step, double time, double stepMs, double solveMs, int pairs, int points, int rows, int iterations,
 		const std::vector<Body>& bodies, const std::vector<Pose>& poses)
 	{
+		if(!m_valid)
+		{
+			return;
+		}
 		const Metrics metrics = measure(bodies, poses);
 		fprintf(m_steps, "%d,%.9g,%.9g,%.9g,%d,%d,%d,%d,%.9g,%.9g,%.9g,%d,%.9g\n", step, time, stepMs, solveMs,
 			pairs, points, rows, iterations, metrics.palletX, metrics.palletSpeed, metrics.penetration,
 			metrics.throughSheet, metrics.minimumBoxHeight);
 		if(step % 10 == 0)
 		{
-			for(size_t i = 0; i < poses.size(); ++i)
+			const size_t poseCount = poses.size();
+			for(size_t i = 0; i < poseCount; ++i)
 			{
 				fprintf(m_poses, "%d,%zu", step, i);
 				for(int j = 0; j < 3; ++j)
@@ -206,5 +252,4 @@ inline double elapsed(Clock::time_point start)
 }
 }
 #endif
-
 

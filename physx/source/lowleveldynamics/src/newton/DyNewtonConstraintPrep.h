@@ -24,7 +24,7 @@
 //
 // Copyright (c) 2008-2026 NVIDIA Corporation. All rights reserved.
 // Copyright (c) 2004-2008 AGEIA Technologies, Inc. All rights reserved.
-// Copyright (c) 2001-2004 NovodeX AG. All rights reserved.  
+// Copyright (c) 2001-2004 NovodeX AG. All rights reserved.
 
 #ifndef DY_NEWTON_CONSTRAINT_PREP_H
 #define DY_NEWTON_CONSTRAINT_PREP_H
@@ -91,13 +91,9 @@ struct NewtonJointRows
 	}
 };
 
-// bodyIndex is the island's dynamic-body index, or -1 for a static/kinematic endpoint.
-// body data contains free velocities; the callback is invoked once and its rows are copied.
-// NULL means success. A returned message identifies unsupported native semantics.
-const char* prepareNewtonJoint(const Constraint& constraint,
-	const PxSolverBodyData& body0, const PxSolverBodyData& body1, PxI32 bodyIndex0, PxI32 bodyIndex1,
-	ConstraintWriteback* writeback, const NewtonJointSettings& settings,
-	newton::Problem& problem, NewtonJointRows& output);
+// The body index is the island's dynamic-body index, or -1 for a static or kinematic endpoint.
+// The body data contains free velocities; the callback is invoked once and its rows are copied.
+void prepareNewtonJoint(const Constraint& constraint, const PxSolverBodyData& body0, const PxSolverBodyData& body1, PxI32 bodyIndex0, PxI32 bodyIndex1, ConstraintWriteback* writeback, const NewtonJointSettings& settings, newton::Problem& problem, NewtonJointRows& output);
 
 // Final physical impulses, including the CoM-to-anchor moment correction used by PGS.
 void writebackNewtonJoints(const NewtonJointRows& rows, const newton::Problem& problem, const newton::Result& result);

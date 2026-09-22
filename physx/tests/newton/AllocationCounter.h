@@ -15,9 +15,13 @@ inline int hook(int type, void*, size_t, int, long, const unsigned char*, int)
 	if(enabled.load(std::memory_order_relaxed))
 	{
 		if(type == _HOOK_ALLOC || type == _HOOK_REALLOC)
+		{
 			allocations.fetch_add(1, std::memory_order_relaxed);
+		}
 		if(type == _HOOK_FREE)
+		{
 			frees.fetch_add(1, std::memory_order_relaxed);
+		}
 	}
 	return 1;
 }

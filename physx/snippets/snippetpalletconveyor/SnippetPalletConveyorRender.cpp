@@ -45,13 +45,19 @@ Snippets::Camera* sCamera;
 static PxVec3 actorColor(const PxRigidActor& actor)
 {
 	if(actor.is<PxRigidStatic>())
+	{
 		return PxVec3(0.25f, 0.25f, 0.25f);
+	}
 
 	const char* name = actor.getName();
 	if(name && std::strstr(name, "sheet"))
+	{
 		return PxVec3(0.9f, 0.75f, 0.15f);
+	}
 	if(name && std::strstr(name, "pallet"))
+	{
 		return PxVec3(0.45f, 0.25f, 0.1f);
+	}
 	return PxVec3(0.2f, 0.55f, 0.9f);
 }
 
@@ -69,7 +75,9 @@ void renderCallback()
 		PxArray<PxRigidActor*> actors(actorCount);
 		scene->getActors(actorTypes, reinterpret_cast<PxActor**>(&actors[0]), actorCount);
 		for(PxU32 i = 0; i < actorCount; ++i)
+		{
 			Snippets::renderActors(&actors[i], 1, true, actorColor(*actors[i]));
+		}
 	}
 
 	Snippets::finishRender();

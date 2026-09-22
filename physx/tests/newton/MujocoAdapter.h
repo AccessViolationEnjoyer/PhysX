@@ -5,8 +5,7 @@
 #include <mujoco/mujoco.h>
 #include <algorithm>
 #include <cmath>
-#include <exception>
-#include <stdexcept>
+#include <cstdio>
 
 // MuJoCo 3.13 exposes thread-pool creation publicly, while its synchronous
 // task dispatcher remains an internal exported entry point.
@@ -55,25 +54,23 @@ struct IslandTask
 	newton::Settings settings;
 	newton::Result result;
 	double preparationMs = 0.0;
-	std::exception_ptr error;
 };
 
 static void* prepareIsland(void* argument)
 {
 	IslandTask& task = *static_cast<IslandTask*>(argument);
-	try
 	{
-		const newton::Clock::time_point prepareStart = newton::Clock::now();
-		const mjModel* model = task.model;
-		mjData* data = task.data;
-		const int island = task.island;
-		const int dofStart = data->island_idofadr[island];
-		const int dofCount = data->island_nv[island];
-		const int rowStart = data->island_iefcadr[island];
-		const int rowCount = data->island_nefc[island];
+	const newton::Clock::time_point prepareStart = newton::Clock::now();
+	const mjModel* model = task.model;
+	mjData* data = task.data;
+	const int island = task.island;
+	const int dofStart = data->island_idofadr[island];
+	const int dofCount = data->island_nv[island];
+	const int rowStart = data->island_iefcadr[island];
+	const int rowCount = data->island_nefc[island];
 		// Each island retains its preparation buffers while its tasks move between
 		// workers. Every coefficient and warm start is rebuilt for this step.
-		newton::Problem& problem = task.problem;
+	newton::Problem& problem = task.problem;
 		problem.timestep = model->opt.timestep;
 		problem.inverseMass.resize(dofCount / 6);
 		problem.massDiagonal.resize(dofCount);
@@ -125,33 +122,20 @@ static void* prepareIsland(void* argument)
 		task.preparationMs = newton::elapsed(prepareStart);
 
 	}
-	catch(...)
-	{
-		task.error = std::current_exception();
-	}
 	return NULL;
 }
 
 static void* solvePreparedIsland(void* argument)
 {
 	IslandTask& task = *static_cast<IslandTask*>(argument);
-	try
-	{
-		newton::solveNewton(task.problem, task.settings, task.result, &task.previous);
-	}
-	catch(...)
-	{
-		task.error = std::current_exception();
-	}
+	newton::solveNewton(task.problem, task.settings, task.result, &task.previous);
 	return NULL;
 }
 
 static void* prepareAndSolveIsland(void* argument)
 {
 	prepareIsland(argument);
-	IslandTask& task = *static_cast<IslandTask*>(argument);
-	if(!task.error)
-		solvePreparedIsland(argument);
+	solvePreparedIsland(argument);
 	return NULL;
 }
 
@@ -182,10 +166,10 @@ static int solveMujocoConstraints(const mjModel* model, mjData* data, MujocoSolv
 	mju_subFrom(data->efc_b, data->efc_aref, data->nefc);
 	mju_copy(data->qacc, data->qacc_smooth, int(model->nv));
 	static thread_local std::vector<IslandTask> islands;
-	islands.resize(std::max(islands.size(), size_t(data->nisland)));
-	for(int i = 0; i < data->nisland; ++i)
+	const int islandCount = data->nisland;
+	islands.resize(std::max(islands.size(), size_t(islandCount)));
+	for(int i = 0; i < islandCount; ++i)
 	{
-		islands[i].error = NULL;
 		islands[i].model = model;
 		islands[i].data = data;
 		islands[i].island = i;
@@ -195,15 +179,12 @@ static int solveMujocoConstraints(const mjModel* model, mjData* data, MujocoSolv
 	}
 	profile.globalPreparationWallMs = newton::elapsed(globalPreparationStart);
 	const newton::Clock::time_point islandTasksStart = newton::Clock::now();
-	mju_dispatch(model, data, dispatchIsland, &islands, data->nisland);
+	mju_dispatch(model, data, dispatchIsland, &islands, islandCount);
 	// Each island is fully prepared before its solve. Only the final join is global.
 	profile.islandTasksWallMs = newton::elapsed(islandTasksStart);
-	std::exception_ptr error;
 	int iterations = 0;
-	for(int i = 0; i < data->nisland; ++i)
+	for(int i = 0; i < islandCount; ++i)
 	{
-		if(islands[i].error)
-			error = islands[i].error;
 		const newton::Result& result = islands[i].result;
 		iterations = std::max(iterations, result.iterations);
 		profile.preparationMs += islands[i].preparationMs;
@@ -218,10 +199,8 @@ static int solveMujocoConstraints(const mjModel* model, mjData* data, MujocoSolv
 		profile.updates += result.rankUpdates;
 		profile.symbolicAnalyses += result.symbolicAnalyses;
 	}
-	if(error)
-		std::rethrow_exception(error);
 	const newton::Clock::time_point scatterStart = newton::Clock::now();
-	for(int i = 0; i < data->nisland; ++i)
+	for(int i = 0; i < islandCount; ++i)
 		scatterIsland(islands[i]);
 	mj_mulJacTVec(model, data, data->qfrc_constraint, data->efc_force);
 	profile.scatterWallMs = newton::elapsed(scatterStart);
@@ -230,20 +209,28 @@ static int solveMujocoConstraints(const mjModel* model, mjData* data, MujocoSolv
 
 // This adapter supports separate, centered free boxes. Their angular DOFs are
 // expressed in each body's frame, so rotation does not make M non-diagonal.
-static void validateMujocoModel(const mjModel* model, mjData* data, size_t bodyCount)
+static bool validateMujocoModel(const mjModel* model, mjData* data, size_t bodyCount)
 {
 	if(model->nv != int(bodyCount * 6) || model->njnt != int(bodyCount) || data->ne || data->nf ||
 		model->opt.cone != mjCONE_PYRAMIDAL || model->opt.integrator != mjINT_EULER)
-		throw std::runtime_error("The MuJoCo adapter requires free boxes, pyramidal contacts and Euler integration");
-	for(int i = 0; i < model->nv; ++i)
+	{
+		std::fprintf(stderr, "The MuJoCo adapter requires free boxes, pyramidal contacts and Euler integration\n");
+		return false;
+	}
+	const int dofCount = model->nv;
+	for(int i = 0; i < dofCount; ++i)
 	{
 		const int diagonal = model->M_rowadr[i] + model->M_rownnz[i] - 1;
 		for(int address = model->M_rowadr[i]; address < diagonal; ++address)
 		{
 			if(std::abs(data->M[address]) > 1.0e-12 * data->M[diagonal])
-				throw std::runtime_error("The MuJoCo adapter requires diagonal free-body inertia");
+			{
+				std::fprintf(stderr, "The MuJoCo adapter requires diagonal free-body inertia\n");
+				return false;
+			}
 		}
 	}
+	return true;
 }
 
 }

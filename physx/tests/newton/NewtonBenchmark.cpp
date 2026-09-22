@@ -5,7 +5,6 @@
 #include <cstdlib>
 #include <fstream>
 #include <iomanip>
-#include <stdexcept>
 #include <omp.h>
 
 namespace newton
@@ -25,13 +24,17 @@ void setMassDiagonal(Problem& problem, double inertiaPerMass)
 
 // Prepared MuJoCo equations in mass-scaled coordinates. The file records the
 // actual Jacobian, reference acceleration and regularization used by MuJoCo.
-static Problem readProblem(const char* path)
+static bool readProblem(const char* path, Problem& problem)
 {
 	std::ifstream input(path);
-	Problem problem;
 	problem.name = path;
 	int bodies, contacts;
 	input >> bodies >> contacts >> problem.timestep;
+	if(!input || bodies < 1 || contacts < 0 || !(problem.timestep > 0.0))
+	{
+		std::fprintf(stderr, "Invalid prepared contact problem header\n");
+		return false;
+	}
 	problem.inverseMass.resize(bodies);
 	for(int i = 0; i < bodies; ++i)
 		input >> problem.inverseMass[i];
@@ -56,19 +59,28 @@ static Problem readProblem(const char* path)
 	}
 	prepareProblem(problem);
 	if(!input || problem.regularization.minCoeff() <= 0.0)
-		throw std::runtime_error("Invalid prepared contact problem");
+	{
+		std::fprintf(stderr, "Invalid prepared contact problem\n");
+		return false;
+	}
 	// Optional trailer preserves the exact physical inertia of new reference exports.
 	std::string trailer;
 	if(input >> trailer)
 	{
 		if(trailer != "mass_diagonal")
-			throw std::runtime_error("Unknown prepared problem trailer");
+		{
+			std::fprintf(stderr, "Unknown prepared problem trailer\n");
+			return false;
+		}
 		for(int i = 0; i < bodies * 6; ++i)
 			input >> problem.massDiagonal[i];
 		if(!input || problem.massDiagonal.minCoeff() <= 0.0)
-			throw std::runtime_error("Invalid prepared mass diagonal");
+		{
+			std::fprintf(stderr, "Invalid prepared mass diagonal\n");
+			return false;
+		}
 	}
-	return problem;
+	return true;
 }
 
 // Exercise scalar, equality and coupled friction rows, changing island sizes
@@ -109,7 +121,10 @@ static int validateMixedConstraints()
 		Result warm;
 		solveNewton(problem, settings, warm, &cold);
 		if(warm.gradientResidual > 1.0e-6 || cold.gradientResidual > 1.0e-6)
-			throw std::runtime_error("Mixed constraint solve did not converge");
+		{
+			std::fprintf(stderr, "Mixed constraint solve did not converge\n");
+			return 1;
+		}
 		std::printf("VALIDATED,fixture=%d,rows=%d,iterations=%d,gradient=%.12g,factor_error=%.12g\n",
 			fixture, problem.rowCount(), warm.iterations, warm.gradientResidual, warm.factorError);
 	}
@@ -127,54 +142,65 @@ int main(int argc, char** argv)
 			"       NewtonBenchmark cable links steps [trajectory]\n");
 		return 2;
 	}
-	try
+	Settings settings;
+	if(std::string(argv[1]) == "validate")
+		return validateMixedConstraints();
+	if(std::string(argv[1]) == "cable")
 	{
-		Settings settings;
-		if(std::string(argv[1]) == "validate")
-			return validateMixedConstraints();
-		if(std::string(argv[1]) == "cable")
+		if(argc < 4)
 		{
-			if(argc < 4)
-				throw std::runtime_error("Specify cable link and step counts");
-			return benchmarkCable(std::atoi(argv[2]), std::atoi(argv[3]), argc > 4 ? argv[4] : NULL, settings);
+			std::fprintf(stderr, "Specify cable link and step counts\n");
+			return 1;
 		}
-		const Problem problem = readProblem(argv[1]);
-		const int repeats = argc > 4 ? std::atoi(argv[4]) : 8;
-		settings.iterations = argc > 5 ? std::atoi(argv[5]) : 100;
-		settings.checkFactor = argc > 6 && std::atoi(argv[6]) != 0;
-		const int islands = argc > 7 ? std::atoi(argv[7]) : 1;
-		const int threads = argc > 8 ? std::atoi(argv[8]) : 1;
-		if(repeats < 1 || settings.iterations < 1 || islands < 1 || threads < 1)
-			throw std::runtime_error("Invalid benchmark counts");
-		Result previous;
-		const bool warm = argc > 2 && std::string(argv[2]) != "-";
-		if(warm)
+		return benchmarkCable(std::atoi(argv[2]), std::atoi(argv[3]), argc > 4 ? argv[4] : NULL, settings);
+	}
+	Problem problem;
+	if(!readProblem(argv[1], problem))
+		return 1;
+	const int repeats = argc > 4 ? std::atoi(argv[4]) : 8;
+	settings.iterations = argc > 5 ? std::atoi(argv[5]) : 100;
+	settings.checkFactor = argc > 6 && std::atoi(argv[6]) != 0;
+	const int islands = argc > 7 ? std::atoi(argv[7]) : 1;
+	const int threads = argc > 8 ? std::atoi(argv[8]) : 1;
+	if(repeats < 1 || settings.iterations < 1 || islands < 1 || threads < 1)
+	{
+		std::fprintf(stderr, "Invalid benchmark counts\n");
+		return 1;
+	}
+	Result previous;
+	const bool warm = argc > 2 && std::string(argv[2]) != "-";
+	if(warm)
+	{
+		std::ifstream seed(argv[2]);
+		previous.impulse.resize(problem.rowCount());
+		previous.primal.resize(problem.bodyCount() * 6);
+		const size_t contactCount = problem.contacts.size();
+		for(size_t i = 0; i < contactCount; ++i)
 		{
-			std::ifstream seed(argv[2]);
-			previous.impulse.resize(problem.rowCount());
-			previous.primal.resize(problem.bodyCount() * 6);
-			for(size_t i = 0; i < problem.contacts.size(); ++i)
+			const CompactContact& contact = problem.contacts[i];
+			for(int axis = 0; axis < 3; ++axis)
 			{
-				const CompactContact& contact = problem.contacts[i];
-				for(int axis = 0; axis < 3; ++axis)
-				{
-					double value;
-					seed >> value;
-					if(contact.rowCount() == 3)
-						previous.impulse[contact.row + axis] = value;
-					else if(axis == 2)
-						previous.impulse[contact.row] = value;
-				}
+				double value;
+				seed >> value;
+				if(contact.rowCount() == 3)
+					previous.impulse[contact.row + axis] = value;
+				else if(axis == 2)
+					previous.impulse[contact.row] = value;
 			}
-			for(int row = 0; row < previous.primal.size(); ++row)
-				seed >> previous.primal[row];
-			if(!seed)
-				throw std::runtime_error("Invalid warm-start file");
 		}
-		omp_set_dynamic(0);
-		std::vector<Result> results(islands);
-		for(int repeat = 0; repeat < repeats; ++repeat)
+		const int primalCount = previous.primal.size();
+		for(int row = 0; row < primalCount; ++row)
+			seed >> previous.primal[row];
+		if(!seed)
 		{
+			std::fprintf(stderr, "Invalid warm-start file\n");
+			return 1;
+		}
+	}
+	omp_set_dynamic(0);
+	std::vector<Result> results(islands);
+	for(int repeat = 0; repeat < repeats; ++repeat)
+	{
 			const Clock::time_point start = Clock::now();
 			#pragma omp parallel for num_threads(threads) if(islands > 1)
 			for(int island = 0; island < islands; ++island)
@@ -189,7 +215,10 @@ int main(int argc, char** argv)
 			for(int island = 1; island < islands; ++island)
 				for(int row = 0; row < r.primal.size(); ++row)
 					if(std::abs(results[island].primal[row] - r.primal[row]) > 1.0e-12)
-						throw std::runtime_error("Independent islands produced different solutions");
+					{
+						std::fprintf(stderr, "Independent islands produced different solutions\n");
+						return 1;
+					}
 		}
 		if(argc > 3 && std::string(argv[3]) != "-")
 		{
@@ -208,11 +237,5 @@ int main(int argc, char** argv)
 			for(int row = 0; row < results[0].primal.size(); ++row)
 				output << results[0].primal[row] << "\n";
 		}
-	}
-	catch(const std::exception& error)
-	{
-		std::fprintf(stderr, "%s\n", error.what());
-		return 1;
-	}
 	return 0;
 }
