@@ -73,7 +73,8 @@ numeric-factor reuse. Scratch buffers and symbolic analysis storage are reused.
 
 Newton captures pre-force velocity through a compile-time-specialized preintegration loop.
 The PGS instantiation contains no per-body capture branch or write. Newton code is built in a
-private target, so Eigen and exception options do not propagate into PGS or TGS.
+private target with self-contained matrix and sparse-factor code. Its compiler options do not
+propagate into PGS or TGS.
 
 ## Current limitations
 
@@ -94,7 +95,7 @@ unsupported and report an error for the affected island.
 ## Build and validation
 
 ```powershell
-cmake -S physx/tests/newton/pallet -B physx/compiler/newton/native-build -G "Visual Studio 17 2022" -A x64
+cmake -S physx/tests/newton/pallet -B physx/compiler/newton/native-build -G "Visual Studio 17 2022" -A x64 -DPX_NEWTON_USE_AVX2=ON
 cmake --build physx/compiler/newton/native-build --config profile --parallel 4
 cmake --build physx/compiler/newton/native-build/newton --config profile --target NewtonBenchmark NewtonAllocationAudit PalletAllocationAudit NewtonBoundedValidation NewtonPatchValidation NewtonPatchProjectionAudit NewtonContinuationValidation --parallel 4
 ctest --test-dir physx/compiler/newton/native-build -C profile --output-on-failure

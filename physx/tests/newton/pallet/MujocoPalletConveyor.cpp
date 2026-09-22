@@ -112,9 +112,7 @@ int main(int argc, const char* const* argv)
 			model->geom_solimp[i * mjNIMP] = model->geom_solimp[i * mjNIMP + 1] = impedance;
 	}
 	mjData* data = mj_makeData(model);
-	mjThreadPool* pool = threads > 1 ? mju_threadPoolCreate(threads) : NULL;
-	if(pool)
-		mju_bindThreadPool(data, pool);
+	mju_threadpool(data, threads > 1 ? threads : 0);
 	mj_step1(model, data);
 	newton::validateMujocoModel(model, data, bodies.size());
 	pallet::Recorder recorder(argv[2], bodies);
@@ -148,7 +146,7 @@ int main(int argc, const char* const* argv)
 		newton::MujocoSolverProfile profile;
 		profile.enabled = profileFile != NULL;
 		if(prototype)
-			iterations = newton::solveMujocoConstraints(model, data, pool, profile);
+			iterations = newton::solveMujocoConstraints(model, data, profile);
 		else
 		{
 			mj_fwdConstraint(model, data);
@@ -177,7 +175,7 @@ int main(int argc, const char* const* argv)
 				++cappedAuditSteps;
 			else
 				maximumConvergedError = std::max(maximumConvergedError, velocityError);
-			mju_copy(data->qacc, auditAcceleration.data(), model->nv);
+			mju_copy(data->qacc, auditAcceleration.data(), int(model->nv));
 			mju_copy(data->efc_force, auditForce.data(), data->nefc);
 			mj_mulJacTVec(model, data, data->qfrc_constraint, data->efc_force);
 			auditMs = pallet::elapsed(auditStart);
@@ -214,8 +212,6 @@ int main(int argc, const char* const* argv)
 		fclose(profileFile);
 	if(auditFile)
 		fclose(auditFile);
-	if(pool)
-		mju_threadPoolDestroy(pool);
 	mj_deleteData(data);
 	mj_deleteModel(model);
 	return 0;

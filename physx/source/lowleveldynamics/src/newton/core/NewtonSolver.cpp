@@ -1,22 +1,15 @@
 #include "NewtonSolver.h"
 #include <atomic>
 #include "NewtonPatchProjection.h"
-#include <Eigen/Cholesky>
-#include <Eigen/SparseCholesky>
-#include <Eigen/Eigenvalues>
 #include <algorithm>
 #include <cmath>
-#include <new>
 #include <limits>
 
-#include "EigenStorageKernels.h"
+#include "StorageCholesky.h"
 #include "BlockCholesky.h"
 
 namespace newton
 {
-typedef Eigen::Triplet<double> Triplet;
-typedef Eigen::SimplicialLDLT<Sparse> Factor;
-
 static double clampValue(double value, double lower, double upper)
 {
 	return value < lower ? lower : (value > upper ? upper : value);
@@ -39,63 +32,97 @@ static Vec3 projectPyramid(const Vec3& value, double friction, Mat3* derivative 
 	if(std::max(a, b) <= friction * value[2])
 	{
 		if(derivative)
+		{
 			derivative->setIdentity();
+		}
 		return value;
 	}
 	if(value[2] <= -friction * (a + b))
 	{
 		if(derivative)
+		{
 			derivative->setZero();
+		}
 		return Vec3::Zero();
 	}
 	double normal = (value[2] + friction * (a + b)) / (1.0 + 2.0 * friction * friction);
 	if(friction * normal > std::min(a, b))
+	{
 		normal = (value[2] + friction * std::max(a, b)) / (1.0 + friction * friction);
+	}
 	Vec3 result = value;
 	result[2] = normal;
-	result.head<2>() = value.head<2>().cwiseMax(-friction * normal).cwiseMin(friction * normal);
+	for(int axis = 0; axis < 2; ++axis)
+	{
+		result[axis] = clampValue(value[axis], -friction * normal, friction * normal);
+	}
 	if(derivative)
 	{
 		Vec3 direction(0.0, 0.0, 1.0);
 		derivative->setZero();
 		for(int i = 0; i < 2; ++i)
+		{
 			if(std::abs(value[i]) > friction * normal)
+			{
 				direction[i] = std::copysign(friction, value[i]);
+			}
 			else
+			{
 				(*derivative)(i, i) = 1.0;
+			}
+		}
 		*derivative += direction * direction.transpose() / direction.squaredNorm();
 	}
 	return result;
 }
 
-static Vec3 weightedImpulse(const Vec3& drive, const Vec3& compliance, double friction, Mat3* derivative = NULL, bool bilateral = false, double maxNormalImpulse = std::numeric_limits<double>::infinity())
+static Vec3 weightedImpulse(const Vec3& drive, const double* NEWTON_RESTRICT compliance, const double* NEWTON_RESTRICT inverseRootValues, double friction, Mat3* derivative = NULL, bool bilateral = false, double maxNormalImpulse = MAX_IMPULSE)
 {
+	const Vec3 inverseRoot = loadVector<3>(inverseRootValues);
 	if(bilateral)
 	{
 		if(derivative)
-			*derivative = compliance.cwiseInverse().asDiagonal();
-		return drive.cwiseQuotient(compliance);
+		{
+			derivative->setZero();
+			for(int axis = 0; axis < 3; ++axis)
+			{
+				(*derivative)(axis, axis) = inverseRoot[axis] * inverseRoot[axis];
+			}
+		}
+		return drive.cwiseProduct(inverseRoot).cwiseProduct(inverseRoot);
 	}
 
-	const Vec3 inverseSqrt = compliance.cwiseSqrt().cwiseInverse();
-	const double scaledFriction = friction * std::sqrt(compliance[0] / compliance[2]);
+	const double scaledFriction = friction * compliance[0] * inverseRoot[0] * inverseRoot[2];
 	Mat3 projectionDerivative;
-	Vec3 impulse = inverseSqrt.cwiseProduct(projectPyramid(inverseSqrt.cwiseProduct(drive),
+	Vec3 impulse = inverseRoot.cwiseProduct(projectPyramid(inverseRoot.cwiseProduct(drive),
 		scaledFriction, derivative ? &projectionDerivative : NULL));
 	if(derivative)
-		*derivative = inverseSqrt.asDiagonal() * projectionDerivative * inverseSqrt.asDiagonal();
+	{
+		for(int column = 0; column < 3; ++column)
+		{
+			for(int row = 0; row < 3; ++row)
+			{
+				(*derivative)(row, column) = inverseRoot[row] * projectionDerivative(row, column) * inverseRoot[column];
+			}
+		}
+	}
 	if(impulse[2] > maxNormalImpulse)
 	{
 		impulse[2] = maxNormalImpulse;
 		const double tangentLimit = friction * maxNormalImpulse;
 		if(derivative)
+		{
 			derivative->setZero();
+		}
 		for(int axis = 0; axis < 2; ++axis)
 		{
-			const double unconstrained = drive[axis] / compliance[axis];
+			const double inverseCompliance = inverseRoot[axis] * inverseRoot[axis];
+			const double unconstrained = drive[axis] * inverseCompliance;
 			impulse[axis] = clampValue(unconstrained, -tangentLimit, tangentLimit);
 			if(derivative && unconstrained > -tangentLimit && unconstrained < tangentLimit)
-				(*derivative)(axis, axis) = 1.0 / compliance[axis];
+			{
+				(*derivative)(axis, axis) = inverseCompliance;
+			}
 		}
 	}
 	return impulse;
@@ -117,7 +144,8 @@ struct PatchScratch
 	void resize(const Problem& problem)
 	{
 		int normals = 0, rows = 0;
-		for(size_t i = 0; i < problem.patches.size(); ++i)
+		const std::uint32_t patchCount = std::uint32_t(problem.patches.size());
+		for(std::uint32_t i = 0; i < patchCount; ++i)
 		{
 			normals = std::max(normals, problem.patches[i].normalCount);
 			rows = std::max(rows, problem.patches[i].normalCount + problem.patches[i].tangentCount);
@@ -136,10 +164,12 @@ static bool projectGroup(const Problem& problem, const Patch& patch, const doubl
 	for(int i = 0; i < patch.normalCount; ++i)
 	{
 		const CompactContact& contact = problem.contacts[patch.firstContact + i];
-		scratch.cap[i] = contact.hasScalarBounds() ? problem.bounds(contact).upper : std::numeric_limits<double>::infinity();
+		scratch.cap[i] = contact.hasScalarBounds() ? problem.bounds(contact).upper : MAX_IMPULSE;
 	}
 	for(int i = 0; i < patch.tangentCount; ++i)
+	{
 		scratch.friction[i] = patch.friction;
+	}
 	const PatchProjectionInput input = { patch.normalCount, patch.tangentCount, velocity,
 		problem.regularization.data() + firstRow, scratch.cap.data(), velocity + patch.normalCount,
 		problem.regularization.data() + firstRow + patch.normalCount, scratch.friction };
@@ -159,7 +189,7 @@ struct Curvature
 	{
 		diagonal.setZero(problem.rowCount());
 		coupled.resize(problem.coupledContacts.size());
-		reserveStorage(patches, problem.patches.size());
+		reserveStorage(patches, std::uint32_t(problem.patches.size()));
 		patches.resize(problem.patches.size());
 	}
 };
@@ -178,14 +208,14 @@ int Problem::addScalarContact(const CompactContact& input, double lowerImpulse, 
 	CompactContact contact = input;
 	contact.row = 0;
 	contact.block = 0;
-	if(lowerImpulse != 0.0 || upperImpulse != std::numeric_limits<double>::infinity())
+	if(lowerImpulse != 0.0 || upperImpulse != MAX_IMPULSE)
 	{
 		const ScalarBounds limits = { lowerImpulse, upperImpulse };
 		contact.block = CompactContact::SCALAR_BOUNDS_TAG - int(scalarBounds.size());
-		reserveStorage(scalarBounds, scalarBounds.size() + 1);
+		reserveStorage(scalarBounds, std::uint32_t(scalarBounds.size()) + 1);
 		scalarBounds.push_back(limits);
 	}
-	reserveStorage(contacts, contacts.size() + 1);
+	reserveStorage(contacts, std::uint32_t(contacts.size()) + 1);
 	const int index = int(contacts.size());
 	contacts.push_back(contact);
 	prepared = false;
@@ -194,19 +224,27 @@ int Problem::addScalarContact(const CompactContact& input, double lowerImpulse, 
 
 bool Problem::setScalarBounds(int contactIndex, double lowerImpulse, double upperImpulse) noexcept
 {
-	const double infinity = std::numeric_limits<double>::infinity();
 	if(contactIndex < 0 || contactIndex >= int(contacts.size()) || !(lowerImpulse <= upperImpulse) ||
-		lowerImpulse == infinity || upperImpulse == -infinity || !contacts[contactIndex].hasScalarBounds())
+	   lowerImpulse == MAX_IMPULSE || upperImpulse == -MAX_IMPULSE || !contacts[contactIndex].hasScalarBounds())
+	{
 		return false;
-	for(size_t i = 0; i < patches.size(); ++i)
+	}
+	const std::uint32_t patchCount = std::uint32_t(patches.size());
+	for(std::uint32_t i = 0; i < patchCount; ++i)
+	{
 		if(contactIndex >= patches[i].firstContact &&
-			contactIndex < patches[i].firstContact + patches[i].normalCount + patches[i].tangentCount)
+		   contactIndex < patches[i].firstContact + patches[i].normalCount + patches[i].tangentCount)
+		{
 			return false;
-	ScalarBounds& limits = scalarBounds[size_t(CompactContact::SCALAR_BOUNDS_TAG - contacts[contactIndex].block)];
+		}
+	}
+	ScalarBounds& limits = scalarBounds[std::uint32_t(CompactContact::SCALAR_BOUNDS_TAG - contacts[contactIndex].block)];
 	if(limits.lower == lowerImpulse && limits.upper == upperImpulse)
+	{
 		return true;
-	const bool wasEquality = limits.lower == -infinity && limits.upper == infinity;
-	const bool isEquality = lowerImpulse == -infinity && upperImpulse == infinity;
+	}
+	const bool wasEquality = limits.lower == -MAX_IMPULSE && limits.upper == MAX_IMPULSE;
+	const bool isEquality = lowerImpulse == -MAX_IMPULSE && upperImpulse == MAX_IMPULSE;
 	limits.lower = lowerImpulse;
 	limits.upper = upperImpulse;
 	if(prepared)
@@ -215,14 +253,16 @@ bool Problem::setScalarBounds(int contactIndex, double lowerImpulse, double uppe
 		preparationGeneration = nextPreparationGeneration();
 	}
 	if(!isEquality)
+	{
 		hasFiniteBounds = true;
+	}
 	return true;
 }
 
 int Problem::addPatch(int firstContact, int normalCount, int tangentCount, double friction)
 {
 	const Patch patch = { firstContact, normalCount, tangentCount, friction };
-	reserveStorage(patches, patches.size() + 1);
+	reserveStorage(patches, std::uint32_t(patches.size()) + 1);
 	const int index = int(patches.size());
 	patches.push_back(patch);
 	prepared = false;
@@ -242,50 +282,114 @@ void Problem::addContact(const Contact& input)
 	if(input.rowCount() == 3)
 	{
 		ContactBlock additional;
-		additional.tangentJacobian[0] = input.jacobian[0].topRows<2>();
-		additional.tangentJacobian[1] = input.jacobian[1].topRows<2>();
+		for(int end = 0; end < 2; ++end)
+		{
+			for(int column = 0; column < 6; ++column)
+			{
+				additional.tangentJacobian[end](0, column) = input.jacobian[end](0, column);
+				additional.tangentJacobian[end](1, column) = input.jacobian[end](1, column);
+			}
+		}
 		additional.freeVelocity = input.freeVelocity.head<2>();
 		additional.regularization = input.regularization.head<2>();
 		additional.friction = input.friction;
 		additional.maxNormalImpulse = input.maxNormalImpulse;
 		contact.block = (input.bilateral ? -1 : 1) * (int(contactBlocks.size()) + 1);
-		reserveStorage(contactBlocks, contactBlocks.size() + 1);
+		reserveStorage(contactBlocks, std::uint32_t(contactBlocks.size()) + 1);
 		contactBlocks.push_back(additional);
 	}
-	if(input.rowCount() == 1 && input.maxNormalImpulse != std::numeric_limits<double>::infinity())
+	if(input.rowCount() == 1 && input.maxNormalImpulse != MAX_IMPULSE)
 	{
 		addScalarContact(contact, 0.0, input.maxNormalImpulse);
 		return;
 	}
-	reserveStorage(contacts, contacts.size() + 1);
+	reserveStorage(contacts, std::uint32_t(contacts.size()) + 1);
 	contacts.push_back(contact);
 }
 
 static bool validContact(const Problem& problem, const CompactContact& contact)
 {
 	if(contact.body[0] < -1 || contact.body[1] < -1 || contact.body[0] >= problem.bodyCount() ||
-		contact.body[1] >= problem.bodyCount() || (contact.body[0] >= 0 && contact.body[0] == contact.body[1]))
+	   contact.body[1] >= problem.bodyCount() || (contact.body[0] >= 0 && contact.body[0] == contact.body[1]))
+	{
 		return false;
+	}
 	if(contact.hasScalarBounds())
 	{
-		const size_t index = size_t(CompactContact::SCALAR_BOUNDS_TAG - contact.block);
+		const std::uint32_t index = std::uint32_t(CompactContact::SCALAR_BOUNDS_TAG - contact.block);
 		if(index >= problem.scalarBounds.size())
+		{
 			return false;
+		}
 		const ScalarBounds& limits = problem.scalarBounds[index];
-		return limits.lower <= limits.upper && limits.lower < std::numeric_limits<double>::infinity() &&
-			limits.upper > -std::numeric_limits<double>::infinity();
+		return limits.lower <= limits.upper && limits.lower < MAX_IMPULSE && limits.upper > -MAX_IMPULSE;
 	}
 	if(contact.block)
 	{
-		const size_t index = size_t(contact.block > 0 ? contact.block - 1 : -contact.block - 1);
+		const std::uint32_t index = std::uint32_t(contact.block > 0 ? contact.block - 1 : -contact.block - 1);
 		if(index >= problem.contactBlocks.size())
+		{
 			return false;
+		}
 		const ContactBlock& block = problem.contactBlocks[index];
-		if(contact.block > 0 && (!(block.friction >= 0.0) || !std::isfinite(block.friction) ||
-			!(block.maxNormalImpulse >= 0.0) || block.regularization[0] != block.regularization[1]))
+		if(contact.block > 0 && (block.friction < 0.0 || block.maxNormalImpulse < 0.0 ||
+								 block.regularization[0] != block.regularization[1]))
+		{
 			return false;
+		}
 	}
 	return true;
+}
+
+static std::uint64_t bodyPairKey(int body0, int body1)
+{
+	const std::uint32_t first = std::uint32_t(std::min(body0, body1));
+	const std::uint32_t second = std::uint32_t(std::max(body0, body1));
+	return (std::uint64_t(first) << 32) | second;
+}
+
+static void prepareHessianTopology(Problem& problem)
+{
+	const std::uint32_t bodyCount = std::uint32_t(problem.bodyCount());
+	const std::uint32_t contactCount = std::uint32_t(problem.contacts.size());
+	std::vector<std::uint64_t>& pairs = problem.hessianPairs;
+	pairs.clear();
+	reserveStorage(pairs, bodyCount + contactCount);
+	for(std::uint32_t body = 0; body < bodyCount; ++body)
+	{
+		pairs.emplace_back((std::uint64_t(body) << 32) | body);
+	}
+	for(std::uint32_t i = 0; i < contactCount; ++i)
+	{
+		const CompactContact& contact = problem.contacts[i];
+		if(contact.body[0] >= 0 && contact.body[1] >= 0)
+		{
+			pairs.emplace_back(bodyPairKey(contact.body[0], contact.body[1]));
+		}
+	}
+	std::sort(pairs.begin(), pairs.end());
+	pairs.erase(std::unique(pairs.begin(), pairs.end()), pairs.end());
+
+	problem.hessianDiagonalBlocks.resize(bodyCount);
+	const std::uint32_t pairCount = std::uint32_t(pairs.size());
+	for(std::uint32_t pair = 0; pair < pairCount; ++pair)
+	{
+		const std::uint32_t first = std::uint32_t(pairs[pair] >> 32);
+		if(first == std::uint32_t(pairs[pair]))
+		{
+			problem.hessianDiagonalBlocks[first] = int(pair);
+		}
+	}
+	problem.hessianContactBlocks.assign(contactCount, -1);
+	for(std::uint32_t i = 0; i < contactCount; ++i)
+	{
+		const CompactContact& contact = problem.contacts[i];
+		if(contact.body[0] >= 0 && contact.body[1] >= 0)
+		{
+			const std::uint64_t key = bodyPairKey(contact.body[0], contact.body[1]);
+			problem.hessianContactBlocks[i] = int(std::lower_bound(pairs.begin(), pairs.end(), key) - pairs.begin());
+		}
+	}
 }
 
 template<bool CountEntries>
@@ -298,105 +402,152 @@ static bool prepareProblemInternal(Problem& problem)
 	problem.equalityRows = 0;
 	problem.hasFiniteBounds = !problem.patches.empty();
 	problem.prepared = false;
-	if(problem.massDiagonal.size() != problem.bodyCount() * 6 || !problem.massDiagonal.allFinite() ||
-		(problem.massDiagonal.size() && problem.massDiagonal.minCoeff() <= 0.0))
+	if(problem.massDiagonal.size() != problem.bodyCount() * 6 ||
+	   (problem.massDiagonal.size() && problem.massDiagonal.minCoeff() <= 0.0))
+	{
 		return false;
+	}
+	const int massCount = problem.massDiagonal.size();
+	problem.inverseMassDiagonal.resize(massCount);
+	for(int i = 0; i < massCount; ++i)
+	{
+		problem.inverseMassDiagonal[i] = 1.0 / problem.massDiagonal[i];
+	}
 	int previousPatchEnd = 0;
-	for(size_t i = 0; i < problem.patches.size(); ++i)
+	const std::uint32_t patchCount = std::uint32_t(problem.patches.size());
+	const int contactCount = int(problem.contacts.size());
+	for(std::uint32_t i = 0; i < patchCount; ++i)
 	{
 		const Patch& patch = problem.patches[i];
 		if(patch.normalCount <= 0 || patch.tangentCount < 0 || patch.tangentCount > 4 ||
-			patch.firstContact < previousPatchEnd || patch.firstContact > int(problem.contacts.size()) ||
-			patch.normalCount > int(problem.contacts.size()) - patch.firstContact - patch.tangentCount ||
-			!std::isfinite(patch.friction) || patch.friction < 0.0)
+		   patch.firstContact < previousPatchEnd || patch.firstContact > contactCount ||
+		   patch.normalCount > contactCount - patch.firstContact - patch.tangentCount ||
+		   patch.friction < 0.0)
+		{
 			return false;
+		}
 		previousPatchEnd = patch.firstContact + patch.normalCount + patch.tangentCount;
 	}
 	if(CountEntries)
 	{
 		columnCounts.assign(problem.bodyCount() * 6, 0);
-		for(int i = 0; i < int(problem.contacts.size()); ++i)
+		for(int i = 0; i < contactCount; ++i)
 		{
 			const CompactContact& contact = problem.contacts[i];
 			if(!validContact(problem, contact))
+			{
 				return false;
+			}
 			const int first = contact.rowCount() == 1 ? 2 : 0;
 			for(int end = 0; end < 2; ++end)
+			{
 				if(contact.body[end] >= 0)
+				{
 					for(int column = 0; column < 6; ++column)
+					{
 						for(int axis = first; axis < 3; ++axis)
+						{
 							columnCounts[6 * contact.body[end] + column] += problem.contactEntry(contact, end, axis, column) != 0.0;
+						}
+					}
+				}
+			}
 		}
 	}
-	if(columnCounts.size() != size_t(problem.bodyCount() * 6))
+	if(columnCounts.size() != std::uint32_t(problem.bodyCount() * 6))
+	{
 		return false;
+	}
 	problem.freeVelocity.resize(rows);
 	problem.regularization.resize(rows);
-	reserveStorage(problem.rowContact, size_t(rows));
+	reserveStorage(problem.rowContact, std::uint32_t(rows));
 	problem.rowContact.resize(rows);
 	// Rows are emitted in order and each constraint has distinct body endpoints.
 	// Exact column capacities let us fill CSC storage without triplets, duplicate
 	// reduction or an intermediate transpose.
 	problem.jacobian.resize(rows, problem.bodyCount() * 6);
 	int entries = 0;
-	for(int column = 0; column < int(columnCounts.size()); ++column)
+	const int columnCount = int(columnCounts.size());
+	for(int column = 0; column < columnCount; ++column)
 	{
 		problem.jacobian.outerIndexPtr()[column] = entries;
 		const int count = columnCounts[column];
 		if(count < 0 || count > std::numeric_limits<int>::max() - entries)
+		{
 			return false;
+		}
 		columnCounts[column] = entries;
 		entries += count;
 	}
-	problem.jacobian.outerIndexPtr()[columnCounts.size()] = entries;
+	problem.jacobian.outerIndexPtr()[columnCount] = entries;
 	problem.jacobian.resizeNonZeros(entries);
 	int nextRow = 0;
-	size_t nextPatch = 0;
-	for(int i = 0; i < int(problem.contacts.size()); ++i)
+	std::uint32_t nextPatch = 0;
+	for(int i = 0; i < contactCount; ++i)
 	{
 		CompactContact& contact = problem.contacts[i];
 		if(!CountEntries)
+		{
 			if(!validContact(problem, contact))
+			{
 				return false;
-		while(nextPatch < problem.patches.size() && i >= problem.patches[nextPatch].firstContact +
-			problem.patches[nextPatch].normalCount + problem.patches[nextPatch].tangentCount)
+			}
+		}
+		while(nextPatch < patchCount && i >= problem.patches[nextPatch].firstContact + problem.patches[nextPatch].normalCount + problem.patches[nextPatch].tangentCount)
+		{
 			++nextPatch;
-		const Patch* patch = nextPatch < problem.patches.size() && i >= problem.patches[nextPatch].firstContact ?
+		}
+		const Patch* patch = nextPatch < patchCount && i >= problem.patches[nextPatch].firstContact ?
 			&problem.patches[nextPatch] : NULL;
 		if(patch)
 		{
 			const CompactContact& first = problem.contacts[patch->firstContact];
 			if(contact.rowCount() != 1 || contact.body[0] != first.body[0] || contact.body[1] != first.body[1])
+			{
 				return false;
+			}
 			if(i < patch->firstContact + patch->normalCount)
 			{
 				if(contact.hasScalarBounds() && (problem.bounds(contact).lower != 0.0 || problem.bounds(contact).upper < 0.0))
+				{
 					return false;
+				}
 			}
-			else if(!contact.hasScalarBounds() || problem.bounds(contact).lower != -std::numeric_limits<double>::infinity() ||
-				problem.bounds(contact).upper != std::numeric_limits<double>::infinity())
+			else if(!contact.hasScalarBounds() || problem.bounds(contact).lower != -MAX_IMPULSE ||
+					problem.bounds(contact).upper != MAX_IMPULSE)
+			{
 				return false;
+			}
 		}
 		contact.row = nextRow;
 		nextRow += contact.rowCount();
 		if(nextRow > rows)
+		{
 			return false;
+		}
 		if(contact.hasScalarBounds())
 		{
 			const ScalarBounds& limits = problem.bounds(contact);
-			if(!patch && limits.lower == -std::numeric_limits<double>::infinity() &&
-				limits.upper == std::numeric_limits<double>::infinity())
+			if(!patch && limits.lower == -MAX_IMPULSE && limits.upper == MAX_IMPULSE)
+			{
 				++problem.equalityRows;
-			else if(std::isfinite(limits.lower) || std::isfinite(limits.upper))
+			}
+			else if(limits.lower != -MAX_IMPULSE || limits.upper != MAX_IMPULSE)
+			{
 				problem.hasFiniteBounds = true;
+			}
 		}
 		else if(contact.block)
 		{
 			problem.block(contact).coupled = -1;
 			if(contact.block < 0)
+			{
 				problem.equalityRows += 3;
-			else if(std::isfinite(problem.block(contact).maxNormalImpulse))
+			}
+			else if(problem.block(contact).maxNormalImpulse != MAX_IMPULSE)
+			{
 				problem.hasFiniteBounds = true;
+			}
 		}
 		if(contact.block > 0)
 		{
@@ -410,72 +561,86 @@ static bool prepareProblemInternal(Problem& problem)
 			problem.rowContact[row] = i;
 			problem.freeVelocity[row] = axis == 2 ? contact.freeVelocity : problem.block(contact).freeVelocity[axis];
 			problem.regularization[row] = axis == 2 ? contact.regularization : problem.block(contact).regularization[axis];
-			if(!(problem.regularization[row] > 0.0) || !std::isfinite(problem.regularization[row]) ||
-				!std::isfinite(problem.freeVelocity[row]))
+			if(!(problem.regularization[row] > 0.0))
+			{
 				return false;
+			}
 			for(int end = 0; end < 2; ++end)
+			{
 				if(contact.body[end] >= 0)
+				{
 					for(int column = 0; column < 6; ++column)
+					{
 						if(problem.contactEntry(contact, end, axis, column) != 0.0)
 						{
 							const int entry = columnCounts[6 * contact.body[end] + column]++;
 							problem.jacobian.innerIndexPtr()[entry] = row;
 							problem.jacobian.valuePtr()[entry] = problem.contactEntry(contact, end, axis, column);
 						}
+					}
+				}
+			}
 		}
 	}
 	problem.prepared = nextRow == rows;
 	if(problem.prepared)
+	{
+		prepareHessianTopology(problem);
 		problem.preparationGeneration = nextPreparationGeneration();
+	}
 	return problem.prepared;
-}
-
-template<bool CountEntries>
-static SolveStatus::Enum prepareProblemSafe(Problem& problem) noexcept
-{
-#if defined(_CPPUNWIND) || defined(__EXCEPTIONS)
-	try
-	{
-#endif
-		return prepareProblemInternal<CountEntries>(problem) ? SolveStatus::eSUCCESS : SolveStatus::eINVALID_INPUT;
-#if defined(_CPPUNWIND) || defined(__EXCEPTIONS)
-	}
-	catch(const std::bad_alloc&)
-	{
-		problem.prepared = false;
-		return SolveStatus::eOUT_OF_MEMORY;
-	}
-	catch(...)
-	{
-		problem.prepared = false;
-		return SolveStatus::eNUMERICAL_FAILURE;
-	}
-#endif
 }
 
 SolveStatus::Enum prepareProblem(Problem& problem) noexcept
 {
-	return prepareProblemSafe<true>(problem);
+	return prepareProblemInternal<true>(problem) ? SolveStatus::eSUCCESS : SolveStatus::eINVALID_INPUT;
 }
 
 SolveStatus::Enum prepareProblemFromColumnCounts(Problem& problem) noexcept
 {
-	return prepareProblemSafe<false>(problem);
+	return prepareProblemInternal<false>(problem) ? SolveStatus::eSUCCESS : SolveStatus::eINVALID_INPUT;
 }
 
 double computeResidual(const Problem& problem, ConstVector impulse)
 {
-	const Vector velocity = problem.jacobian * (problem.jacobian.transpose() * impulse) +
-		problem.freeVelocity + problem.regularization.cwiseProduct(impulse);
+	const int columnCount = int(problem.jacobian.cols());
+	const int rowCount = problem.rowCount();
+	VectorStorage bodyVelocity(columnCount);
+	bodyVelocity.setZero();
+	const int* outer = problem.jacobian.outerIndexPtr();
+	const int* inner = problem.jacobian.innerIndexPtr();
+	const double* values = problem.jacobian.valuePtr();
+	for(int column = 0; column < columnCount; ++column)
+	{
+		for(int entry = outer[column]; entry < outer[column + 1]; ++entry)
+		{
+			bodyVelocity[column] += values[entry] * impulse[inner[entry]];
+		}
+	}
+	VectorStorage velocity(rowCount);
+	for(int row = 0; row < rowCount; ++row)
+	{
+		velocity[row] = problem.freeVelocity[row] + problem.regularization[row] * impulse[row];
+	}
+	for(int column = 0; column < columnCount; ++column)
+	{
+		const double value = bodyVelocity[column];
+		for(int entry = outer[column]; entry < outer[column + 1]; ++entry)
+		{
+			velocity[inner[entry]] += values[entry] * value;
+		}
+	}
 	double error = 0.0;
 	PatchScratch scratch;
 	scratch.resize(problem);
 	VectorStorage unitRegularization(scratch.velocity.size());
 	unitRegularization.setOnes();
-	size_t nextPatch = 0;
-	for(int i = 0; i < int(problem.contacts.size()); ++i)
+	std::uint32_t nextPatch = 0;
+	const std::uint32_t patchCount = std::uint32_t(problem.patches.size());
+	const int contactCount = int(problem.contacts.size());
+	for(int i = 0; i < contactCount; ++i)
 	{
-		if(nextPatch < problem.patches.size() && i == problem.patches[nextPatch].firstContact)
+		if(nextPatch < patchCount && i == problem.patches[nextPatch].firstContact)
 		{
 			const Patch& patch = problem.patches[nextPatch];
 			const int count = patch.normalCount + patch.tangentCount;
@@ -485,25 +650,39 @@ double computeResidual(const Problem& problem, ConstVector impulse)
 			{
 				const CompactContact& contact = problem.contacts[i + row];
 				for(int end = 0; end < 2; ++end)
+				{
 					if(contact.body[end] >= 0)
+					{
 						response += contact.jacobian[end].squaredNorm();
+					}
+				}
 				if(row < patch.normalCount)
-					scratch.cap[row] = contact.hasScalarBounds() ? problem.bounds(contact).upper : std::numeric_limits<double>::infinity();
+				{
+					scratch.cap[row] = contact.hasScalarBounds() ? problem.bounds(contact).upper : MAX_IMPULSE;
+				}
 			}
 			response = std::max(response / count, 1.0e-12);
 			for(int row = 0; row < count; ++row)
+			{
 				scratch.velocity[row] = velocity[first + row] / response - impulse[first + row];
+			}
 			for(int row = 0; row < patch.tangentCount; ++row)
+			{
 				scratch.friction[row] = patch.friction;
+			}
 			const PatchProjectionInput input = { patch.normalCount, patch.tangentCount, scratch.velocity.data(),
 				unitRegularization.data(), scratch.cap.data(), scratch.velocity.data() + patch.normalCount,
 				unitRegularization.data() + patch.normalCount, scratch.friction };
 			const PatchProjectionOutput output = { scratch.impulse.data(), scratch.impulse.data() + patch.normalCount, NULL, NULL, NULL };
 			PatchProjectionResult projection;
 			if(!projectPatchUnchecked(input, output, projection))
-				return std::numeric_limits<double>::infinity();
+			{
+				return MAX_IMPULSE;
+			}
 			for(int row = 0; row < count; ++row)
+			{
 				error = std::max(error, response * std::abs(impulse[first + row] - scratch.impulse[row]));
+			}
 			i += count - 1;
 			++nextPatch;
 			continue;
@@ -511,8 +690,12 @@ double computeResidual(const Problem& problem, ConstVector impulse)
 		const CompactContact& c = problem.contacts[i];
 		double jacobianNorm = 0.0;
 		for(int end = 0; end < 2; ++end)
+		{
 			if(c.body[end] >= 0)
+			{
 				jacobianNorm += c.rowCount() == 1 ? c.jacobian[end].squaredNorm() : problem.contactJacobian(c, end).squaredNorm();
+			}
+		}
 		const double response = std::max(jacobianNorm, 1.0e-12) / 3.0;
 		if(c.rowCount() == 1)
 		{
@@ -524,7 +707,8 @@ double computeResidual(const Problem& problem, ConstVector impulse)
 		else
 		{
 			const Vec3 trial = impulse.segment<3>(c.row) - velocity.segment<3>(c.row) / response;
-			const Vec3 projected = c.block < 0 ? trial : weightedImpulse(trial, Vec3::Ones(),
+			const double unit[3] = { 1.0, 1.0, 1.0 };
+			const Vec3 projected = c.block < 0 ? trial : weightedImpulse(trial, unit, unit,
 				problem.block(c).friction, NULL, false, problem.block(c).maxNormalImpulse);
 			error = std::max(error, response * (impulse.segment<3>(c.row) - projected).cwiseAbs().maxCoeff());
 		}
@@ -532,17 +716,12 @@ double computeResidual(const Problem& problem, ConstVector impulse)
 	return error;
 }
 
-typedef std::pair<int, int> BodyPair;
-
-typedef Eigen::Matrix<double, 6, 6> BodyBlock;
+typedef Mat6 BodyBlock;
 
 struct HessianStorage
 {
 	SparseStorage matrix;
-	std::vector<BodyPair> pairs;
-
 	std::vector<BodyBlock> blocks;
-	std::vector<int> diagonalBlocks;
 };
 
 // Jacobian rows often contain exact zeros. Skip zero columns while keeping
@@ -550,78 +729,113 @@ struct HessianStorage
 static void addOuterProduct(BodyBlock& block, const Vec6& left, const Vec6& right, double weight)
 {
 	for(int axis = 0; axis < 6; ++axis)
+	{
 		if(right[axis] != 0.0)
-			block.col(axis) += (weight * right[axis]) * left;
+		{
+			addScaled6(block.data() + 6 * axis, left.data(), weight * right[axis]);
+		}
+	}
+}
+
+static void addJacobianProduct(BodyBlock& block, const Jacobian& left, const Mat3& weight,
+	const Jacobian& right)
+{
+	for(int column = 0; column < 6; ++column)
+	{
+		const double right0 = right(0, column), right1 = right(1, column), right2 = right(2, column);
+		const double weighted0 = weight(0, 0) * right0 + weight(0, 1) * right1 + weight(0, 2) * right2;
+		const double weighted1 = weight(1, 0) * right0 + weight(1, 1) * right1 + weight(1, 2) * right2;
+		const double weighted2 = weight(2, 0) * right0 + weight(2, 1) * right1 + weight(2, 2) * right2;
+#if defined(NEWTON_AVX2_FMA)
+		const __m256d multiplier0 = _mm256_set1_pd(weighted0);
+		const __m256d multiplier1 = _mm256_set1_pd(weighted1);
+		const __m256d multiplier2 = _mm256_set1_pd(weighted2);
+		__m256d value = _mm256_mul_pd(multiplier0,
+			_mm256_set_pd(left(0, 3), left(0, 2), left(0, 1), left(0, 0)));
+		value = _mm256_fmadd_pd(multiplier1,
+			_mm256_set_pd(left(1, 3), left(1, 2), left(1, 1), left(1, 0)), value);
+		value = _mm256_fmadd_pd(multiplier2,
+			_mm256_set_pd(left(2, 3), left(2, 2), left(2, 1), left(2, 0)), value);
+		double* destination = block.data() + 6 * column;
+		_mm256_storeu_pd(destination, _mm256_add_pd(_mm256_loadu_pd(destination), value));
+		const __m128d multiplier0End = _mm256_castpd256_pd128(multiplier0);
+		const __m128d multiplier1End = _mm256_castpd256_pd128(multiplier1);
+		const __m128d multiplier2End = _mm256_castpd256_pd128(multiplier2);
+		__m128d valueEnd = _mm_mul_pd(multiplier0End, _mm_set_pd(left(0, 5), left(0, 4)));
+		valueEnd = _mm_fmadd_pd(multiplier1End, _mm_set_pd(left(1, 5), left(1, 4)), valueEnd);
+		valueEnd = _mm_fmadd_pd(multiplier2End, _mm_set_pd(left(2, 5), left(2, 4)), valueEnd);
+		_mm_storeu_pd(destination + 4, _mm_add_pd(_mm_loadu_pd(destination + 4), valueEnd));
+#elif defined(NEWTON_X86_SIMD)
+		const __m128d multiplier0 = _mm_set1_pd(weighted0);
+		const __m128d multiplier1 = _mm_set1_pd(weighted1);
+		const __m128d multiplier2 = _mm_set1_pd(weighted2);
+		for(int row = 0; row < 6; row += 2)
+		{
+			__m128d value = _mm_mul_pd(multiplier0, _mm_set_pd(left(0, row + 1), left(0, row)));
+			value = _mm_add_pd(value, _mm_mul_pd(multiplier1, _mm_set_pd(left(1, row + 1), left(1, row))));
+			value = _mm_add_pd(value, _mm_mul_pd(multiplier2, _mm_set_pd(left(2, row + 1), left(2, row))));
+			double* destination = block.data() + 6 * column + row;
+			_mm_storeu_pd(destination, _mm_add_pd(_mm_loadu_pd(destination), value));
+		}
+#else
+		for(int row = 0; row < 6; ++row)
+		{
+			block(row, column) += left(0, row) * weighted0 + left(1, row) * weighted1 + left(2, row) * weighted2;
+		}
+#endif
+	}
 }
 
 static const Sparse& makeHessian(const Problem& problem, const Curvature& weights, HessianStorage& storage)
 {
 	const int bodies = problem.bodyCount(), size = bodies * 6;
-	std::vector<BodyPair>& pairs = storage.pairs;
-	pairs.clear();
-	reserveStorage(pairs, bodies + problem.contacts.size());
-	for(int body = 0; body < bodies; ++body)
-		pairs.push_back(BodyPair(body, body));
-	for(size_t i = 0; i < problem.contacts.size(); ++i)
-	{
-		const CompactContact& contact = problem.contacts[i];
-		if(contact.body[0] >= 0 && contact.body[1] >= 0)
-		{
-			const BodyPair pair(std::min(contact.body[0], contact.body[1]), std::max(contact.body[0], contact.body[1]));
-			if(pairs.back() != pair)
-				pairs.push_back(pair);
-		}
-	}
-	std::sort(pairs.begin(), pairs.end());
-	pairs.erase(std::unique(pairs.begin(), pairs.end()), pairs.end());
-	reserveStorage(storage.blocks, pairs.size());
-	storage.blocks.resize(pairs.size());
-	storage.diagonalBlocks.resize(bodies);
-	for(size_t pair = 0; pair < pairs.size(); ++pair)
+	const std::vector<std::uint64_t>& pairs = problem.hessianPairs;
+	const std::uint32_t pairCount = std::uint32_t(pairs.size());
+	reserveStorage(storage.blocks, pairCount);
+	storage.blocks.resize(pairCount);
+	for(std::uint32_t pair = 0; pair < pairCount; ++pair)
 	{
 		BodyBlock& block = storage.blocks[pair];
-		if(pairs[pair].first == pairs[pair].second)
+		const std::uint32_t first = std::uint32_t(pairs[pair] >> 32);
+		const std::uint32_t second = std::uint32_t(pairs[pair]);
+		if(first == second)
 		{
 			block.setIdentity();
-			storage.diagonalBlocks[pairs[pair].first] = int(pair);
 		}
 		else
+		{
 			block.setZero();
+		}
 	}
-	BodyPair previous(-1, -1);
-	int cross = -1;
-	for(size_t i = 0; i < problem.contacts.size(); ++i)
+	const std::uint32_t contactCount = std::uint32_t(problem.contacts.size());
+	for(std::uint32_t i = 0; i < contactCount; ++i)
 	{
 		const CompactContact& contact = problem.contacts[i];
 		const int a = contact.body[0], b = contact.body[1];
-		if(a >= 0 && b >= 0)
-		{
-			const BodyPair pair(std::min(a, b), std::max(a, b));
-			if(pair != previous)
-			{
-				cross = int(std::lower_bound(pairs.begin(), pairs.end(), pair) - pairs.begin());
-				previous = pair;
-			}
-		}
+		const int cross = problem.hessianContactBlocks[i];
 		if(contact.block > 0)
 		{
 			const Mat3& weight = weights.coupled[problem.coupledIndex(contact)];
 			if(weight.isZero(0.0))
+			{
 				continue;
+			}
 			// Reconstruct each used endpoint once, then reuse it for diagonal
 			// and cross contributions. Scalar rows need no reconstruction.
 			Jacobian jacobian[2];
 			for(int end = 0; end < 2; ++end)
+			{
 				if(contact.body[end] >= 0)
 				{
 					jacobian[end] = problem.contactJacobian(contact, end);
-					storage.blocks[storage.diagonalBlocks[contact.body[end]]].noalias() +=
-						jacobian[end].transpose() * weight * jacobian[end];
+					addJacobianProduct(storage.blocks[problem.hessianDiagonalBlocks[contact.body[end]]],
+						jacobian[end], weight, jacobian[end]);
 				}
+			}
 			if(a >= 0 && b >= 0)
 			{
 				const int low = a < b ? 0 : 1;
-				storage.blocks[cross].noalias() += jacobian[1 - low].transpose() * weight * jacobian[low];
+				addJacobianProduct(storage.blocks[cross], jacobian[1 - low], weight, jacobian[low]);
 			}
 		}
 		else
@@ -631,15 +845,19 @@ static const Sparse& makeHessian(const Problem& problem, const Curvature& weight
 			{
 				const double weight = weights.diagonal[contact.row + axis - first];
 				if(weight == 0.0)
+				{
 					continue;
+				}
 				Vec6 jacobian[2];
 				for(int end = 0; end < 2; ++end)
+				{
 					if(contact.body[end] >= 0)
 					{
 						jacobian[end] = problem.contactRow(contact, end, axis);
-						addOuterProduct(storage.blocks[storage.diagonalBlocks[contact.body[end]]],
+						addOuterProduct(storage.blocks[problem.hessianDiagonalBlocks[contact.body[end]]],
 							jacobian[end], jacobian[end], weight);
 					}
+				}
 				if(a >= 0 && b >= 0)
 				{
 					const int low = a < b ? 0 : 1;
@@ -648,49 +866,57 @@ static const Sparse& makeHessian(const Problem& problem, const Curvature& weight
 			}
 		}
 	}
-	for(size_t i = 0; i < problem.patches.size(); ++i)
+	const std::uint32_t patchCount = std::uint32_t(problem.patches.size());
+	for(std::uint32_t i = 0; i < patchCount; ++i)
 	{
 		const CompactContact& contact = problem.contacts[problem.patches[i].firstContact];
 		const PatchCurvature& patch = weights.patches[i];
 		for(int left = 0; left < 2; ++left)
+		{
 			for(int right = 0; right < 2; ++right)
 			{
 				const int a = contact.body[left], b = contact.body[right];
 				if(a < 0 || b < 0 || a < b)
+				{
 					continue;
-				const int index = a == b ? storage.diagonalBlocks[a] :
-					int(std::lower_bound(pairs.begin(), pairs.end(), BodyPair(b, a)) - pairs.begin());
+				}
+				const int index = a == b ? problem.hessianDiagonalBlocks[a] :
+					problem.hessianContactBlocks[problem.patches[i].firstContact];
 				BodyBlock& block = storage.blocks[index];
 				addOuterProduct(block, patch.normal[left], patch.normal[right], patch.normalCoefficient);
 				addOuterProduct(block, patch.normal[left], patch.tangent[right], patch.crossCoefficient);
 				addOuterProduct(block, patch.tangent[left], patch.normal[right], patch.crossCoefficient);
 				addOuterProduct(block, patch.tangent[left], patch.tangent[right], patch.tangentCoefficient);
 			}
+		}
 	}
 	SparseStorage& matrix = storage.matrix;
 	matrix.resize(size, size);
 	// Sorted body pairs emit 21 entries per diagonal block and 36 per
 	// off-diagonal block, including structural zeros required by rank updates.
-	matrix.resizeNonZeros(int(pairs.size()) * 36 - bodies * 15);
+	matrix.resizeNonZeros(int(pairCount) * 36 - bodies * 15);
 	int* outer = matrix.outerIndexPtr();
 	int* inner = matrix.innerIndexPtr();
 	double* values = matrix.valuePtr();
 	int entry = 0;
-	size_t begin = 0;
+	std::uint32_t begin = 0;
 	for(int body = 0; body < bodies; ++body)
 	{
-		size_t end = begin;
-		while(end < pairs.size() && pairs[end].first == body)
+		std::uint32_t end = begin;
+		while(end < pairCount && std::uint32_t(pairs[end] >> 32) == std::uint32_t(body))
+		{
 			++end;
+		}
 		for(int axis = 0; axis < 6; ++axis)
 		{
 			outer[6 * body + axis] = entry;
-			for(size_t pair = begin; pair < end; ++pair)
+			for(std::uint32_t pair = begin; pair < end; ++pair)
 			{
-				const int first = pairs[pair].second == body ? axis : 0;
+				const int second = int(std::uint32_t(pairs[pair]));
+				const int first = second == body ? axis : 0;
 				for(int row = first; row < 6; ++row)
 				{
-					inner[entry] = pairs[pair].second * 6 + row;
+					inner[entry] = second * 6 + row;
 					values[entry++] = storage.blocks[pair](row, axis);
 				}
 			}
@@ -701,42 +927,63 @@ static const Sparse& makeHessian(const Problem& problem, const Curvature& weight
 	return matrix;
 }
 
-// Independent assembly for factor audits. This deliberately uses sparse
-// products rather than the production body's block-address accumulation.
-static Sparse makeReferenceHessian(const Problem& problem, const Curvature& weights)
+static bool solveDenseReference(const Sparse& matrix, ConstVector gradient, MutableVector solution)
 {
-	std::vector<Triplet> entries;
-	for(int row = 0; row < problem.rowCount(); ++row)
-		entries.push_back(Triplet(row, row, weights.diagonal[row]));
-	for(int block = 0; block < int(weights.coupled.size()); ++block)
+	const int size = matrix.cols();
+	std::vector<double> lower(std::uint32_t(size) * std::uint32_t(size), 0.0);
+	for(int column = 0; column < size; ++column)
 	{
-		const int first = problem.contacts[problem.coupledContacts[block]].row;
-		for(int row = 0; row < 3; ++row)
-			for(int column = 0; column < 3; ++column)
-				entries.push_back(Triplet(first + row, first + column, weights.coupled[block](row, column)));
+		for(Sparse::InnerIterator entry(matrix, column); entry; ++entry)
+		{
+			lower[std::uint32_t(entry.row()) * std::uint32_t(size) + std::uint32_t(column)] = entry.value();
+			lower[std::uint32_t(column) * std::uint32_t(size) + std::uint32_t(entry.row())] = entry.value();
+		}
 	}
-	for(size_t i = 0; i < problem.patches.size(); ++i)
+	for(int column = 0; column < size; ++column)
 	{
-		const Patch& group = problem.patches[i];
-		const PatchCurvature& patch = weights.patches[i];
-		const int first = problem.contacts[group.firstContact].row;
-		const int count = group.normalCount + group.tangentCount;
-		for(int row = 0; row < count; ++row)
-			for(int column = 0; column < count; ++column)
+		double diagonal = lower[std::uint32_t(column) * std::uint32_t(size) + std::uint32_t(column)];
+		for(int inner = 0; inner < column; ++inner)
+		{
+			const double value = lower[std::uint32_t(column) * std::uint32_t(size) + std::uint32_t(inner)];
+			diagonal -= value * value;
+		}
+		if(!(diagonal > 0.0))
+		{
+			return false;
+		}
+		const double root = std::sqrt(diagonal);
+		lower[std::uint32_t(column) * std::uint32_t(size) + std::uint32_t(column)] = root;
+		for(int row = column + 1; row < size; ++row)
+		{
+			double value = lower[std::uint32_t(row) * std::uint32_t(size) + std::uint32_t(column)];
+			for(int inner = 0; inner < column; ++inner)
 			{
-				const bool normalRow = row < group.normalCount, normalColumn = column < group.normalCount;
-				const double left = normalRow ? weights.diagonal[first + row] : patch.tangentCoupling[row - group.normalCount];
-				const double right = normalColumn ? weights.diagonal[first + column] : patch.tangentCoupling[column - group.normalCount];
-				const double coefficient = normalRow && normalColumn ? patch.normalCoefficient :
-					(!normalRow && !normalColumn ? patch.tangentCoefficient : patch.crossCoefficient);
-				entries.push_back(Triplet(first + row, first + column, coefficient * left * right));
+				value -= lower[std::uint32_t(row) * std::uint32_t(size) + std::uint32_t(inner)] *
+						 lower[std::uint32_t(column) * std::uint32_t(size) + std::uint32_t(inner)];
 			}
+			lower[std::uint32_t(row) * std::uint32_t(size) + std::uint32_t(column)] = value / root;
+		}
 	}
-	Sparse curvature(problem.rowCount(), problem.rowCount());
-	curvature.setFromTriplets(entries.begin(), entries.end());
-	Sparse identity(problem.bodyCount() * 6, problem.bodyCount() * 6);
-	identity.setIdentity();
-	return problem.jacobian.transpose() * curvature * problem.jacobian + identity;
+	solution.resize(size);
+	for(int row = 0; row < size; ++row)
+	{
+		double value = -gradient[row];
+		for(int column = 0; column < row; ++column)
+		{
+			value -= lower[std::uint32_t(row) * std::uint32_t(size) + std::uint32_t(column)] * solution[column];
+		}
+		solution[row] = value / lower[std::uint32_t(row) * std::uint32_t(size) + std::uint32_t(row)];
+	}
+	for(int row = size - 1; row >= 0; --row)
+	{
+		double value = solution[row];
+		for(int column = row + 1; column < size; ++column)
+		{
+			value -= lower[std::uint32_t(column) * std::uint32_t(size) + std::uint32_t(row)] * solution[column];
+		}
+		solution[row] = value / lower[std::uint32_t(row) * std::uint32_t(size) + std::uint32_t(row)];
+	}
+	return true;
 }
 
 static bool evaluateImpulses(const Problem& problem, ConstVector contactVelocity, ConstVector inverseRoot,
@@ -745,22 +992,32 @@ static bool evaluateImpulses(const Problem& problem, ConstVector contactVelocity
 	ConstVector compliance = problem.regularization;
 	if(problem.isUnilateral())
 	{
-		impulse = inverseRoot.cwiseProduct(inverseRoot.cwiseProduct(-contactVelocity).cwiseMax(0.0));
-		if(weights)
-			weights->diagonal.array() = (contactVelocity.array() < 0.0).select(inverseRoot.array().square(), 0.0);
+		const int rowCount = problem.rowCount();
+		for(int row = 0; row < rowCount; ++row)
+		{
+			impulse[row] = inverseRoot[row] * std::max(0.0, -inverseRoot[row] * contactVelocity[row]);
+			if(weights)
+			{
+				weights->diagonal[row] = contactVelocity[row] < 0.0 ? inverseRoot[row] * inverseRoot[row] : 0.0;
+			}
+		}
 		return true;
 	}
-	size_t nextPatch = 0;
-	for(int i = 0; i < int(problem.contacts.size()); ++i)
+	std::uint32_t nextPatch = 0;
+	const std::uint32_t patchCount = std::uint32_t(problem.patches.size());
+	const int contactCount = int(problem.contacts.size());
+	for(int i = 0; i < contactCount; ++i)
 	{
-		if(nextPatch < problem.patches.size() && i == problem.patches[nextPatch].firstContact)
+		if(nextPatch < patchCount && i == problem.patches[nextPatch].firstContact)
 		{
 			const Patch& group = problem.patches[nextPatch];
 			const int first = problem.contacts[i].row;
 			PatchProjectionResult projection;
 			if(!projectGroup(problem, group, contactVelocity.data() + first, impulse.data() + first,
-				weights ? weights->diagonal.data() + first : NULL, weights ? scratch.coupling : NULL, scratch, projection))
+							 weights ? weights->diagonal.data() + first : NULL, weights ? scratch.coupling : NULL, scratch, projection))
+			{
 				return false;
+			}
 			if(weights)
 			{
 				PatchCurvature& patch = weights->patches[nextPatch];
@@ -772,14 +1029,22 @@ static bool evaluateImpulses(const Problem& problem, ConstVector contactVelocity
 					patch.normal[end].setZero();
 					patch.tangent[end].setZero();
 					if(problem.contacts[i].body[end] < 0)
+					{
 						continue;
+					}
 					for(int row = 0; row < group.normalCount; ++row)
+					{
 						patch.normal[end] += weights->diagonal[first + row] * problem.contacts[i + row].jacobian[end];
+					}
 					for(int row = 0; row < group.tangentCount; ++row)
+					{
 						patch.tangent[end] += scratch.coupling[row] * problem.contacts[i + group.normalCount + row].jacobian[end];
+					}
 				}
 				for(int row = 0; row < group.tangentCount; ++row)
+				{
 					patch.tangentCoupling[row] = scratch.coupling[row];
+				}
 			}
 			i += group.normalCount + group.tangentCount - 1;
 			++nextPatch;
@@ -793,28 +1058,42 @@ static bool evaluateImpulses(const Problem& problem, ConstVector contactVelocity
 			if(contact.hasScalarBounds())
 			{
 				const ScalarBounds& limits = problem.bounds(contact);
-				const double unconstrained = value / compliance[row];
+				const double inverseCompliance = 1.0 / compliance[row];
+				const double unconstrained = value * inverseCompliance;
 				impulse[row] = clampValue(unconstrained, limits.lower, limits.upper);
 				if(weights)
-					weights->diagonal[row] = unconstrained > limits.lower && unconstrained < limits.upper ?
-						1.0 / compliance[row] : 0.0;
+				{
+					weights->diagonal[row] = unconstrained > limits.lower && unconstrained < limits.upper ? inverseCompliance : 0.0;
+				}
 			}
 			else
 			{
 				impulse[row] = inverseRoot[row] * std::max(0.0, inverseRoot[row] * value);
 				if(weights)
+				{
 					weights->diagonal[row] = value > 0.0 ? inverseRoot[row] * inverseRoot[row] : 0.0;
+				}
 			}
 		}
 		else if(contact.block < 0)
 		{
-			impulse.segment<3>(row) = (-contactVelocity.segment<3>(row)).cwiseQuotient(compliance.segment<3>(row));
-			if(weights)
-				weights->diagonal.segment<3>(row) = compliance.segment<3>(row).cwiseInverse();
+			for(int axis = 0; axis < 3; ++axis)
+			{
+				const double inverseCompliance = 1.0 / compliance[row + axis];
+				impulse[row + axis] = -contactVelocity[row + axis] * inverseCompliance;
+				if(weights)
+				{
+					weights->diagonal[row + axis] = inverseCompliance;
+				}
+			}
 		}
 		else
-			impulse.segment<3>(row) = weightedImpulse(-contactVelocity.segment<3>(row),
-				compliance.segment<3>(row), problem.block(contact).friction, weights ? &weights->coupled[problem.coupledIndex(contact)] : NULL, false, problem.block(contact).maxNormalImpulse);
+		{
+			const Vec3 value = weightedImpulse(-contactVelocity.segment<3>(row), compliance.data() + row, inverseRoot.data() + row,
+				problem.block(contact).friction, weights ? &weights->coupled[problem.coupledIndex(contact)] : NULL,
+				false, problem.block(contact).maxNormalImpulse);
+			storeVector<3>(impulse.data() + row, value);
+		}
 	}
 	return true;
 }
@@ -823,19 +1102,21 @@ static bool evaluateImpulses(const Problem& problem, ConstVector contactVelocity
 // Jacobian is compressed CSC with strictly increasing row indices per column.
 static void multiplyJacobianCscSerial(const Problem& problem, ConstVector vector, MutableVector product)
 {
-	const double* EIGEN_RESTRICT values = problem.jacobian.valuePtr();
-	const int* EIGEN_RESTRICT indices = problem.jacobian.innerIndexPtr();
-	const int* EIGEN_RESTRICT offsets = problem.jacobian.outerIndexPtr();
-	const double* EIGEN_RESTRICT input = vector.data();
-	double* EIGEN_RESTRICT output = product.data();
+	const double* NEWTON_RESTRICT values = problem.jacobian.valuePtr();
+	const int* NEWTON_RESTRICT indices = problem.jacobian.innerIndexPtr();
+	const int* NEWTON_RESTRICT offsets = problem.jacobian.outerIndexPtr();
+	const double* NEWTON_RESTRICT input = vector.data();
+	double* NEWTON_RESTRICT output = product.data();
 	std::fill_n(output, product.size(), 0.0);
-	for(int column = 0; column < problem.jacobian.cols(); ++column)
+	const int columnCount = int(problem.jacobian.cols());
+	for(int column = 0; column < columnCount; ++column)
 	{
 		const double scale = input[column];
 		const int end = offsets[column + 1];
-		int entry = offsets[column];
-		for(; entry < end; ++entry)
+		for(int entry = offsets[column]; entry < end; ++entry)
+		{
 			output[indices[entry]] += values[entry] * scale;
+		}
 	}
 }
 
@@ -864,7 +1145,9 @@ static void evaluateContactVelocityChunk(void* context, int index)
 			{
 				const int end = endpoint == 0 ? firstEnd : 1 - firstEnd;
 				if(contact.body[end] >= 0)
-					value += contact.jacobian[end].dot(Eigen::Map<const Vec6>(evaluation.velocity + 6 * contact.body[end]));
+				{
+					value += contact.jacobian[end].dot(loadVector<6>(evaluation.velocity + 6 * contact.body[end]));
+				}
 			}
 			evaluation.contactVelocity[contact.row] = value;
 		}
@@ -876,12 +1159,16 @@ static void evaluateContactVelocityChunk(void* context, int index)
 			{
 				const int end = endpoint == 0 ? firstEnd : 1 - firstEnd;
 				if(contact.body[end] < 0)
+				{
 					continue;
-				const Eigen::Map<const Vec6> velocity(evaluation.velocity + 6 * contact.body[end]);
-				value.head<2>().noalias() += block.tangentJacobian[end] * velocity;
+				}
+				const Vec6 velocity = loadVector<6>(evaluation.velocity + 6 * contact.body[end]);
+				const Vec2 tangent = block.tangentJacobian[end] * velocity;
+				value[0] += tangent[0];
+				value[1] += tangent[1];
 				value[2] += contact.jacobian[end].dot(velocity);
 			}
-			Eigen::Map<Vec3>(evaluation.contactVelocity + contact.row) = value;
+			storeVector<3>(evaluation.contactVelocity + contact.row, value);
 		}
 	}
 }
@@ -911,17 +1198,19 @@ struct GradientEvaluation
 	int chunks;
 };
 
-static void evaluateGradientColumns(const Problem& problem, const double* impulse,
-	const double* velocity, double* gradient, int first, int last)
+static void evaluateGradientColumns(const Problem& problem, const double* NEWTON_RESTRICT impulse, const double* NEWTON_RESTRICT velocity, double* NEWTON_RESTRICT gradient, int first, int last)
 {
-	const double* EIGEN_RESTRICT values = problem.jacobian.valuePtr();
-	const int* EIGEN_RESTRICT indices = problem.jacobian.innerIndexPtr();
-	const int* EIGEN_RESTRICT offsets = problem.jacobian.outerIndexPtr();
+	const double* NEWTON_RESTRICT values = problem.jacobian.valuePtr();
+	const int* NEWTON_RESTRICT indices = problem.jacobian.innerIndexPtr();
+	const int* NEWTON_RESTRICT offsets = problem.jacobian.outerIndexPtr();
 	for(int column = first; column < last; ++column)
 	{
 		double value = 0.0;
-		for(int entry = offsets[column]; entry < offsets[column + 1]; ++entry)
+		const int end = offsets[column + 1];
+		for(int entry = offsets[column]; entry < end; ++entry)
+		{
 			value += values[entry] * impulse[indices[entry]];
+		}
 		gradient[column] = velocity[column] - value;
 	}
 }
@@ -956,7 +1245,9 @@ static bool evaluatePrimal(const Problem& problem, ConstVector velocity, ConstVe
 	multiplyJacobianCsc(problem, velocity, contactVelocity, parallelExecutor);
 	contactVelocity += problem.freeVelocity;
 	if(!evaluateImpulses(problem, contactVelocity, inverseRoot, impulse, weights, scratch))
+	{
 		return false;
+	}
 	evaluatePrimalGradientCsc(problem, velocity, impulse, gradient, parallelExecutor);
 	return true;
 }
@@ -965,9 +1256,16 @@ static bool evaluatePrimal(const Problem& problem, ConstVector velocity, ConstVe
 
 static double primalCost(const Problem& problem, ConstVector velocity, ConstVector contactVelocity, ConstVector impulse)
 {
-	const double quadratic = impulse.dot(problem.regularization.cwiseProduct(impulse));
+	double quadratic = 0.0;
+	const int rowCount = impulse.size();
+	for(int row = 0; row < rowCount; ++row)
+	{
+		quadratic += impulse[row] * problem.regularization[row] * impulse[row];
+	}
 	if(!problem.hasFiniteBounds)
+	{
 		return 0.5 * (velocity.squaredNorm() + quadratic);
+	}
 	return 0.5 * velocity.squaredNorm() - contactVelocity.dot(impulse) - 0.5 * quadratic;
 }
 
@@ -985,14 +1283,24 @@ struct NewtonStopping
 
 	double gradientNorm(const Problem& problem, ConstVector gradient) const
 	{
-		return std::sqrt(gradient.array().square().matrix().dot(problem.massDiagonal)) /
-			(inertiaSum * problem.timestep);
+		double norm = 0.0;
+		const int rowCount = gradient.size();
+		for(int row = 0; row < rowCount; ++row)
+		{
+			norm += gradient[row] * gradient[row] * problem.massDiagonal[row];
+		}
+		return std::sqrt(norm) / (inertiaSum * problem.timestep);
 	}
 
 	double lineThreshold(const Problem& problem, ConstVector direction) const
 	{
-		return tolerance * lineTolerance * problem.timestep * inertiaSum *
-			std::sqrt((direction.array().square() / problem.massDiagonal.array()).sum());
+		double norm = 0.0;
+		const int rowCount = direction.size();
+		for(int row = 0; row < rowCount; ++row)
+		{
+			norm += direction[row] * direction[row] * problem.inverseMassDiagonal[row];
+		}
+		return tolerance * lineTolerance * problem.timestep * inertiaSum * std::sqrt(norm);
 	}
 };
 
@@ -1000,15 +1308,17 @@ struct ConvexLineValue
 {
 	double slope;
 	double curvature;
+	bool valid;
 };
 
 static ConvexLineValue evaluateConvexLine(const Problem& problem, ConstVector contactVelocity, ConstVector contactDirection,
 	ConstVector compliance, ConstVector inverseRoot, double velocitySlope, double directionNorm, double alpha, PatchScratch& scratch)
 {
-	ConvexLineValue result = { velocitySlope + alpha * directionNorm, directionNorm };
+	ConvexLineValue result = { velocitySlope + alpha * directionNorm, directionNorm, true };
 	if(problem.isUnilateral())
 	{
-		for(int row = 0; row < problem.rowCount(); ++row)
+		const int rowCount = problem.rowCount();
+		for(int row = 0; row < rowCount; ++row)
 		{
 			const double direction = contactDirection[row];
 			const double drive = -contactVelocity[row] - alpha * direction;
@@ -1021,21 +1331,25 @@ static ConvexLineValue evaluateConvexLine(const Problem& problem, ConstVector co
 		}
 		return result;
 	}
-	size_t nextPatch = 0;
-	for(int i = 0; i < int(problem.contacts.size()); ++i)
+	std::uint32_t nextPatch = 0;
+	const std::uint32_t patchCount = std::uint32_t(problem.patches.size());
+	const int contactCount = int(problem.contacts.size());
+	for(int i = 0; i < contactCount; ++i)
 	{
-		if(nextPatch < problem.patches.size() && i == problem.patches[nextPatch].firstContact)
+		if(nextPatch < patchCount && i == problem.patches[nextPatch].firstContact)
 		{
 			const Patch& group = problem.patches[nextPatch];
 			const int first = problem.contacts[i].row;
 			const int count = group.normalCount + group.tangentCount;
 			for(int row = 0; row < count; ++row)
+			{
 				scratch.velocity[row] = contactVelocity[first + row] + alpha * contactDirection[first + row];
+			}
 			PatchProjectionResult projection;
 			if(!projectGroup(problem, group, scratch.velocity.data(), scratch.impulse.data(), scratch.diagonal.data(),
 				scratch.coupling, scratch, projection))
 			{
-				result.slope = result.curvature = std::numeric_limits<double>::quiet_NaN();
+				result.valid = false;
 				return result;
 			}
 			double normalDirection = 0.0, tangentDirection = 0.0;
@@ -1045,9 +1359,13 @@ static ConvexLineValue evaluateConvexLine(const Problem& problem, ConstVector co
 				result.slope -= direction * scratch.impulse[row];
 				result.curvature += direction * direction * scratch.diagonal[row];
 				if(row < group.normalCount)
+				{
 					normalDirection += direction * scratch.diagonal[row];
+				}
 				else
+				{
 					tangentDirection += direction * scratch.coupling[row - group.normalCount];
+				}
 			}
 			result.curvature += projection.inverseCoupling *
 				(-projection.boundedTangentRegularization * normalDirection * normalDirection -
@@ -1065,10 +1383,13 @@ static ConvexLineValue evaluateConvexLine(const Problem& problem, ConstVector co
 			if(contact.hasScalarBounds())
 			{
 				const ScalarBounds& limits = problem.bounds(contact);
-				const double unconstrained = drive / compliance[row];
+				const double inverseCompliance = inverseRoot[row] * inverseRoot[row];
+				const double unconstrained = drive * inverseCompliance;
 				result.slope -= direction * clampValue(unconstrained, limits.lower, limits.upper);
 				if(unconstrained > limits.lower && unconstrained < limits.upper)
-					result.curvature += direction * direction / compliance[row];
+				{
+					result.curvature += direction * direction * inverseCompliance;
+				}
 			}
 			else if(drive > 0.0)
 			{
@@ -1082,7 +1403,7 @@ static ConvexLineValue evaluateConvexLine(const Problem& problem, ConstVector co
 			const Vec3 direction = contactDirection.segment<3>(row);
 			Mat3 derivative;
 			const Vec3 impulse = weightedImpulse(-contactVelocity.segment<3>(row) - alpha * direction,
-				compliance.segment<3>(row), problem.block(contact).friction, &derivative, contact.block < 0, problem.block(contact).maxNormalImpulse);
+				compliance.data() + row, inverseRoot.data() + row, problem.block(contact).friction, &derivative, contact.block < 0, problem.block(contact).maxNormalImpulse);
 			result.slope -= direction.dot(impulse);
 			result.curvature += direction.dot(derivative * direction);
 		}
@@ -1091,8 +1412,9 @@ static ConvexLineValue evaluateConvexLine(const Problem& problem, ConstVector co
 	return result;
 }
 
-static double searchConvex(const Problem& problem, ConstVector velocity, ConstVector direction,
-	ConstVector contactVelocity, ConstVector inverseRoot, MutableVector contactDirection, int& evaluations, PatchScratch& scratch, ParallelExecutor* parallelExecutor, double slopeTolerance = 0.0)
+static bool searchConvex(const Problem& problem, ConstVector velocity, ConstVector direction,
+	ConstVector contactVelocity, ConstVector inverseRoot, MutableVector contactDirection, int& evaluations,
+	PatchScratch& scratch, ParallelExecutor* parallelExecutor, double slopeTolerance, double& alphaResult)
 {
 	// Reuse the contact velocity from the current objective/gradient evaluation.
 	ConstVector compliance = problem.regularization;
@@ -1101,16 +1423,23 @@ static double searchConvex(const Problem& problem, ConstVector velocity, ConstVe
 	const ConvexLineValue initial = evaluateConvexLine(problem, contactVelocity, contactDirection, compliance, inverseRoot,
 		velocitySlope, directionNorm, 0.0, scratch);
 	++evaluations;
-	if(!std::isfinite(initial.slope))
-		return initial.slope;
+	if(!initial.valid)
+	{
+		return false;
+	}
 	if(initial.slope >= 0.0)
-		return 0.0;
+	{
+		alphaResult = 0.0;
+		return true;
+	}
 	double lower = 0.0, upper = 1.0;
 	ConvexLineValue atUpper = evaluateConvexLine(problem, contactVelocity, contactDirection, compliance, inverseRoot,
 		velocitySlope, directionNorm, upper, scratch);
 	++evaluations;
-	if(!std::isfinite(atUpper.slope))
-		return atUpper.slope;
+	if(!atUpper.valid)
+	{
+		return false;
+	}
 	for(int i = 0; atUpper.slope < 0.0 && i < 50; ++i)
 	{
 		lower = upper;
@@ -1118,8 +1447,10 @@ static double searchConvex(const Problem& problem, ConstVector velocity, ConstVe
 		atUpper = evaluateConvexLine(problem, contactVelocity, contactDirection, compliance, inverseRoot,
 			velocitySlope, directionNorm, upper, scratch);
 		++evaluations;
-		if(!std::isfinite(atUpper.slope))
-			return atUpper.slope;
+		if(!atUpper.valid)
+		{
+			return false;
+		}
 	}
 	double alpha = clampValue(-initial.slope / initial.curvature, lower, upper);
 	for(int i = 0; i < 50; ++i)
@@ -1127,19 +1458,29 @@ static double searchConvex(const Problem& problem, ConstVector velocity, ConstVe
 		const ConvexLineValue value = evaluateConvexLine(problem, contactVelocity, contactDirection, compliance, inverseRoot,
 			velocitySlope, directionNorm, alpha, scratch);
 		++evaluations;
-		if(!std::isfinite(value.slope))
-			return value.slope;
+		if(!value.valid)
+		{
+			return false;
+		}
 		if(std::abs(value.slope) <= (slopeTolerance > 0.0 ? slopeTolerance :
 			1.0e-10 * std::max(1.0, std::abs(initial.slope))))
-			return alpha;
+		{
+			alphaResult = alpha;
+			return true;
+		}
 		if(value.slope < 0.0)
+		{
 			lower = alpha;
+		}
 		else
+		{
 			upper = alpha;
+		}
 		const double candidate = alpha - value.slope / value.curvature;
 		alpha = candidate > lower && candidate < upper ? candidate : 0.5 * (lower + upper);
 	}
-	return alpha;
+	alphaResult = alpha;
+	return true;
 }
 
 struct WorkspaceData
@@ -1157,17 +1498,20 @@ static SolveStatus::Enum solveNewtonInternal(const Problem& problem, const Setti
 {
 	static_cast<SolverStatistics&>(result) = SolverStatistics();
 	const int expectedSize = problem.bodyCount() * 6;
-	if(!problem.prepared || !(problem.timestep > 0.0) || !std::isfinite(problem.timestep) ||
-		settings.iterations < 0 || !(settings.tolerance >= 0.0) || !std::isfinite(settings.tolerance) ||
-		!(settings.lineTolerance >= 0.0) || !std::isfinite(settings.lineTolerance) ||
-		problem.massDiagonal.size() != expectedSize || problem.jacobian.cols() != expectedSize ||
-		problem.jacobian.rows() != problem.rowCount() || problem.regularization.size() != problem.rowCount() ||
-		(previous && previous->primal.size() != expectedSize))
+	if(!problem.prepared || !(problem.timestep > 0.0) || settings.iterations < 0 ||
+	   settings.tolerance < 0.0 || settings.lineTolerance < 0.0 ||
+	   problem.massDiagonal.size() != expectedSize || problem.jacobian.cols() != expectedSize ||
+	   problem.jacobian.rows() != problem.rowCount() || problem.regularization.size() != problem.rowCount() ||
+	   (previous && previous->primal.size() != expectedSize))
+	{
 		return SolveStatus::eINVALID_INPUT;
+	}
 	if(expectedSize == 0)
 	{
 		if(problem.rowCount() != 0)
+		{
 			return SolveStatus::eINVALID_INPUT;
+		}
 		result.primal.resize(0);
 		result.impulse.resize(0);
 		result.stopReason = 1;
@@ -1191,19 +1535,29 @@ static SolveStatus::Enum solveNewtonInternal(const Problem& problem, const Setti
 	nextVelocity.resize(bodies);
 	direction.resize(bodies);
 	contactVelocity.resize(rows);
+	inverseRoot.resize(rows);
 	workspace.contactDirection.resize(rows);
 	if(previous)
+	{
 		velocity = previous->primal;
+	}
 	else
+	{
 		velocity.setZero();
+	}
 	impulse.resize(problem.rowCount());
 	weights.resize(problem);
 	workspace.patchScratch.resize(problem);
-	inverseRoot = compliance.cwiseSqrt().cwiseInverse();
+	for(int row = 0; row < rows; ++row)
+	{
+		inverseRoot[row] = 1.0 / std::sqrt(compliance[row]);
+	}
 	factor.beginSolve(settings.profile, continuation, settings.parallelExecutor);
 	Clock::time_point evaluationStart = profileStart(settings.profile);
 	if(!evaluatePrimal(problem, velocity, inverseRoot, contactVelocity, impulse, gradient, &weights, workspace.patchScratch, settings.parallelExecutor))
+	{
 		return SolveStatus::eNUMERICAL_FAILURE;
+	}
 	if(previous)
 	{
 		// A cached solution can be worse than free motion after contacts or loads change.
@@ -1211,9 +1565,15 @@ static SolveStatus::Enum solveNewtonInternal(const Problem& problem, const Setti
 		coldImpulse.resize(problem.rowCount());
 		// Comparing warm and free motion needs only the cold impulses and cost.
 		if(!evaluateImpulses(problem, problem.freeVelocity, inverseRoot, coldImpulse, NULL, workspace.patchScratch))
+		{
 			return SolveStatus::eNUMERICAL_FAILURE;
-		double warmCost = velocity.squaredNorm() + impulse.dot(compliance.cwiseProduct(impulse));
-		double coldCost = coldImpulse.dot(compliance.cwiseProduct(coldImpulse));
+		}
+		double warmCost = velocity.squaredNorm(), coldCost = 0.0;
+		for(int row = 0; row < rows; ++row)
+		{
+			warmCost += impulse[row] * compliance[row] * impulse[row];
+			coldCost += coldImpulse[row] * compliance[row] * coldImpulse[row];
+		}
 		if(problem.hasFiniteBounds)
 		{
 			warmCost = 2.0 * primalCost(problem, velocity, contactVelocity, impulse);
@@ -1223,13 +1583,13 @@ static SolveStatus::Enum solveNewtonInternal(const Problem& problem, const Setti
 		{
 			velocity.setZero();
 			if(!evaluatePrimal(problem, velocity, inverseRoot, contactVelocity, impulse, gradient, &weights, workspace.patchScratch, settings.parallelExecutor))
+			{
 				return SolveStatus::eNUMERICAL_FAILURE;
+			}
 		}
 	}
 	result.evaluationMs += profileElapsed(settings.profile, evaluationStart);
 	double cost = primalCost(problem, velocity, contactVelocity, impulse);
-	if(!std::isfinite(cost) || !gradient.allFinite())
-		return SolveStatus::eNUMERICAL_FAILURE;
 	for(int iteration = 0; iteration < settings.iterations; ++iteration)
 	{
 		result.scaledGradient = stopping.gradientNorm(problem, gradient);
@@ -1239,45 +1599,65 @@ static SolveStatus::Enum solveNewtonInternal(const Problem& problem, const Setti
 			break;
 		}
 		if(!factor.factor(problem, weights, result))
+		{
 			return SolveStatus::eFACTORIZATION_FAILED;
+		}
 		const Clock::time_point solveStart = profileStart(settings.profile);
 		factor.solveDirection(gradient, direction);
-		if(!direction.allFinite())
-			return SolveStatus::eNUMERICAL_FAILURE;
 		result.backsolveMs += profileElapsed(settings.profile, solveStart);
 		if(settings.checkFactor)
 		{
 			// This independent check is outside performance runs. It catches errors
 			// in signed updates and permutation by rebuilding the current Hessian.
-			const Sparse matrix = makeReferenceHessian(problem, weights);
-			Factor reference;
-			reference.compute(matrix);
-			const Vector expected = reference.solve(-gradient);
-			const double error = (direction - expected).lpNorm<Eigen::Infinity>() /
-				std::max(1.0, expected.lpNorm<Eigen::Infinity>());
-			result.factorError = std::max(result.factorError, error);
-			if(!std::isfinite(error) || error > 1.0e-6)
+			HessianStorage referenceStorage;
+			const Sparse& matrix = makeHessian(problem, weights, referenceStorage);
+			Vector expected;
+			if(!solveDenseReference(matrix, gradient, expected))
+			{
 				return SolveStatus::eNUMERICAL_FAILURE;
+			}
+			double difference = 0.0;
+			for(int row = 0; row < bodies; ++row)
+			{
+				difference = std::max(difference, std::abs(direction[row] - expected[row]));
+			}
+			const double error = difference / std::max(1.0, expected.infinityNorm());
+			result.factorError = std::max(result.factorError, error);
+			if(error > 1.0e-6)
+			{
+				return SolveStatus::eNUMERICAL_FAILURE;
+			}
 		}
 		// Very stiff constraints can leave a cancellation residual after motion
 		// has converged. Stop when the computed correction reaches roundoff.
-		if(direction.lpNorm<Eigen::Infinity>() <= 1.0e-14 * std::max(1.0, velocity.lpNorm<Eigen::Infinity>()))
+		if(direction.infinityNorm() <= 1.0e-14 * std::max(1.0, velocity.infinityNorm()))
 		{
 			result.stopReason = 5;
 			break;
 		}
 		if(gradient.dot(direction) >= 0.0)
 		{
-			direction = -gradient;
+			for(int row = 0; row < bodies; ++row)
+			{
+				direction[row] = -gradient[row];
+			}
 		}
 		const Clock::time_point lineStart = profileStart(settings.profile);
-		const double alpha = searchConvex(problem, velocity, direction, contactVelocity, inverseRoot, workspace.contactDirection, result.lineSearchEvaluations, workspace.patchScratch, settings.parallelExecutor,
-			stopping.lineThreshold(problem, direction));
-		result.lineSearchMs += profileElapsed(settings.profile, lineStart);
-		if(!std::isfinite(alpha))
+		double alpha;
+		if(!searchConvex(problem, velocity, direction, contactVelocity, inverseRoot, workspace.contactDirection,
+			result.lineSearchEvaluations, workspace.patchScratch, settings.parallelExecutor,
+			stopping.lineThreshold(problem, direction), alpha))
+		{
 			return SolveStatus::eNUMERICAL_FAILURE;
-		nextVelocity = velocity + alpha * direction;
-		if((nextVelocity.array() == velocity.array()).all())
+		}
+		result.lineSearchMs += profileElapsed(settings.profile, lineStart);
+		bool unchanged = true;
+		for(int row = 0; row < bodies; ++row)
+		{
+			nextVelocity[row] = velocity[row] + alpha * direction[row];
+			unchanged = unchanged && nextVelocity[row] == velocity[row];
+		}
+		if(unchanged)
 		{
 			result.stopReason = 6;
 			break;
@@ -1286,11 +1666,11 @@ static SolveStatus::Enum solveNewtonInternal(const Problem& problem, const Setti
 		result.iterations = iteration + 1;
 		evaluationStart = profileStart(settings.profile);
 		if(!evaluatePrimal(problem, velocity, inverseRoot, contactVelocity, impulse, gradient, &weights, workspace.patchScratch, settings.parallelExecutor))
+		{
 			return SolveStatus::eNUMERICAL_FAILURE;
+		}
 		result.evaluationMs += profileElapsed(settings.profile, evaluationStart);
 		const double nextCost = primalCost(problem, velocity, contactVelocity, impulse);
-		if(!std::isfinite(nextCost) || !gradient.allFinite())
-			return SolveStatus::eNUMERICAL_FAILURE;
 		result.scaledImprovement = stopping.costScale * (cost - nextCost);
 		cost = nextCost;
 		if(result.scaledImprovement > 0.0 && result.scaledImprovement < stopping.tolerance)
@@ -1301,66 +1681,39 @@ static SolveStatus::Enum solveNewtonInternal(const Problem& problem, const Setti
 	}
 	result.impulse = impulse;
 	result.primal = velocity;
-	result.gradientResidual = gradient.lpNorm<Eigen::Infinity>();
+	result.gradientResidual = gradient.infinityNorm();
 	result.scaledGradient = stopping.gradientNorm(problem, gradient);
-	if(!std::isfinite(result.scaledGradient))
-		return SolveStatus::eNUMERICAL_FAILURE;
 	return result.stopReason == 0 ? SolveStatus::eITERATION_LIMIT : SolveStatus::eSUCCESS;
 }
 
-Workspace::Workspace() noexcept : m_data(NULL) {}
+Workspace::Workspace() noexcept : m_data(new WorkspaceData) {}
 Workspace::~Workspace() { delete m_data; }
-Workspace::Workspace(Workspace&& other) noexcept : m_data(other.m_data) { other.m_data = NULL; }
+Workspace::Workspace(Workspace&& other) noexcept : m_data(other.m_data) { other.m_data = new WorkspaceData; }
 Workspace& Workspace::operator=(Workspace&& other) noexcept
 {
 	if(this != &other)
 	{
-		delete m_data;
+		WorkspaceData* data = m_data;
 		m_data = other.m_data;
-		other.m_data = NULL;
+		other.m_data = data;
 	}
 	return *this;
 }
 
-static SolveStatus::Enum solveNewtonSafe(const Problem& problem, const Settings& settings, Result& result,
-	WorkspaceData*& data, const Result* previous, bool continuation) noexcept
+static SolveStatus::Enum solveNewtonWorkspace(const Problem& problem, const Settings& settings, Result& result,
+	WorkspaceData& data, const Result* previous, bool continuation) noexcept
 {
 	const Clock::time_point start = Clock::now();
-	result.status = SolveStatus::eINVALID_INPUT;
-#if defined(_CPPUNWIND) || defined(__EXCEPTIONS)
-	try
+	const bool reuse = continuation && data.continuationProblem == &problem &&
+		data.continuationGeneration == problem.preparationGeneration;
+	data.continuationProblem = NULL;
+	data.continuationGeneration = 0;
+	result.status = solveNewtonInternal(problem, settings, result, data, previous, reuse);
+	if(result.status == SolveStatus::eSUCCESS || result.status == SolveStatus::eITERATION_LIMIT)
 	{
-#endif
-		if(!data)
-			data = new(std::nothrow) WorkspaceData;
-		if(data)
-		{
-			const bool reuse = continuation && data->continuationProblem == &problem &&
-				data->continuationGeneration == problem.preparationGeneration;
-			// Invalidate before any potentially failing operation. An error may
-			// leave a partial rank update/factor, which must never be continued.
-			data->continuationProblem = NULL;
-			data->continuationGeneration = 0;
-			result.status = solveNewtonInternal(problem, settings, result, *data, previous, reuse);
-			if(result.status == SolveStatus::eSUCCESS || result.status == SolveStatus::eITERATION_LIMIT)
-			{
-				data->continuationProblem = &problem;
-				data->continuationGeneration = problem.preparationGeneration;
-			}
-		}
-		else
-			result.status = SolveStatus::eOUT_OF_MEMORY;
-#if defined(_CPPUNWIND) || defined(__EXCEPTIONS)
+		data.continuationProblem = &problem;
+		data.continuationGeneration = problem.preparationGeneration;
 	}
-	catch(const std::bad_alloc&)
-	{
-		result.status = SolveStatus::eOUT_OF_MEMORY;
-	}
-	catch(...)
-	{
-		result.status = SolveStatus::eNUMERICAL_FAILURE;
-	}
-#endif
 	result.elapsedMs = elapsed(start);
 	return result.status;
 }
@@ -1368,13 +1721,13 @@ static SolveStatus::Enum solveNewtonSafe(const Problem& problem, const Settings&
 SolveStatus::Enum solveNewton(const Problem& problem, const Settings& settings, Result& result,
 	Workspace& workspace, const Result* previous) noexcept
 {
-	return solveNewtonSafe(problem, settings, result, workspace.m_data, previous, false);
+	return solveNewtonWorkspace(problem, settings, result, *workspace.m_data, previous, false);
 }
 
 SolveStatus::Enum continueNewton(const Problem& problem, const Settings& settings, Result& result,
 	Workspace& workspace, const Result* previous) noexcept
 {
-	return solveNewtonSafe(problem, settings, result, workspace.m_data, previous, true);
+	return solveNewtonWorkspace(problem, settings, result, *workspace.m_data, previous, true);
 }
 
 }

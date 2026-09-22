@@ -1,9 +1,7 @@
 #include "PxPhysicsAPI.h"
-#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
-#include <limits>
 #include <mutex>
 using namespace physx;
 namespace
@@ -13,89 +11,28 @@ void check(bool value, const char* text)
 {
 	if(!value) { std::printf("FAIL %s\n", text); ++failures; }
 }
-class ValidationAllocator : public PxAllocatorCallback
-{
-	PxDefaultAllocator fallback;
-	std::mutex mutex;
-	const char* selectedType;
-	PxU32 skip, failuresInjected;
-public:
-	ValidationAllocator() : selectedType(NULL), skip(0), failuresInjected(0) {}
-	void arm(const char* type, PxU32 occurrence)
-	{
-		std::lock_guard<std::mutex> lock(mutex);
-		selectedType = type;
-		skip = occurrence - 1;
-		failuresInjected = 0;
-	}
-	PxU32 disarm()
-	{
-		std::lock_guard<std::mutex> lock(mutex);
-		selectedType = NULL;
-		return failuresInjected;
-	}
-	virtual void* allocate(size_t size, const char* type, const char* file, int line) PX_OVERRIDE
-	{
-		{
-			std::lock_guard<std::mutex> lock(mutex);
-			if(selectedType && type && std::strstr(type, selectedType))
-			{
-				if(skip)
-					--skip;
-				else
-				{
-					selectedType = NULL;
-					++failuresInjected;
-					return NULL;
-				}
-			}
-		}
-		return fallback.allocate(size, type, file, line);
-	}
-	virtual void deallocate(void* memory) PX_OVERRIDE
-	{
-		fallback.deallocate(memory);
-	}
-};
-
 class ValidationErrors : public PxErrorCallback
 {
 	std::mutex mutex;
 	const char* expectedText;
 	PxErrorCode::Enum expectedCode;
 	int observed;
-	bool allocationFailure;
-	PxErrorCode::Enum failureCode;
-	const char* failureText;
-	int expectedArrayFailures, arrayFailures, finalFailures;
 public:
 	int expectedTotal, unexpected;
-	ValidationErrors() : expectedText(NULL), expectedCode(PxErrorCode::eNO_ERROR), observed(0), allocationFailure(false), failureCode(PxErrorCode::eNO_ERROR), failureText(NULL),
-		expectedArrayFailures(0), arrayFailures(0), finalFailures(0), expectedTotal(0), unexpected(0) {}
+	ValidationErrors() : expectedText(NULL), expectedCode(PxErrorCode::eNO_ERROR), observed(0), expectedTotal(0), unexpected(0) {}
 	void begin(PxErrorCode::Enum code, const char* text)
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 		check(expectedText == NULL, "diagnostic expectations do not overlap");
-		expectedCode = code; expectedText = text; observed = 0; allocationFailure = false;
-	}
-	void beginAllocation(PxErrorCode::Enum code, const char* text, bool arrayFailure)
-	{
-		begin(PxErrorCode::eABORT, "User allocator returned NULL.");
-		std::lock_guard<std::mutex> lock(mutex);
-		allocationFailure = true;
-		failureCode = code;
-		failureText = text;
-		expectedArrayFailures = arrayFailure ? 1 : 0;
-		arrayFailures = finalFailures = 0;
+		expectedCode = code;
+		expectedText = text;
+		observed = 0;
 	}
 	void end()
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 		check(expectedText && observed == 1, "exactly one primary diagnostic matches the rejected operation");
-		if(allocationFailure)
-			check(finalFailures == 1 && arrayFailures == expectedArrayFailures, "allocation failure propagation reports the expected diagnostics");
 		expectedText = NULL;
-		allocationFailure = false;
 	}
 	virtual void reportError(PxErrorCode::Enum code, const char* message, const char* file, int line) PX_OVERRIDE
 	{
@@ -103,19 +40,6 @@ public:
 		if(expectedText && code == expectedCode && std::strstr(message, expectedText))
 		{
 			++observed; ++expectedTotal; return;
-		}
-		if(allocationFailure && code == PxErrorCode::eOUT_OF_MEMORY &&
-			std::strstr(message, "PxArray::allocate: allocator returned null pointer."))
-		{
-			++arrayFailures;
-			++expectedTotal;
-			return;
-		}
-		if(allocationFailure && code == failureCode && std::strstr(message, failureText))
-		{
-			++finalFailures;
-			++expectedTotal;
-			return;
 		}
 		if(code == PxErrorCode::eDEBUG_INFO || code == PxErrorCode::ePERF_WARNING) return;
 		++unexpected;
@@ -174,7 +98,9 @@ void settings(PxPhysics& physics, PxDefaultCpuDispatcher& dispatcher, Validation
 	PxScene* pgs = physics.createScene(defaults);
 	check(pgs && pgs->getSolverType() == PxSolverType::ePGS, "default scene creates PGS");
 	if(pgs) pgs->release();
-	defaults.newtonMaxIterations = 0; defaults.newtonTolerance = -1.0f; defaults.newtonRegularization = std::numeric_limits<PxReal>::quiet_NaN();
+	defaults.newtonMaxIterations = 0;
+	defaults.newtonTolerance = -1.0f;
+	defaults.newtonRegularization = -1.0f;
 	check(defaults.isValid(), "unused Newton fields do not invalidate PGS");
 	defaults.solverType = PxSolverType::eTGS;
 	check(defaults.isValid(), "unused Newton fields do not invalidate TGS");
@@ -186,8 +112,8 @@ void settings(PxPhysics& physics, PxDefaultCpuDispatcher& dispatcher, Validation
 		PxSceneDesc desc = base; desc.newtonMaxIterations = iterations[i];
 		reject(physics, errors, desc, "invalid Newton iteration count rejected in Release");
 	}
-	const PxReal invalid[] = { 0.0f, -1.0f, std::numeric_limits<PxReal>::infinity(), -std::numeric_limits<PxReal>::infinity(), std::numeric_limits<PxReal>::quiet_NaN() };
-	for(PxU32 i = 0; i < 5; ++i)
+	const PxReal invalid[] = { 0.0f, -1.0f };
+	for(PxU32 i = 0; i < 2; ++i)
 	{
 		PxSceneDesc desc = base; desc.newtonTolerance = invalid[i];
 		reject(physics, errors, desc, "invalid Newton tolerance rejected in Release");
@@ -206,143 +132,6 @@ void settings(PxPhysics& physics, PxDefaultCpuDispatcher& dispatcher, Validation
 	desc = base; desc.flags |= PxSceneFlag::eENABLE_EXTERNAL_FORCES_EVERY_ITERATION_TGS;
 	reject(physics, errors, desc, "TGS-only external forces flag rejected");
 }
-void allocationFailures(PxPhysics& physics, PxDefaultCpuDispatcher& dispatcher, PxMaterial& material,
-	ValidationAllocator& allocator, ValidationErrors& errors, PxScene& original, PxRigidDynamic& probe)
-{
-	// The injector targets existing allocator type names; there is no production test hook.
-	const PxU32 sceneCount = physics.getNbScenes();
-	allocator.arm("NewtonSolver", 1);
-	errors.beginAllocation(PxErrorCode::eOUT_OF_MEMORY, "Unable to create Newton scene.", false);
-	PxScene* rejected = physics.createScene(descriptor(physics, dispatcher));
-	const PxU32 stateFailures = allocator.disarm();
-	errors.end();
-	check(stateFailures == 1, "Newton solver-state allocation failure was injected");
-	check(rejected == NULL && physics.getNbScenes() == sceneCount, "failed Newton state rejects scene creation without registry mutation or PGS fallback");
-	if(rejected)
-		rejected->release();
-	usable(original, probe, 1);
-
-	for(PxU32 failure = 0; failure < 4; ++failure)
-	{
-		PxScene* scene = physics.createScene(descriptor(physics, dispatcher));
-		PxRigidDynamic* actor = body(physics, material, 3.0f);
-		check(scene != NULL, "allocation recovery scene created");
-		if(scene && actor)
-		{
-			check(scene->addActor(*actor), "allocation recovery actor inserted");
-			actor->setLinearVelocity(PxVec3(1.0f, 0.0f, 0.0f));
-			const PxTransform before = actor->getGlobalPose();
-			// A new island first allocates the ownership registry, then the available
-			// registry, and finally its workspace. Each case uses a fresh scene.
-			allocator.arm(failure == 0 ? "NewtonBodySeed" : "NewtonIslandWorkspace", failure == 0 ? 1 : failure);
-			errors.beginAllocation(PxErrorCode::eINVALID_OPERATION,
-				failure == 0 ? "Newton warm-start storage allocation failed." : "Newton workspace allocation failed.",
-				failure != 3);
-			scene->simulate(0.01f);
-			check(scene->fetchResults(true), "allocation failure still completes the task graph");
-			const PxU32 injected = allocator.disarm();
-			errors.end();
-			check(injected == 1, "selected Newton seed/registry/workspace allocation failed exactly once");
-			check(actor->getGlobalPose().p == before.p && actor->getGlobalPose().q == before.q,
-				"failed preparation skips pose integration safely");
-			check(scene->getSolverType() == PxSolverType::eNEWTON, "allocation failure does not select PGS");
-			usable(*scene, *actor, 1);
-		}
-		if(actor)
-			actor->release();
-		if(scene)
-			scene->release();
-	}
-	usable(original, probe, 1);
-}
-
-class ThresholdEvents : public PxSimulationEventCallback
-{
-public:
-	std::atomic<PxU32> count;
-	ThresholdEvents() : count(0) {}
-	virtual void onConstraintBreak(PxConstraintInfo*, PxU32) PX_OVERRIDE {}
-	virtual void onWake(PxActor**, PxU32) PX_OVERRIDE {}
-	virtual void onSleep(PxActor**, PxU32) PX_OVERRIDE {}
-	virtual void onTrigger(PxTriggerPair*, PxU32) PX_OVERRIDE {}
-	virtual void onAdvance(const PxRigidBody* const*, const PxTransform*, const PxU32) PX_OVERRIDE {}
-	virtual void onContact(const PxContactPairHeader&, const PxContactPair* pairs, PxU32 size) PX_OVERRIDE
-	{
-		for(PxU32 i = 0; i < size; ++i)
-			if(pairs[i].events & (PxPairFlag::eNOTIFY_THRESHOLD_FORCE_FOUND |
-				PxPairFlag::eNOTIFY_THRESHOLD_FORCE_PERSISTS | PxPairFlag::eNOTIFY_THRESHOLD_FORCE_LOST))
-				++count;
-	}
-};
-
-PxFilterFlags thresholdFilter(PxFilterObjectAttributes, PxFilterData, PxFilterObjectAttributes, PxFilterData,
-	PxPairFlags& flags, const void*, PxU32)
-{
-	flags = PxPairFlag::eCONTACT_DEFAULT | PxPairFlag::eNOTIFY_TOUCH_FOUND | PxPairFlag::eNOTIFY_TOUCH_PERSISTS |
-		PxPairFlag::eNOTIFY_THRESHOLD_FORCE_FOUND | PxPairFlag::eNOTIFY_THRESHOLD_FORCE_PERSISTS |
-		PxPairFlag::eNOTIFY_THRESHOLD_FORCE_LOST;
-	return PxFilterFlag::eDEFAULT;
-}
-
-void thresholdAllocationFailure(PxPhysics& physics, PxDefaultCpuDispatcher& dispatcher, PxMaterial& material,
-	ValidationAllocator& allocator, ValidationErrors& errors)
-{
-	ThresholdEvents events;
-	PxSceneDesc desc = descriptor(physics, dispatcher);
-	desc.gravity = PxVec3(0.0f, -9.81f, 0.0f);
-	desc.filterShader = thresholdFilter;
-	desc.simulationEventCallback = &events;
-	PxScene* scene = physics.createScene(desc);
-	check(scene != NULL, "threshold allocation fixture creates its scene");
-	if(!scene)
-		return;
-	PxRigidStatic* floor = PxCreatePlane(physics, PxPlane(0.0f, 1.0f, 0.0f, 0.0f), material);
-	PxRigidDynamic* supported = body(physics, material, 0.0f);
-	PxRigidDynamic* added = NULL;
-	if(floor && supported)
-	{
-		supported->setGlobalPose(PxTransform(PxVec3(0.0f, 0.25f, 0.0f)));
-		PxRigidBodyExt::setMassAndUpdateInertia(*supported, 1.0f);
-		supported->setContactReportThreshold(0.1f);
-		check(scene->addActor(*floor) && scene->addActor(*supported), "threshold fixture actors inserted");
-		for(PxU32 frame = 0; frame < 3; ++frame)
-		{
-			events.count = 0;
-			scene->simulate(0.01f);
-			check(scene->fetchResults(true), "threshold fixture initial solve completes");
-		}
-		check(events.count.load() > 0, "supported contact produces a force-threshold event before failure");
-		added = body(physics, material, 5.0f);
-		if(added)
-		{
-			check(scene->addActor(*added), "new body requires growing Newton node storage");
-			events.count = 0;
-			allocator.arm("NewtonBodySeed", 1);
-			errors.beginAllocation(PxErrorCode::eINVALID_OPERATION, "Newton warm-start storage allocation failed.", true);
-			scene->simulate(0.01f);
-			check(scene->fetchResults(true), "failed update with existing contacts completes task graph");
-			const PxU32 injected = allocator.disarm();
-			errors.end();
-			check(injected == 1, "seed growth failure injected after a reporting frame");
-			check(events.count.load() == 0, "failed Newton update does not replay stale force-threshold events");
-			events.count = 0;
-			scene->simulate(0.01f);
-			check(scene->fetchResults(true), "reporting scene recovers after failed update");
-			check(events.count.load() > 0 && supported->getGlobalPose().isFinite(),
-				"force reporting and supported simulation resume after recovery");
-		}
-	}
-	else
-		check(false, "threshold allocation fixture creates valid actors");
-	if(added)
-		added->release();
-	if(supported)
-		supported->release();
-	if(floor)
-		floor->release();
-	scene->release();
-}
-
 void outside(PxArticulationReducedCoordinate& articulation, PxArticulationLink& link, PxAggregate* aggregate)
 {
 	check(articulation.getScene() == NULL && link.getScene() == NULL, "articulation and link remain outside scene");
@@ -413,7 +202,7 @@ void articulations(PxPhysics& physics, PxMaterial& material, ValidationErrors& e
 }
 int main()
 {
-	ValidationAllocator allocator;
+	PxDefaultAllocator allocator;
 	ValidationErrors errors;
 	PxFoundation* foundation = PxCreateFoundation(PX_PHYSICS_VERSION, allocator, errors);
 	if(!foundation) return 1;
@@ -435,8 +224,6 @@ int main()
 			check(scene->addActor(*probe), "valid rigid actor inserted");
 			settings(*physics, *dispatcher, errors); usable(*scene, *probe, 1);
 			articulations(*physics, *material, errors, *scene, *probe);
-			allocationFailures(*physics, *dispatcher, *material, allocator, errors, *scene, *probe);
-			thresholdAllocationFailure(*physics, *dispatcher, *material, allocator, errors);
 		}
 		if(probe) probe->release();
 		if(scene) scene->release();

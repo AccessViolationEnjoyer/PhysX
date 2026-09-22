@@ -46,7 +46,7 @@ Run from the repository root, after preparing the existing Newton dependencies:
 
 ```powershell
 python physx/tests/newton/PrepareDependencies.py
-cmake -S physx/tests/newton/pallet -B physx/compiler/newton/native-build -G "Visual Studio 17 2022" -A x64
+cmake -S physx/tests/newton/pallet -B physx/compiler/newton/native-build -G "Visual Studio 17 2022" -A x64 -DPX_NEWTON_USE_AVX2=ON
 cmake --build physx/compiler/newton/native-build --config profile --target SnippetPalletConveyor MujocoPalletConveyor --parallel 4
 ```
 

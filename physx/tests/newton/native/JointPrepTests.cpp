@@ -36,6 +36,7 @@ static PxU32 prepareRows(Px1DConstraint* rows, PxVec3p& offset, PxU32 maxRows,
 {
 	JointFixture& fixture = *const_cast<JointFixture*>(static_cast<const JointFixture*>(data));
 	PX_ASSERT(maxRows >= fixture.count);
+	PX_UNUSED(maxRows);
 	PxMemCopy(rows, fixture.rows, fixture.count * sizeof(Px1DConstraint));
 	offset = fixture.offset;
 	scales = fixture.scales;

@@ -9,7 +9,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 VENDOR = ROOT / "physx/compiler/newton/vendor"
-MUJOCO_COMMIT = "f1d45bd5422c74beddfb0d1deb590a02583d21de"
+MUJOCO_VERSION = "3.13.0"
+MUJOCO_COMMIT = "123347c0eeab7e13c8da0828ab593bbd95bcf335"
 
 
 def unpack(url, target):
@@ -28,9 +29,9 @@ def unpack(url, target):
 def main():
     VENDOR.mkdir(parents=True, exist_ok=True)
     unpack("https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.zip", VENDOR / "eigen")
-    source = VENDOR / "mujoco-source"
+    source = VENDOR / f"mujoco-source-{MUJOCO_VERSION}"
     unpack(f"https://github.com/google-deepmind/mujoco/archive/{MUJOCO_COMMIT}.zip", source)
-    build = VENDOR / "mujoco-build"
+    build = VENDOR / f"mujoco-build-{MUJOCO_VERSION}"
     command = ["cmake", "-S", str(source), "-B", str(build), "-G", "Visual Studio 17 2022", "-A", "x64",
                "-DMUJOCO_BUILD_TESTS=OFF", "-DMUJOCO_BUILD_EXAMPLES=OFF", "-DMUJOCO_BUILD_SIMULATE=OFF"]
     for name in ("ccd", "lodepng", "marchingcubecpp", "qhull", "tinyobjloader", "tinyxml2", "trianglemeshdistance"):
@@ -40,14 +41,18 @@ def main():
     subprocess.run(command, check=True)
     subprocess.run(["cmake", "--build", str(build), "--config", "Release", "--target", "mujoco", "--parallel", "4"], check=True)
     destination = VENDOR / "mujoco"
-    destination.mkdir(exist_ok=True)
-    shutil.copytree(source / "include", destination / "include", dirs_exist_ok=True)
+    if destination.exists():
+        shutil.rmtree(destination)
+    destination.mkdir()
+    shutil.copytree(source / "include", destination / "include")
     shutil.copy2(source / "LICENSE", destination / "LICENSE")
     shutil.copy2(build / "bin/Release/mujoco.dll", destination / "mujoco.dll")
     shutil.copy2(build / "lib/Release/mujoco.lib", destination / "mujoco.lib")
-    if not (VENDOR / "python/mujoco").exists():
-        subprocess.run([sys.executable, "-m", "pip", "install", "--target", str(VENDOR / "python"),
-                        "mujoco==3.3.7", "numpy==1.26.4"], check=True)
+    python = VENDOR / "python"
+    for package in python.glob("mujoco*"):
+        shutil.rmtree(package) if package.is_dir() else package.unlink()
+    subprocess.run([sys.executable, "-m", "pip", "install", "--upgrade", "--target", str(python),
+                    f"mujoco=={MUJOCO_VERSION}", "numpy==1.26.4"], check=True)
 
 
 if __name__ == "__main__":

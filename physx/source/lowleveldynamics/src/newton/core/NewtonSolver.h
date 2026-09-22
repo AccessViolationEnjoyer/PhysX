@@ -3,7 +3,7 @@
 
 #include "NewtonParallel.h"
 #include "NewtonStorage.h"
-#include <Eigen/SparseCore>
+#include "NewtonMath.h"
 #include <chrono>
 #include <cstdint>
 #include <string>
@@ -20,19 +20,22 @@ struct SolveStatus
 		eITERATION_LIMIT,
 		eINVALID_INPUT,
 		eFACTORIZATION_FAILED,
-		eNUMERICAL_FAILURE,
-		eOUT_OF_MEMORY
+		eNUMERICAL_FAILURE
 	};
 };
-typedef Eigen::VectorXd Vector;
-typedef Eigen::Ref<const Vector> ConstVector;
-typedef Eigen::Ref<Vector> MutableVector;
-typedef Eigen::Vector3d Vec3;
-typedef Eigen::Matrix3d Mat3;
-typedef Eigen::Matrix<double, 3, 6> Jacobian;
-typedef Eigen::Matrix<double, 6, 1> Vec6;
-typedef Eigen::SparseMatrix<double> Sparse;
+typedef VectorStorage Vector;
+typedef const VectorStorage& ConstVector;
+typedef VectorStorage& MutableVector;
+typedef Matrix<2, 1> Vec2;
+typedef Matrix<3, 1> Vec3;
+typedef Matrix<3, 3> Mat3;
+typedef Matrix<3, 6> Jacobian;
+typedef Matrix<6, 1> Vec6;
+typedef Matrix<2, 6> Mat26;
+typedef Matrix<6, 6> Mat6;
+typedef SparseStorage Sparse;
 typedef std::chrono::steady_clock Clock;
+static constexpr double MAX_IMPULSE = (std::numeric_limits<double>::max)();
 
 // J is mass scaled: each column is divided by sqrt(mass or inertia).
 // Contact rows are tangent 0, tangent 1, normal. Bilateral blocks hold three
@@ -46,7 +49,7 @@ struct Contact
 	Vec3 freeVelocity;
 	Vec3 regularization;
 	double friction;
-	double maxNormalImpulse = std::numeric_limits<double>::infinity();
+	double maxNormalImpulse = MAX_IMPULSE;
 };
 
 // The normal row is the complete scalar contact. Three-row contacts retain
@@ -75,11 +78,11 @@ struct ScalarBounds
 
 struct ContactBlock
 {
-	Eigen::Matrix<double, 2, 6> tangentJacobian[2];
-	Eigen::Vector2d freeVelocity;
-	Eigen::Vector2d regularization;
+	Mat26 tangentJacobian[2];
+	Vec2 freeVelocity;
+	Vec2 regularization;
 	double friction;
-	double maxNormalImpulse = std::numeric_limits<double>::infinity();
+	double maxNormalImpulse = MAX_IMPULSE;
 	int coupled = -1;
 };
 
@@ -112,16 +115,27 @@ struct Problem
 	std::vector<int> columnCursors;
 	std::vector<int> rowContact;
 	std::vector<int> coupledContacts;
+	std::vector<std::uint64_t> hessianPairs;
+	std::vector<int> hessianContactBlocks;
+	std::vector<int> hessianDiagonalBlocks;
 	int equalityRows = 0;
 	bool isUnilateral() const { return equalityRows == 0 && coupledContacts.empty() && scalarBounds.empty() && patches.empty(); }
 	VectorStorage freeVelocity;
 	VectorStorage regularization;
 	VectorStorage freeBodyVelocity;
 	VectorStorage massDiagonal; // Physical mass/inertia diagonal for acceleration-space convergence tests.
+	VectorStorage inverseMassDiagonal;
 	int bodyCount() const { return int(inverseMass.size()); }
 	int rowCount() const { return int(freeVelocity.size()); }
-	void clearContacts() { contacts.clear(); contactBlocks.clear(); scalarBounds.clear(); patches.clear(); prepared = false; }
-	// Returns the new contact index; [0,+infinity] uses the ordinary scalar record.
+	void clearContacts()
+	{
+		contacts.clear();
+		contactBlocks.clear();
+		scalarBounds.clear();
+		patches.clear();
+		prepared = false;
+	}
+	// Returns the new contact index; [0,MAX_IMPULSE] uses the ordinary scalar record.
 	int addScalarContact(const CompactContact& input, double lowerImpulse, double upperImpulse);
 	// Change an existing bounded scalar sidecar without rebuilding J or allocating.
 	// Grouped patch rows keep their group contract; only ungrouped rows use this API.
@@ -130,24 +144,26 @@ struct Problem
 	int addPatch(int firstContact, int normalCount, int tangentCount, double friction);
 	const ScalarBounds& bounds(const CompactContact& contact) const
 	{
-		return scalarBounds[size_t(CompactContact::SCALAR_BOUNDS_TAG - contact.block)];
+		return scalarBounds[std::uint32_t(CompactContact::SCALAR_BOUNDS_TAG - contact.block)];
 	}
 	// Compatibility builder for full three-row inputs. Native scalar producers
 	// can populate CompactContact records directly, without an intermediate Contact.
 	void addContact(const Contact& input);
 	const ContactBlock& block(const CompactContact& contact) const
 	{
-		return contactBlocks[size_t(contact.block > 0 ? contact.block - 1 : -contact.block - 1)];
+		return contactBlocks[std::uint32_t(contact.block > 0 ? contact.block - 1 : -contact.block - 1)];
 	}
 	ContactBlock& block(const CompactContact& contact)
 	{
-		return contactBlocks[size_t(contact.block > 0 ? contact.block - 1 : -contact.block - 1)];
+		return contactBlocks[std::uint32_t(contact.block > 0 ? contact.block - 1 : -contact.block - 1)];
 	}
 	int coupledIndex(const CompactContact& contact) const { return contact.block > 0 ? block(contact).coupled : -1; }
 	Vec6 contactRow(const CompactContact& contact, int end, int axis) const
 	{
 		if(axis == 2)
+		{
 			return contact.jacobian[end];
+		}
 		return block(contact).tangentJacobian[end].row(axis).transpose();
 	}
 	double contactEntry(const CompactContact& contact, int end, int axis, int column) const
@@ -157,8 +173,12 @@ struct Problem
 	Jacobian contactJacobian(const CompactContact& contact, int end) const
 	{
 		Jacobian result;
-		result.topRows<2>() = block(contact).tangentJacobian[end];
-		result.row(2) = contact.jacobian[end].transpose();
+		for(int column = 0; column < 6; ++column)
+		{
+			result(0, column) = block(contact).tangentJacobian[end](0, column);
+			result(1, column) = block(contact).tangentJacobian[end](1, column);
+			result(2, column) = contact.jacobian[end][column];
+		}
 		return result;
 	}
 };

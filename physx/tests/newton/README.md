@@ -10,7 +10,8 @@ rejected for Newton scenes. Current optimization experiments remain separate und
 `physx/compiler/newton/experiments`.
 
 `NewtonSolver.cpp` contains the convex objective, weighted pyramidal projection, stopping
-criteria and safeguarded line search. `IncrementalCholesky.h` orders the body graph with AMD,
+criteria and safeguarded line search. `IncrementalCholesky.h` orders small body graphs with a
+retained minimum-degree implementation and larger graphs with METIS,
 constructs the permuted sparse matrix in linear time, and chooses incremental updates or a
 fresh factorization using structural work estimates. `BlockCholesky.h` supplies small rigid-body
 block kernels, retaining scalar LLT for thin factors and failed block pivots. Positive updates
@@ -41,10 +42,10 @@ may accumulate nonzero column counts while emitting coefficients and call
 prepareProblemFromColumnCounts(); reset the counts before each preparation, since that call
 consumes them into CSC insertion cursors. The ordinary prepareProblem() counts its own entries.
 
-Eigen's public wrappers allocate even when symbolic analysis is cached. At build time,
-`PrepareStorageKernels.py` adapts the pinned Eigen AMD, symbolic-analysis and numeric LLT routines
-to retained work arrays. It preserves their arithmetic and licenses; generated code lives in the
-build directory. This removes the wrapper allocations without introducing another solver.
+The production solver has no Eigen dependency. Its fixed-size matrix operations, symmetric
+eigensolver, retained CSC storage and sparse Cholesky implementation live in `core/`. Hot 6x6
+factor updates use explicit packed-double kernels, while small changing islands use retained
+ordering storage so repeated solves do not allocate.
 
 Prepared equations use mass-scaled body coordinates and positive diagonal constraint compliance.
 Bilateral three-row blocks represent anchors and springs. Friction uses a square pyramid, with
@@ -82,9 +83,9 @@ with no slipsheet crossings and at most 0.73 um overlap. See
 
 ## Build (Windows, Visual Studio 2022)
 
-Run from the repository root. The core uses the maintained Eigen copy in
-`physx/source/lowleveldynamics/src/newton/vendor/eigen`. MuJoCo comparison dependencies are
-kept in `physx/compiler/newton/vendor`.
+Run from the repository root. Some standalone validation programs use a maintained Eigen copy as
+an independent numerical oracle; neither `PhysXNewtonCore` nor the native PhysX integration links
+or includes it. MuJoCo comparison dependencies are kept in `physx/compiler/newton/vendor`.
 To reproduce them, use the preparation script; existing local sources allow an offline rebuild.
 A fresh machine needs network access for the pinned source archives and Python wheel.
 
@@ -94,15 +95,17 @@ cmake -S physx/tests/newton -B physx/compiler/newton/build -G "Visual Studio 17 
 cmake --build physx/compiler/newton/build --config Release --parallel 2
 ```
 
-Dependencies: Eigen 3.4.0, MuJoCo 3.3.7 (commit
-`f1d45bd5422c74beddfb0d1deb590a02583d21de`), and NumPy 1.26.4.
-The Newton kernel no longer requires MuJoCo; the pallet and reference harnesses use its public API.
-The dependency preparation script no longer adds private-kernel exports. The preserved local DLL
-still contains those historical visibility additions, with unchanged solver arithmetic. The official
-Python wheel used for comparison is unmodified. Upstream licenses remain with the
-vendor sources and generated kernel header. Building requires Python for that small local source
-adapter; no download is needed when the pinned Eigen sources are present. Generated builds,
-dependencies and results are ignored by Git.
+The standalone benchmark enables `PX_NEWTON_USE_AVX2` by default. The core option defaults to
+off in other PhysX builds so the SDK retains its existing CPU requirement. Enable it explicitly
+on AVX2/FMA targets; the option applies only to the Newton numerical core and does not change
+PGS or TGS code generation.
+
+Test-only dependencies: Eigen 3.4.0, MuJoCo 3.13.0 (commit
+`123347c0eeab7e13c8da0828ab593bbd95bcf335`), and NumPy 1.26.4.
+The Newton kernel no longer requires MuJoCo. The comparison harnesses use an unmodified build of
+the pinned upstream source, and the official Python wheel used for comparison is unmodified.
+Upstream licenses remain with the vendor sources. No download is needed when the pinned test
+dependencies are present. Generated builds, dependencies and results are ignored by Git.
 
 ## Validation and timing
 
@@ -128,11 +131,12 @@ reference is a validation check, not a selectable solver. The mixed-constraint C
 scalar rows, bilateral rows and coupled three-component friction together, including cold and
 warm starts and changing island sizes to check workspace/pattern reuse. No timing threshold is part of that correctness test.
 
-Two additional CTests instrument the Debug CRT heap, including C++ new and Eigen's malloc/realloc.
-They verify zero allocations and frees after warm-up in 1,000 changing-topology mixed solves
-and 400 live pallet steps with eight workers. The latter covers our adapter, task arrays and
-solver, including work on all workers. The separately built release MuJoCo DLL is outside that
-heap hook. Instrumentation is not linked into performance executables. See PERFORMANCE.md.
+Two additional CTests instrument the Debug CRT heap, including C++ new and C allocation calls.
+They verify zero solver allocations and frees after warm-up in 1,000 changing-topology mixed
+solves and 400 live pallet steps with eight workers. MuJoCo 3.13's comparison-only `mju_dispatch`
+creates one temporary task wrapper per island; the pallet audit permits exactly those known
+external allocations and fails on any additional allocation. Instrumentation is not linked into
+performance executables. See PERFORMANCE.md.
 
 The cable is a nonlinear chain of 0.1 kg spheres spaced 5 cm apart, fixed at the root, with a 1 N
 tip load and no gravity or collisions. Orientation springs use 100 N.m/degree stiffness and

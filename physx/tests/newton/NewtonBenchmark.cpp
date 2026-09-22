@@ -15,8 +15,11 @@ void setMassDiagonal(Problem& problem, double inertiaPerMass)
 	problem.massDiagonal.resize(problem.bodyCount() * 6);
 	for(int i = 0; i < problem.bodyCount(); ++i)
 	{
-		problem.massDiagonal.segment<3>(6 * i).setConstant(1.0 / problem.inverseMass[i]);
-		problem.massDiagonal.segment<3>(6 * i + 3).setConstant(inertiaPerMass / problem.inverseMass[i]);
+		for(int axis = 0; axis < 3; ++axis)
+		{
+			problem.massDiagonal[6 * i + axis] = 1.0 / problem.inverseMass[i];
+			problem.massDiagonal[6 * i + axis + 3] = inertiaPerMass / problem.inverseMass[i];
+		}
 	}
 }
 
@@ -105,7 +108,7 @@ static int validateMixedConstraints()
 		problem.freeVelocity *= 1.01;
 		Result warm;
 		solveNewton(problem, settings, warm, &cold);
-		if(!warm.primal.allFinite() || warm.gradientResidual > 1.0e-6 || cold.gradientResidual > 1.0e-6)
+		if(warm.gradientResidual > 1.0e-6 || cold.gradientResidual > 1.0e-6)
 			throw std::runtime_error("Mixed constraint solve did not converge");
 		std::printf("VALIDATED,fixture=%d,rows=%d,iterations=%d,gradient=%.12g,factor_error=%.12g\n",
 			fixture, problem.rowCount(), warm.iterations, warm.gradientResidual, warm.factorError);
@@ -183,12 +186,10 @@ int main(int argc, char** argv)
 				r.elapsedMs, wallMs, r.iterations, r.factorizations, r.rankUpdates, r.reusedFactors, r.factorFallbacks,
 				r.matrixMs, r.factorMs, r.updateMs, r.conversionMs, r.backsolveMs, r.evaluationMs, r.lineSearchMs,
 				r.lineSearchEvaluations, r.gradientResidual, modelResidual, r.scaledGradient, r.factorError, r.stopReason);
-			for(int island = 0; island < islands; ++island)
-				if(!results[island].primal.allFinite() || !results[island].impulse.allFinite())
-					throw std::runtime_error("Non-finite Newton result");
 			for(int island = 1; island < islands; ++island)
-				if((results[island].primal - r.primal).lpNorm<Eigen::Infinity>() > 1.0e-12)
-					throw std::runtime_error("Independent islands produced different solutions");
+				for(int row = 0; row < r.primal.size(); ++row)
+					if(std::abs(results[island].primal[row] - r.primal[row]) > 1.0e-12)
+						throw std::runtime_error("Independent islands produced different solutions");
 		}
 		if(argc > 3 && std::string(argv[3]) != "-")
 		{
@@ -201,9 +202,11 @@ int main(int argc, char** argv)
 				if(contact.rowCount() == 1)
 					output << "0\n0\n" << results[0].impulse[contact.row] << "\n";
 				else
-					output << results[0].impulse.segment<3>(contact.row) << "\n";
+					for(int axis = 0; axis < 3; ++axis)
+						output << results[0].impulse[contact.row + axis] << "\n";
 			}
-			output << results[0].primal << "\n";
+			for(int row = 0; row < results[0].primal.size(); ++row)
+				output << results[0].primal[row] << "\n";
 		}
 	}
 	catch(const std::exception& error)

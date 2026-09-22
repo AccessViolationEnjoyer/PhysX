@@ -66,7 +66,7 @@ struct SnapshotResult
 	std::vector<mjtNum> acceleration;
 };
 
-static void benchmarkSnapshot(const mjModel* model, mjData* data, mjThreadPool* pool,
+static void benchmarkSnapshot(const mjModel* model, mjData* data,
 	const std::string& prefix, int sourceStep, int threads, int repeats)
 {
 	const std::vector<mjtNum> warmStart(data->qacc_warmstart, data->qacc_warmstart + model->nv);
@@ -94,7 +94,7 @@ static void benchmarkSnapshot(const mjModel* model, mjData* data, mjThreadPool* 
 		"warm_start,fixed captured qacc_warmstart restored before every call\n"
 		"integration,none during snapshot repetitions\n"
 		"detailed_phase_profiling,disabled during snapshot repetitions\n",
-		sourceStep, sourceTime, sourceStep - 1, repeats, threads, model->nv / 6,
+		sourceStep, sourceTime, sourceStep - 1, repeats, threads, int(model->nv / 6),
 		model->opt.timestep, model->opt.iterations, model->opt.tolerance,
 		model->opt.ls_tolerance, model->opt.ls_iterations, newton::Settings().lineTolerance,
 		model->opt.solver, model->opt.cone, model->opt.jacobian, model->opt.integrator,
@@ -111,11 +111,11 @@ static void benchmarkSnapshot(const mjModel* model, mjData* data, mjThreadPool* 
 			SnapshotResult& current = result[method];
 			// Both entry points reconstruct their acceleration and forces from these
 			// unchanged host equations. Restoring the seed is outside the timer.
-			mju_copy(data->qacc_warmstart, warmStart.data(), model->nv);
+			mju_copy(data->qacc_warmstart, warmStart.data(), int(model->nv));
 			newton::MujocoSolverProfile profile;
 			const newton::Clock::time_point start = newton::Clock::now();
 			if(method == 0)
-				current.iterations = newton::solveMujocoConstraints(model, data, pool, profile);
+				current.iterations = newton::solveMujocoConstraints(model, data, profile);
 			else
 				mj_fwdConstraint(model, data);
 			current.solveMs = newton::elapsed(start);
@@ -130,7 +130,7 @@ static void benchmarkSnapshot(const mjModel* model, mjData* data, mjThreadPool* 
 				std::memcmp(data->qpos, position.data(), sizeof(mjtNum) * model->nq) != 0 ||
 				std::memcmp(data->qvel, velocity.data(), sizeof(mjtNum) * model->nv) != 0 || data->time != sourceTime)
 				throw std::runtime_error("Snapshot solve changed the fixed state or warm start");
-			mju_copy(current.acceleration.data(), data->qacc, model->nv);
+			mju_copy(current.acceleration.data(), data->qacc, int(model->nv));
 			current.activeRows = 0;
 			for(int row = 0; row < data->nefc; ++row)
 			{
@@ -195,9 +195,7 @@ int main(int argc, const char* const* argv)
 	if(!model)
 		throw std::runtime_error(error);
 	mjData* data = mj_makeData(model);
-	mjThreadPool* pool = threads > 1 ? mju_threadPoolCreate(threads) : NULL;
-	if(pool)
-		mju_bindThreadPool(data, pool);
+	mju_threadpool(data, threads > 1 ? threads : 0);
 	mj_step1(model, data);
 	newton::validateMujocoModel(model, data, model->nv / 6);
 	const std::string prefix(argv[2]);
@@ -208,7 +206,7 @@ int main(int argc, const char* const* argv)
 		fprintf(audit, "step,prototype_iterations,native_iterations,max_linear_velocity_difference,max_angular_velocity_difference\n");
 	std::vector<mjtNum> rowAcceleration, savedAcceleration, savedForce;
 	printf("%s: %d boxes, %d workers, dt %.6g, cap %d, tolerance %.6g; full solve includes preparation and writeback\n",
-		prototype ? "Prototype" : "MuJoCo", model->nv / 6, threads, model->opt.timestep, model->opt.iterations, model->opt.tolerance);
+		prototype ? "Prototype" : "MuJoCo", int(model->nv / 6), threads, model->opt.timestep, model->opt.iterations, model->opt.tolerance);
 	for(int step = 0; step < steps; ++step)
 	{
 		const newton::Clock::time_point stepStart = newton::Clock::now();
@@ -219,7 +217,7 @@ int main(int argc, const char* const* argv)
 		if(snapshotRepeats > 0 && step + 1 == steps)
 		{
 			fflush(output);
-			benchmarkSnapshot(model, data, pool, prefix, step + 1, threads, snapshotRepeats);
+			benchmarkSnapshot(model, data, prefix, step + 1, threads, snapshotRepeats);
 			break;
 		}
 		newton::MujocoSolverProfile profile;
@@ -227,7 +225,7 @@ int main(int argc, const char* const* argv)
 		const newton::Clock::time_point solveStart = newton::Clock::now();
 		int iterations;
 		if(prototype)
-			iterations = newton::solveMujocoConstraints(model, data, pool, profile);
+			iterations = newton::solveMujocoConstraints(model, data, profile);
 		else
 		{
 			mj_fwdConstraint(model, data);
@@ -252,7 +250,7 @@ int main(int argc, const char* const* argv)
 					angular = std::max(angular, difference);
 			}
 			fprintf(audit, "%d,%d,%d,%.12g,%.12g\n", step + 1, iterations, nativeIterations(data), linear, angular);
-			mju_copy(data->qacc, savedAcceleration.data(), model->nv);
+			mju_copy(data->qacc, savedAcceleration.data(), int(model->nv));
 			mju_copy(data->efc_force, savedForce.data(), data->nefc);
 			mj_mulJacTVec(model, data, data->qfrc_constraint, data->efc_force);
 		}
@@ -267,7 +265,7 @@ int main(int argc, const char* const* argv)
 		// These diagnostics use the physical mass and unscaled host Jacobian.
 		for(int dof = 0; dof < model->nv; ++dof)
 		{
-			const double rootMass = std::sqrt(data->qM[model->dof_Madr[dof]]);
+			const double rootMass = std::sqrt(newton::mujocoMassDiagonal(model, data, dof));
 			const double residual = model->opt.timestep * (rootMass * (data->qacc[dof] - data->qacc_smooth[dof]) -
 				data->qfrc_constraint[dof] / rootMass);
 			if(!std::isfinite(residual))
@@ -299,7 +297,7 @@ int main(int argc, const char* const* argv)
 			speed = std::max(speed, std::sqrt(mju_dot3(data->qvel + body * 6, data->qvel + body * 6)));
 		}
 		fprintf(output, "%d,%.9g,%.9g,%.9g,%d,%d,%d,%d,%d,%d,%d,%.12g,%.12g,%.12g,%.12g,%.12g,%.12g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g\n",
-			step + 1, data->time, solveMs, stepMs, data->nisland, largestIsland / 6, (model->nv - activeDofs) / 6,
+			step + 1, data->time, solveMs, stepMs, data->nisland, largestIsland / 6, int((model->nv - activeDofs) / 6),
 			data->ncon, data->nefc, activeRows, iterations, stationarity, projectionError, penetration, speed,
 			minimumHeight, maximumHeight, profile.globalPreparationWallMs, profile.islandTasksWallMs,
 			profile.scatterWallMs, profile.preparationMs, profile.solveMs, profile.matrixMs, profile.factorMs,
@@ -313,8 +311,6 @@ int main(int argc, const char* const* argv)
 	fclose(output);
 	if(audit)
 		fclose(audit);
-	if(pool)
-		mju_threadPoolDestroy(pool);
 	mj_deleteData(data);
 	mj_deleteModel(model);
 	return 0;

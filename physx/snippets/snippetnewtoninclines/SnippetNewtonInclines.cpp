@@ -62,7 +62,8 @@ static void createRamp(PxU32 index)
 	ramp->setName("Ramp");
 	gScene->addActor(*ramp);
 
-	const PxTransform boxPose = rampPose * PxTransform(PxVec3(0.0f, 0.351f, 1.5f));
+	// Start in contact so the box has not acquired sliding velocity before static friction is solved.
+	const PxTransform boxPose = rampPose * PxTransform(PxVec3(0.0f, 0.35f, 1.5f));
 	PxRigidDynamic* box = PxCreateDynamic(*gPhysics, boxPose,
 		PxBoxGeometry(PxVec3(0.35f, 0.25f, 0.35f)), *gMaterial, 1.0f);
 	PxRigidBodyExt::setMassAndUpdateInertia(*box, 1.0f);

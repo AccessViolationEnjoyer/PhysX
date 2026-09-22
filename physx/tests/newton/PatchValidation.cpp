@@ -1,4 +1,4 @@
-#include "NewtonSolver.h"
+#include "EigenTest.h"
 #include <Eigen/Cholesky>
 #include <Eigen/LU>
 #include <cmath>
@@ -14,7 +14,7 @@ static void preparePatch(Problem& problem, int fixture, int bodies = 2, int norm
 	problem.massDiagonal.setZero(6 * bodies);
 	problem.massDiagonal.setOnes();
 	problem.clearContacts();
-	const double infinity = std::numeric_limits<double>::infinity();
+	const double maximumImpulse = MAX_IMPULSE;
 	for(int row = 0; row < normals + tangents; ++row)
 	{
 		CompactContact contact;
@@ -26,19 +26,19 @@ static void preparePatch(Problem& problem, int fixture, int bodies = 2, int norm
 			for(int axis = 0; axis < 6; ++axis)
 				contact.jacobian[end][axis] = contact.body[end] < 0 ? 0.0 :
 					0.35 * std::sin(0.39 * (1 + row * 11 + end * 19 + axis * 3 + fixture));
-		const double cap = fixture % 5 == 0 ? 0.0 : (fixture % 3 == 0 ? infinity : 0.07 + 0.03 * row);
-		problem.addScalarContact(contact, row < normals ? 0.0 : -infinity, row < normals ? cap : infinity);
+		const double cap = fixture % 5 == 0 ? 0.0 : (fixture % 3 == 0 ? maximumImpulse : 0.07 + 0.03 * row);
+		problem.addScalarContact(contact, row < normals ? 0.0 : -maximumImpulse, row < normals ? cap : maximumImpulse);
 	}
 	problem.addPatch(0, normals, tangents, fixture % 7 == 0 ? 0.0 : 0.5);
 }
 
 // Independently solve the four-variable dual QP by enumerating inequality
 // active sets. The reference contains no patch projection or Newton curvature.
-static bool referencePatch(const Problem& problem, Vector& best)
+static bool referencePatch(const Problem& problem, Eigen::VectorXd& best)
 {
-	const Eigen::MatrixXd jacobian = Eigen::MatrixXd(problem.jacobian);
+	const Eigen::MatrixXd jacobian = toEigen(problem.jacobian);
 	Eigen::MatrixXd quadratic = jacobian * jacobian.transpose();
-	quadratic.diagonal() += problem.regularization;
+	quadratic.diagonal() += toEigen(problem.regularization);
 	Eigen::Matrix<double, 8, 4> inequalities;
 	inequalities.setZero();
 	Eigen::Matrix<double, 8, 1> bounds;
@@ -48,8 +48,8 @@ static bool referencePatch(const Problem& problem, Vector& best)
 	{
 		inequalities(count++, row) = -1.0;
 		const CompactContact& contact = problem.contacts[row];
-		const double cap = contact.hasScalarBounds() ? problem.bounds(contact).upper : std::numeric_limits<double>::infinity();
-		if(std::isfinite(cap))
+		const double cap = contact.hasScalarBounds() ? problem.bounds(contact).upper : MAX_IMPULSE;
+		if(cap != MAX_IMPULSE)
 		{
 			inequalities(count, row) = 1.0;
 			bounds[count++] = cap;
@@ -61,7 +61,7 @@ static bool referencePatch(const Problem& problem, Vector& best)
 			inequalities(count, 0) = inequalities(count, 1) = -problem.patches[0].friction;
 			inequalities(count++, row) = double(sign);
 		}
-	double bestCost = std::numeric_limits<double>::infinity();
+	double bestCost = (std::numeric_limits<double>::max)();
 	for(int mask = 0; mask < (1 << count); ++mask)
 	{
 		int active[4], size = 0;
@@ -76,8 +76,8 @@ static bool referencePatch(const Problem& problem, Vector& best)
 			continue;
 		Eigen::MatrixXd matrix = Eigen::MatrixXd::Zero(4 + size, 4 + size);
 		matrix.topLeftCorner(4, 4) = quadratic;
-		Vector rhs(4 + size);
-		rhs.head(4) = -problem.freeVelocity;
+		Eigen::VectorXd rhs(4 + size);
+		rhs.head(4) = -toEigen(problem.freeVelocity);
 		for(int row = 0; row < size; ++row)
 		{
 			matrix.block(4 + row, 0, 1, 4) = inequalities.row(active[row]);
@@ -87,18 +87,18 @@ static bool referencePatch(const Problem& problem, Vector& best)
 		Eigen::FullPivLU<Eigen::MatrixXd> factor(matrix);
 		if(!factor.isInvertible())
 			continue;
-		const Vector candidate = factor.solve(rhs);
+		const Eigen::VectorXd candidate = factor.solve(rhs);
 		if((inequalities.topRows(count) * candidate.head(4) - bounds.head(count)).maxCoeff() > 1.0e-9 ||
 			(size && candidate.tail(size).minCoeff() < -1.0e-9))
 			continue;
-		const double cost = 0.5 * candidate.head(4).dot(quadratic * candidate.head(4)) + problem.freeVelocity.dot(candidate.head(4));
+		const double cost = 0.5 * candidate.head(4).dot(quadratic * candidate.head(4)) + toEigen(problem.freeVelocity).dot(candidate.head(4));
 		if(cost < bestCost)
 		{
 			bestCost = cost;
 			best = candidate.head(4);
 		}
 	}
-	return std::isfinite(bestCost);
+	return bestCost != (std::numeric_limits<double>::max)();
 }
 
 int main()
@@ -116,13 +116,13 @@ int main()
 		preparePatch(problem, fixture, fixture % 3 == 1 ? 1 : 2);
 		if(prepareProblem(problem) != SolveStatus::eSUCCESS)
 			return 1;
-		Vector reference;
+		Eigen::VectorXd reference;
 		if(!referencePatch(problem, reference) || solveNewton(problem, settings, result, workspace) != SolveStatus::eSUCCESS)
 		{
 			std::printf("PATCH_FAILED fixture=%d status=%d\n", fixture, int(result.status));
 			return 1;
 		}
-		const double difference = (reference - result.impulse).lpNorm<Eigen::Infinity>();
+		const double difference = (reference - toEigen(result.impulse)).lpNorm<Eigen::Infinity>();
 		maximumDifference = std::max(maximumDifference, difference);
 		maximumFactorError = std::max(maximumFactorError, result.factorError);
 		maximumResidual = std::max(maximumResidual, computeResidual(problem, result.impulse));
@@ -135,7 +135,7 @@ int main()
 		// Friction changes are an allowed phase update without reconstructing J.
 		problem.patches[0].friction *= 0.7;
 		if(!referencePatch(problem, reference) || solveNewton(problem, settings, result, workspace, &result) != SolveStatus::eSUCCESS ||
-			(reference - result.impulse).lpNorm<Eigen::Infinity>() > 1.0e-8)
+			(reference - toEigen(result.impulse)).lpNorm<Eigen::Infinity>() > 1.0e-8)
 			return 1;
 	}
 	// Larger/changing groups exercise the two-vector Hessian and sparse updates;

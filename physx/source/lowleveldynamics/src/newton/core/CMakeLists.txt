@@ -1,7 +1,6 @@
 # Private numerical core shared by native PhysX and standalone validation builds.
 # Dependencies and precise arithmetic options must not propagate to PGS/TGS.
-find_package(Python3 COMPONENTS Interpreter REQUIRED)
-set(NEWTON_EIGEN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../vendor/eigen")
+option(PX_NEWTON_USE_AVX2 "Use AVX2 and FMA in the Newton numerical core" OFF)
 set(NEWTON_GKLIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../vendor/gklib")
 set(NEWTON_METIS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../vendor/metis")
 set(NEWTON_GKLIB_SOURCES
@@ -45,20 +44,12 @@ set(NEWTON_METIS_SOURCES
 	${NEWTON_METIS_DIR}/libmetis/util.c
 	${NEWTON_METIS_DIR}/libmetis/wspace.c
 )
-set(NEWTON_STORAGE_KERNELS "${CMAKE_CURRENT_BINARY_DIR}/EigenStorageKernels.h")
-add_custom_command(OUTPUT "${NEWTON_STORAGE_KERNELS}"
-	COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/PrepareStorageKernels.py"
-		"${NEWTON_EIGEN_DIR}" "${NEWTON_STORAGE_KERNELS}"
-	DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/PrepareStorageKernels.py"
-		"${NEWTON_EIGEN_DIR}/Eigen/src/OrderingMethods/Amd.h"
-		"${NEWTON_EIGEN_DIR}/Eigen/src/SparseCholesky/SimplicialCholesky_impl.h"
-	VERBATIM)
 add_library(PhysXNewtonCore OBJECT
-	NewtonSolver.cpp NewtonSolver.h NewtonParallel.h NewtonStorage.h NewtonMetis.h BlockCholesky.h IncrementalCholesky.h
-	${NEWTON_GKLIB_SOURCES} ${NEWTON_METIS_SOURCES} "${NEWTON_STORAGE_KERNELS}")
-target_include_directories(PhysXNewtonCore PRIVATE "${CMAKE_CURRENT_BINARY_DIR}"
+	NewtonSolver.cpp NewtonSolver.h NewtonMath.h NewtonParallel.h NewtonStorage.h NewtonMetis.h
+	StorageCholesky.h BlockCholesky.h IncrementalCholesky.h
+	${NEWTON_GKLIB_SOURCES} ${NEWTON_METIS_SOURCES})
+target_include_directories(PhysXNewtonCore PRIVATE
 	"${NEWTON_GKLIB_DIR}/include" "${NEWTON_METIS_DIR}/include" "${NEWTON_METIS_DIR}/libmetis")
-target_include_directories(PhysXNewtonCore SYSTEM PRIVATE "${NEWTON_EIGEN_DIR}")
 set_source_files_properties(${NEWTON_GKLIB_SOURCES} PROPERTIES
 	COMPILE_DEFINITIONS "NDEBUG;NDEBUG2")
 set_source_files_properties(${NEWTON_METIS_SOURCES} PROPERTIES
@@ -70,13 +61,20 @@ if(MSVC)
 else()
 	set_source_files_properties(${NEWTON_GKLIB_SOURCES} ${NEWTON_METIS_SOURCES} PROPERTIES COMPILE_OPTIONS -w)
 endif()
-# Match Eigen inline definitions across the core and native adapter on all platforms.
-target_compile_definitions(PhysXNewtonCore PRIVATE EIGEN_DONT_PARALLELIZE $<$<NOT:$<CONFIG:debug>>:NDEBUG>)
+target_compile_definitions(PhysXNewtonCore PRIVATE $<$<NOT:$<CONFIG:debug>>:NDEBUG>)
 set_target_properties(PhysXNewtonCore PROPERTIES
 	CXX_STANDARD 14 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF
 	POSITION_INDEPENDENT_CODE ON)
 if(MSVC)
-	target_compile_options(PhysXNewtonCore PRIVATE /fp:precise /fp:contract $<$<COMPILE_LANGUAGE:CXX>:/EHsc>)
+	target_compile_options(PhysXNewtonCore PRIVATE /fp:precise /fp:contract $<$<COMPILE_LANGUAGE:CXX>:/EHs-c->)
 else()
-	target_compile_options(PhysXNewtonCore PRIVATE -fno-fast-math -ffp-contract=on $<$<COMPILE_LANGUAGE:CXX>:-fexceptions>)
+	target_compile_options(PhysXNewtonCore PRIVATE -fno-fast-math -ffp-contract=on $<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions>)
+endif()
+if(PX_NEWTON_USE_AVX2)
+	if(MSVC)
+		target_compile_options(PhysXNewtonCore PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/arch:AVX2>)
+	elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64|amd64|x86_64|i.86")
+		target_compile_options(PhysXNewtonCore PRIVATE
+			$<$<COMPILE_LANGUAGE:CXX>:-mavx2> $<$<COMPILE_LANGUAGE:CXX>:-mfma>)
+	endif()
 endif()

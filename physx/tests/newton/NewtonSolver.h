@@ -11,7 +11,7 @@ inline void solveNewton(const Problem& problem, const Settings& settings, Result
 	static thread_local Workspace workspace;
 	const SolveStatus::Enum status = solveNewton(problem, settings, result, workspace, previous);
 	if(status != SolveStatus::eSUCCESS && status != SolveStatus::eITERATION_LIMIT)
-		throw std::runtime_error("Newton solve failed");
+		throw std::runtime_error("Newton solve failed with status " + std::to_string(int(status)));
 }
 }
 #endif

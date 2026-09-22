@@ -1,4 +1,4 @@
-"""Compare Newton against MuJoCo 3.3.7 on identical pyramidal equations.
+"""Compare Newton against MuJoCo 3.13.0 on identical pyramidal equations.
 
 Frozen warm starts come from a preceding solve at 99% of the measured load.
 Collision detection, integration and fixture parsing are outside solve timings.
@@ -82,7 +82,7 @@ def make_problem(case, dimensions=None, mass_ratio=1.0, friction=.5, disturbance
         end = start + data.efc_J_rownnz[row]
         jacobian[row, data.efc_J_colind[start:end]] = data.efc_J[start:end]
     mass = np.zeros((model.nv, model.nv))
-    mj.mj_fullM(model, mass, data.qM)
+    mj.mj_fullM(model, data, mass)
     diagonal = mass.diagonal().copy()
     assert np.max(np.abs(mass-np.diag(diagonal))) == 0
     scaled_jacobian = jacobian / np.sqrt(diagonal)

@@ -4,7 +4,7 @@ namespace newton
 {
 class BlockCholesky : public StorageCholesky
 {
-	typedef Eigen::Matrix<double, 6, 6> Block;
+	typedef Mat6 Block;
 	enum
 	{
 		MIN_PARALLEL_FACTOR_UPDATES = 60000,
@@ -46,9 +46,8 @@ public:
 		}
 	}
 
-	void analyzePattern(const SparseStorage& ap, bool doLDLT)
+	void analyzePattern(const SparseStorage& ap)
 	{
-		(void)doLDLT;
 		const int bodies = int(ap.cols()) / 6;
 		m_parent.resize(bodies);
 		m_tags.resize(bodies);
@@ -67,11 +66,15 @@ public:
 			{
 				int i = int(entry.row()) / 6;
 				if(i >= k)
+				{
 					continue;
+				}
 				for(; m_tags[i] != k; i = m_parent[i])
 				{
 					if(m_parent[i] == -1)
+					{
 						m_parent[i] = k;
+					}
 					++m_counts[i];
 					m_tags[i] = k;
 				}
@@ -79,22 +82,26 @@ public:
 		}
 		m_blockOuter[0] = 0;
 		for(int k = 0; k < bodies; ++k)
+		{
 			m_blockOuter[k + 1] = m_blockOuter[k] + m_counts[k] + 1;
+		}
 		double scalarWork = 0.0, scalarEntries = 0.0;
 		for(int body = 0; body < bodies; ++body)
+		{
 			for(int axis = 0; axis < 6; ++axis)
 			{
 				const double count = 6 * (m_counts[body] + 1) - axis;
 				scalarEntries += count;
 				scalarWork += (count - 1.0) * (count + 2.0);
 			}
+		}
 		// Dense block kernels amortize their packing/export work on columns
 		// with substantial fill. Thin sparse factors use the established
 		// scalar path directly; the decision uses only symbolic work.
 		m_useBlocks = scalarWork >= 32.0 * scalarEntries;
 		if(!m_useBlocks)
 		{
-			StorageCholesky::analyzePattern(ap, false);
+			StorageCholesky::analyzePattern(ap);
 			return;
 		}
 		const int blocks = m_blockOuter[bodies];
@@ -102,8 +109,12 @@ public:
 		m_blockColumns.resize(blocks);
 		m_blocks.resize(blocks);
 		m_work.resize(bodies);
+		for(int body = 0; body < bodies; ++body)
+		{
+			m_work[body].setZero();
+		}
 		m_rowEntries.clear();
-		reserveStorage(m_rowEntries, size_t(blocks - bodies));
+		reserveStorage(m_rowEntries, std::uint32_t(blocks - bodies));
 		std::fill(m_tags.begin(), m_tags.end(), -1);
 		std::fill(m_counts.begin(), m_counts.end(), 0);
 		// Store each row's topological update order once. Numeric work then
@@ -120,7 +131,9 @@ public:
 			{
 				int i = int(entry.row()) / 6;
 				if(i >= k)
+				{
 					continue;
+				}
 				int length = 0;
 				for(; m_tags[i] != k; i = m_parent[i])
 				{
@@ -128,7 +141,9 @@ public:
 					m_tags[i] = k;
 				}
 				while(length)
+				{
 					m_pattern[--top] = m_pattern[--length];
+				}
 			}
 			for(int index = top; index < bodies; ++index)
 			{
@@ -146,19 +161,27 @@ public:
 		{
 			int level = 0;
 			for(int entry = m_rowOuter[body]; entry < m_rowOuter[body + 1]; ++entry)
+			{
 				level = std::max(level, m_solveLevels[m_blockColumns[m_rowEntries[entry]]] + 1);
+			}
 			m_solveLevels[body] = level;
 			levelCount = std::max(levelCount, level + 1);
 		}
 		m_solveLevelOuter.assign(levelCount + 1, 0);
 		for(int body = 0; body < bodies; ++body)
+		{
 			++m_solveLevelOuter[m_solveLevels[body] + 1];
+		}
 		for(int level = 0; level < levelCount; ++level)
+		{
 			m_solveLevelOuter[level + 1] += m_solveLevelOuter[level];
+		}
 		m_solveBodies.resize(bodies);
 		m_counts.assign(m_solveLevelOuter.begin(), m_solveLevelOuter.end() - 1);
 		for(int body = 0; body < bodies; ++body)
+		{
 			m_solveBodies[m_counts[m_solveLevels[body]]++] = body;
+		}
 		m_updateOuter.resize(bodies + 1);
 		m_updateOuter[0] = 0;
 		for(int body = 0; body < bodies; ++body)
@@ -180,17 +203,25 @@ public:
 				{
 					const int targetColumn = m_blockRows[first + column];
 					for(int row = column; row < count; ++row)
+					{
 						m_updateTargets[update++] = findBlock(targetColumn, m_blockRows[first + row]);
+					}
 				}
 			}
 			m_inputBlocks.resize(ap.nonZeros());
-			for(int column = 0; column < ap.outerSize(); ++column)
-				for(int entry = ap.outerIndexPtr()[column]; entry < ap.outerIndexPtr()[column + 1]; ++entry)
+			const int columnCount = ap.outerSize();
+			const int* inputOuter = ap.outerIndexPtr();
+			const int* inputInner = ap.innerIndexPtr();
+			for(int column = 0; column < columnCount; ++column)
+			{
+				const int end = inputOuter[column + 1];
+				for(int entry = inputOuter[column]; entry < end; ++entry)
 				{
-					const int blockColumn = ap.innerIndexPtr()[entry] / 6;
+					const int blockColumn = inputInner[entry] / 6;
 					const int blockRow = column / 6;
 					m_inputBlocks[entry] = blockColumn == blockRow ? m_blockOuter[blockRow] : findBlock(blockColumn, blockRow);
 				}
+			}
 		}
 		else
 		{
@@ -204,52 +235,66 @@ public:
 		m_matrix.resize(size, size);
 		int entries = 0;
 		for(int body = 0; body < bodies; ++body)
+		{
 			for(int axis = 0; axis < 6; ++axis)
 			{
 				m_matrix.outerIndexPtr()[6 * body + axis] = entries;
 				entries += 6 * (m_blockOuter[body + 1] - m_blockOuter[body]) - axis;
 			}
+		}
 		m_matrix.outerIndexPtr()[size] = entries;
 		m_matrix.resizeNonZeros(entries);
 		int* inner = m_matrix.innerIndexPtr();
 		for(int body = 0; body < bodies; ++body)
+		{
 			for(int axis = 0; axis < 6; ++axis)
 			{
 				int entry = m_matrix.outerIndexPtr()[6 * body + axis];
 				for(int row = axis; row < 6; ++row)
+				{
 					inner[entry++] = 6 * body + row;
+				}
 				for(int block = m_blockOuter[body] + 1; block < m_blockOuter[body + 1]; ++block)
+				{
 					for(int row = 0; row < 6; ++row)
+					{
 						inner[entry++] = 6 * m_blockRows[block] + row;
+					}
+				}
 			}
+		}
 	}
 
-	template<bool DoLDLT>
 	bool factorize(const SparseStorage& ap)
 	{
-		static_assert(!DoLDLT, "BlockCholesky implements LLT");
 		if(!m_useBlocks)
 		{
 			m_blocksCurrent = false;
 			m_scalarCurrent = true;
-			return StorageCholesky::factorize<false>(ap);
+			return StorageCholesky::factorize(ap);
 		}
 		if(m_parallelExecutor != NULL && !m_updateTargets.empty())
 		{
 			if(m_parallelWorkers == 0)
+			{
 				m_parallelWorkers = m_parallelExecutor->acquireWorkerCount();
+			}
 			if(m_parallelWorkers > 1)
+			{
 				return factorizeParallel(ap);
+			}
 		}
 		const int bodies = int(ap.cols()) / 6;
-		for(int body = 0; body < bodies; ++body)
-			m_work[body].setZero();
 		for(int k = 0; k < bodies; ++k)
 		{
 			// Scatter the upper input into the corresponding lower block row.
 			for(int axis = 0; axis < 6; ++axis)
+			{
 				for(Sparse::InnerIterator entry(ap, 6 * k + axis); entry; ++entry)
+				{
 					m_work[int(entry.row()) / 6](axis, int(entry.row()) % 6) = entry.value();
+				}
+			}
 			Block diagonal = m_work[k];
 			m_work[k].setZero();
 			for(int rowEntry = m_rowOuter[k]; rowEntry < m_rowOuter[k + 1]; ++rowEntry)
@@ -264,37 +309,36 @@ public:
 				for(int column = 0; column < 6; ++column)
 				{
 					for(int inner = 0; inner < column; ++inner)
-						value.col(column) -= lower(column, inner) * value.col(inner);
-					value.col(column) /= lower(column, column);
+					{
+						subtractScaled6(value.data() + 6 * column, value.data() + 6 * inner, lower(column, inner));
+					}
+					const double inverse = 1.0 / lower(column, column);
+					for(int row = 0; row < 6; ++row)
+					{
+						value(row, column) *= inverse;
+					}
 				}
 				for(int previous = m_blockOuter[i] + 1; previous < address; ++previous)
 				{
 					Block& work = m_work[m_blockRows[previous]];
 					const Block& factor = m_blocks[previous];
-					for(int column = 0; column < 6; ++column)
-					{
-						Vec6 accumulated = work.col(column);
-						for(int inner = 0; inner < 6; ++inner)
-							accumulated -= factor(column, inner) * value.col(inner);
-						work.col(column) = accumulated;
-					}
+					subtractProduct6(work.data(), value.data(), factor.data());
 				}
-				// Accumulate the small symmetric product directly; only the lower
-				// triangle is consumed by LLT.
-				for(int column = 0; column < 6; ++column)
-					for(int row = column; row < 6; ++row)
-					{
-						double product = 0.0;
-						for(int inner = 0; inner < 6; ++inner)
-							product += value(row, inner) * value(column, inner);
-						diagonal(row, column) -= product;
-					}
+				subtractLowerOuterProduct6(diagonal.data(), value.data());
 				m_blocks[address] = value;
 			}
-			Eigen::LLT<Block, Eigen::Lower> factor(diagonal);
-			if(factor.info() != Eigen::Success)
+			Block lower;
+			if(!cholesky6(diagonal, lower))
+			{
+				// Successful columns consume their work blocks. A failed pivot is
+				// the only path that leaves pending values for the next solve.
+				for(int body = 0; body < bodies; ++body)
+				{
+					m_work[body].setZero();
+				}
 				return scalarFallback(ap);
-			m_blocks[m_blockOuter[k]] = factor.matrixL();
+			}
+			m_blocks[m_blockOuter[k]] = lower;
 		}
 		m_blocksCurrent = true;
 		m_scalarCurrent = false;
@@ -320,50 +364,60 @@ private:
 
 	void solveForwardBody(double* solution, int body) const
 	{
-		Eigen::Map<Vec6> mapped(solution + 6 * body);
-		Vec6 current = mapped;
+		Vec6 current = loadVector<6>(solution + 6 * body);
 		for(int entry = m_rowOuter[body]; entry < m_rowOuter[body + 1]; ++entry)
 		{
 			const int block = m_rowEntries[entry];
-			const Eigen::Map<const Vec6> solved(solution + 6 * m_blockColumns[block]);
-			current.noalias() -= m_blocks[block] * solved;
+			const Vec6 solved = loadVector<6>(solution + 6 * m_blockColumns[block]);
+			subtractMatrixVector6(current.data(), m_blocks[block].data(), solved.data());
 		}
 		const Block& diagonal = m_blocks[m_blockOuter[body]];
 		for(int column = 0; column < 6; ++column)
 		{
 			current[column] /= diagonal(column, column);
 			for(int row = column + 1; row < 6; ++row)
+			{
 				current[row] -= diagonal(row, column) * current[column];
+			}
 		}
-		mapped = current;
+		storeVector<6>(solution + 6 * body, current);
 	}
 
 	void solveBackwardBody(double* solution, int body) const
 	{
-		Eigen::Map<Vec6> mapped(solution + 6 * body);
-		Vec6 current = mapped;
+		Vec6 current = loadVector<6>(solution + 6 * body);
 		for(int block = m_blockOuter[body] + 1; block < m_blockOuter[body + 1]; ++block)
 		{
-			const Eigen::Map<const Vec6> solved(solution + 6 * m_blockRows[block]);
-			current.noalias() -= m_blocks[block].transpose() * solved;
+			const Vec6 solved = loadVector<6>(solution + 6 * m_blockRows[block]);
+			const Block& factor = m_blocks[block];
+			for(int axis = 0; axis < 6; ++axis)
+			{
+				current[axis] -= dot6(factor.data() + 6 * axis, solved.data());
+			}
 		}
 		const Block& diagonal = m_blocks[m_blockOuter[body]];
 		for(int column = 5; column >= 0; --column)
 		{
 			for(int row = column + 1; row < 6; ++row)
+			{
 				current[column] -= diagonal(row, column) * current[row];
+			}
 			current[column] /= diagonal(column, column);
 		}
-		mapped = current;
+		storeVector<6>(solution + 6 * body, current);
 	}
 
 	void solveBlocksSerial(double* solution) const
 	{
 		const int bodies = int(m_blockOuter.size()) - 1;
 		for(int body = 0; body < bodies; ++body)
+		{
 			solveForwardBody(solution, body);
+		}
 		for(int body = bodies - 1; body >= 0; --body)
+		{
 			solveBackwardBody(solution, body);
+		}
 	}
 
 	static void solveForwardParallel(void* context, int index)
@@ -387,9 +441,13 @@ private:
 		{
 			const int middle = begin + (end - begin) / 2;
 			if(m_blockRows[middle] < row)
+			{
 				begin = middle + 1;
+			}
 			else
+			{
 				end = middle;
+			}
 		}
 		return begin;
 	}
@@ -403,13 +461,7 @@ private:
 			Block& target = m_blocks[m_updateTargets[update++]];
 			const Block& left = m_blocks[row];
 			const Block& right = m_blocks[column];
-			for(int axis = 0; axis < 6; ++axis)
-			{
-				Vec6 accumulated = target.col(axis);
-				for(int inner = 0; inner < 6; ++inner)
-					accumulated -= right(axis, inner) * left.col(inner);
-				target.col(axis) = accumulated;
-			}
+			subtractProduct6(target.data(), left.data(), right.data());
 		}
 	}
 
@@ -427,10 +479,16 @@ private:
 			int entry = m_matrix.outerIndexPtr()[6 * body + axis];
 			const Block& diagonal = m_blocks[m_blockOuter[body]];
 			for(int row = axis; row < 6; ++row)
+			{
 				values[entry++] = diagonal(row, axis);
+			}
 			for(int block = m_blockOuter[body] + 1; block < m_blockOuter[body + 1]; ++block)
+			{
 				for(int row = 0; row < 6; ++row)
+				{
 					values[entry++] = m_blocks[block](row, axis);
+				}
+			}
 		}
 	}
 
@@ -442,35 +500,52 @@ private:
 	void ensureScalarFactor()
 	{
 		if(m_scalarCurrent)
+		{
 			return;
+		}
 		const int bodies = int(m_blockOuter.size()) - 1;
 		if(m_parallelExecutor != NULL && m_parallelWorkers > 1)
 		{
 			m_parallelExecutor->parallelFor(bodies, exportBodyParallel, this);
 		}
 		else
+		{
 			for(int body = 0; body < bodies; ++body)
+			{
 				exportBody(body);
+			}
+		}
 		m_scalarCurrent = true;
 	}
 
 	bool factorizeParallel(const SparseStorage& ap)
 	{
 		const int bodies = int(ap.cols()) / 6;
-		for(size_t block = 0; block < m_blocks.size(); ++block)
+		const std::uint32_t blockCount = std::uint32_t(m_blocks.size());
+		for(std::uint32_t block = 0; block < blockCount; ++block)
+		{
 			m_blocks[block].setZero();
-		for(int column = 0; column < ap.outerSize(); ++column)
-			for(int entry = ap.outerIndexPtr()[column]; entry < ap.outerIndexPtr()[column + 1]; ++entry)
-				m_blocks[m_inputBlocks[entry]](column % 6, ap.innerIndexPtr()[entry] % 6) = ap.valuePtr()[entry];
+		}
+		const int columnCount = ap.outerSize();
+		const int* inputOuter = ap.outerIndexPtr();
+		const int* inputInner = ap.innerIndexPtr();
+		const double* inputValues = ap.valuePtr();
+		for(int column = 0; column < columnCount; ++column)
+		{
+			const int end = inputOuter[column + 1];
+			for(int entry = inputOuter[column]; entry < end; ++entry)
+			{
+				m_blocks[m_inputBlocks[entry]](column % 6, inputInner[entry] % 6) = inputValues[entry];
+			}
+		}
 		for(int body = 0; body < bodies; ++body)
 		{
-			Eigen::LLT<Block, Eigen::Lower> factor(m_blocks[m_blockOuter[body]]);
-			if(factor.info() != Eigen::Success)
+			Block lower;
+			if(!cholesky6(m_blocks[m_blockOuter[body]], lower))
 			{
 				m_parallelWorkers = 1;
 				return scalarFallback(ap);
 			}
-			const Block lower = factor.matrixL();
 			m_blocks[m_blockOuter[body]] = lower;
 			const int first = m_blockOuter[body] + 1;
 			const int end = m_blockOuter[body + 1];
@@ -480,8 +555,14 @@ private:
 				for(int column = 0; column < 6; ++column)
 				{
 					for(int inner = 0; inner < column; ++inner)
-						value.col(column) -= lower(column, inner) * value.col(inner);
-					value.col(column) /= lower(column, column);
+					{
+						subtractScaled6(value.data() + 6 * column, value.data() + 6 * inner, lower(column, inner));
+					}
+					const double inverse = 1.0 / lower(column, column);
+					for(int row = 0; row < 6; ++row)
+					{
+						value(row, column) *= inverse;
+					}
 				}
 				m_blocks[address] = value;
 			}
@@ -497,8 +578,12 @@ private:
 				m_parallelExecutor->parallelFor(count, updateTrailingColumnParallel, &update);
 			}
 			else
+			{
 				for(int column = 0; column < count; ++column)
+				{
 					updateTrailingColumn(body, first, end, count, column);
+				}
+			}
 		}
 		m_blocksCurrent = true;
 		m_scalarCurrent = false;
@@ -509,10 +594,10 @@ private:
 	{
 		// The established scalar LLT remains available if different rounding
 		// of dense block arithmetic encounters a nonpositive pivot.
-		StorageCholesky::analyzePattern(ap, false);
+		StorageCholesky::analyzePattern(ap);
 		m_blocksCurrent = false;
 		m_scalarCurrent = true;
-		return StorageCholesky::factorize<false>(ap);
+		return StorageCholesky::factorize(ap);
 	}
 
 	bool m_useBlocks = false;

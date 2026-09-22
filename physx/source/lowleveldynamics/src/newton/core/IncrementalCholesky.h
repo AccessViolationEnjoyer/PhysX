@@ -1,9 +1,15 @@
 #include "NewtonMetis.h"
+typedef std::pair<int, int> BodyPair;
 
 // Internal factor implementation. Included by NewtonSolver.cpp.
-// Signed rank updates operate directly on the retained Eigen-format factor.
+// Signed rank updates operate directly on the retained CSC factor.
 class IncrementalCholesky
 {
+	enum
+	{
+		MIN_METIS_BODIES = 192
+	};
+
 	struct RankUpdate
 	{
 		int contact;
@@ -26,14 +32,16 @@ public:
 		// Ordinary solves rebuild numerics. Explicit same-prepared-problem
 		// continuation compares fresh curvature against this factor's m_weights.
 		if(!continuation)
+		{
 			m_size = 0;
+		}
 		m_profile = profile;
 		m_factor.setParallelExecutor(parallelExecutor);
 	}
 
 	bool factor(const Problem& problem, const Curvature& weights, Result& result)
 	{
-		reserveStorage(m_updates, size_t(problem.rowCount()));
+		reserveStorage(m_updates, std::uint32_t(problem.rowCount()));
 		if(m_size == 0)
 		{
 			return refactor(problem, weights, result);
@@ -48,50 +56,66 @@ public:
 		const Clock::time_point start = profileStart(m_profile);
 		m_updates.clear();
 		m_patchUpdates.clear();
-		reserveStorage(m_patchUpdates, 4 * problem.patches.size());
-		for(int row = 0; row < weights.diagonal.size(); ++row)
+		reserveStorage(m_patchUpdates, 4u * std::uint32_t(problem.patches.size()));
+		const int diagonalCount = weights.diagonal.size();
+		for(int row = 0; row < diagonalCount; ++row)
 		{
 			const double change = weights.diagonal[row] - m_weights.diagonal[row];
 			if(change == 0.0)
+			{
 				continue;
-			RankUpdate update;
+			}
+			m_updates.emplace_back();
+			RankUpdate& update = m_updates.back();
 			update.contact = problem.rowContact[row];
 			const CompactContact& contact = problem.contacts[update.contact];
 			const int axis = contact.rowCount() == 1 ? 2 : row - contact.row;
 			update.axis = Vec3::Unit(axis) * std::sqrt(std::abs(change));
 			update.add = change > 0.0;
-			m_updates.push_back(update);
 		}
-		for(int block = 0; block < int(weights.coupled.size()); ++block)
+		const int coupledCount = int(weights.coupled.size());
+		for(int block = 0; block < coupledCount; ++block)
 		{
-			if((weights.coupled[block].array() == m_weights.coupled[block].array()).all())
+			if(weights.coupled[block].equals(m_weights.coupled[block]))
+			{
 				continue;
+			}
 			const Mat3 change = weights.coupled[block] - m_weights.coupled[block];
-			Eigen::SelfAdjointEigenSolver<Mat3> eigen(change);
-			const double largest = eigen.eigenvalues().cwiseAbs().maxCoeff();
+			Vec3 eigenvalues;
+			Mat3 eigenvectors;
+			symmetricEigen(change, eigenvalues, eigenvectors);
+			const double largest = eigenvalues.cwiseAbs().maxCoeff();
 			for(int axis = 0; axis < 3; ++axis)
 			{
-				const double value = eigen.eigenvalues()[axis];
+				const double value = eigenvalues[axis];
 				// Discard only numerical zero relative to this Hessian change.
 				if(std::abs(value) <= 1.0e-12 * largest)
+				{
 					continue;
-				RankUpdate update;
+				}
+				m_updates.emplace_back();
+				RankUpdate& update = m_updates.back();
 				update.contact = problem.coupledContacts[block];
-				update.axis = std::sqrt(std::abs(value)) * eigen.eigenvectors().col(axis);
+				for(int row = 0; row < 3; ++row)
+				{
+					update.axis[row] = std::sqrt(std::abs(value)) * eigenvectors(row, axis);
+				}
 				update.add = value > 0.0;
-				m_updates.push_back(update);
 			}
 		}
 
-		for(size_t i = 0; i < weights.patches.size(); ++i)
+		const std::uint32_t patchCount = std::uint32_t(weights.patches.size());
+		for(std::uint32_t i = 0; i < patchCount; ++i)
 		{
 			const PatchCurvature& current = weights.patches[i];
 			const PatchCurvature& previous = m_weights.patches[i];
 			bool changed = current.normalCoefficient != previous.normalCoefficient ||
 				current.crossCoefficient != previous.crossCoefficient || current.tangentCoefficient != previous.tangentCoefficient;
 			for(int end = 0; end < 2; ++end)
-				changed = changed || (current.normal[end].array() != previous.normal[end].array()).any() ||
-					(current.tangent[end].array() != previous.tangent[end].array()).any();
+			{
+				changed = changed || !current.normal[end].equals(previous.normal[end]) ||
+						  !current.tangent[end].equals(previous.tangent[end]);
+			}
 			if(changed && (!appendPatchUpdates(current, problem.patches[i].firstContact, 1.0) ||
 				!appendPatchUpdates(previous, problem.patches[i].firstContact, -1.0)))
 			{
@@ -109,32 +133,47 @@ public:
 		double refactorWork = m_refactorWork;
 		const int parallelWorkers = m_factor.parallelWorkerCount();
 		if(parallelWorkers > 1)
+		{
 			refactorWork -= m_factorWork * double(parallelWorkers - 1) / parallelWorkers;
+		}
 		double updateWork = 0.0;
 		for(const RankUpdate& update : m_updates)
 		{
 			const CompactContact& contact = problem.contacts[update.contact];
 			int first = m_size;
 			for(int end = 0; end < 2; ++end)
+			{
 				if(contact.body[end] >= 0)
+				{
 					first = std::min(first, m_permutation[6 * contact.body[end]]);
+				}
+			}
 			if(first < m_size)
+			{
 				updateWork += m_reachWork[first];
+			}
 			if(updateWork > refactorWork)
 			{
 				result.updateMs += profileElapsed(m_profile, start);
 				return refactor(problem, weights, result);
 			}
 		}
-		for(size_t i = 0; i < m_patchUpdates.size(); ++i)
+		const std::uint32_t patchUpdateCount = std::uint32_t(m_patchUpdates.size());
+		for(std::uint32_t i = 0; i < patchUpdateCount; ++i)
 		{
 			const CompactContact& contact = problem.contacts[m_patchUpdates[i].contact];
 			int first = m_size;
 			for(int end = 0; end < 2; ++end)
+			{
 				if(contact.body[end] >= 0)
+				{
 					first = std::min(first, m_permutation[6 * contact.body[end]]);
+				}
+			}
 			if(first < m_size)
+			{
 				updateWork += m_reachWork[first];
+			}
 			if(updateWork > refactorWork)
 			{
 				result.updateMs += profileElapsed(m_profile, start);
@@ -142,18 +181,25 @@ public:
 			}
 		}
 		if(m_updates.empty() && m_patchUpdates.empty())
+		{
 			++result.reusedFactors;
+		}
 		else
+		{
 			m_factor.beginScalarUpdates();
+		}
 		// Add positive changes before downdates. Every intermediate matrix
 		// then remains positive definite whenever the target Hessian is SPD.
 		for(int pass = 0; pass < 2; ++pass)
 		{
-			for(size_t i = 0; i < m_updates.size(); ++i)
+			const std::uint32_t updateCount = std::uint32_t(m_updates.size());
+			for(std::uint32_t i = 0; i < updateCount; ++i)
 			{
 				const RankUpdate& update = m_updates[i];
 				if(update.add != (pass == 0))
+				{
 					continue;
+				}
 				const CompactContact& contact = problem.contacts[update.contact];
 				const bool fullRank = updateSparse(problem, contact, update.axis, update.add);
 				++result.rankUpdates;
@@ -165,11 +211,13 @@ public:
 				}
 
 			}
-			for(size_t i = 0; i < m_patchUpdates.size(); ++i)
+			for(std::uint32_t i = 0; i < patchUpdateCount; ++i)
 			{
 				const PatchUpdate& update = m_patchUpdates[i];
 				if(update.add != (pass == 0))
+				{
 					continue;
+				}
 				const bool fullRank = updatePair(problem.contacts[update.contact].body, update.vector, update.add);
 				++result.rankUpdates;
 				if(!fullRank)
@@ -189,43 +237,55 @@ public:
 	{
 		// Solve H * direction = -gradient directly into the caller's buffer.
 		m_solution.resize(m_size);
-		MutableVector solution = Eigen::Map<Vector>(m_solution.data(), m_size);
+		std::vector<double>& solution = m_solution;
 		for(int row = 0; row < m_size; ++row)
+		{
 			solution[m_permutation[row]] = -gradient[row];
+		}
 		if(m_factor.hasCurrentBlocks())
+		{
 			m_factor.solveBlocks(solution.data());
+		}
 		else
 		{
 			solveForwardBlocks(solution.data());
 			solveBackwardPackets(solution.data());
 		}
 		for(int row = 0; row < m_size; ++row)
+		{
 			direction[row] = solution[m_permutation[row]];
+		}
 	}
 
 private:
 
 	bool appendPatchUpdates(const PatchCurvature& patch, int contact, double sign)
 	{
-		Eigen::Matrix2d coefficients;
-		coefficients << patch.normalCoefficient, patch.crossCoefficient,
-			patch.crossCoefficient, patch.tangentCoefficient;
-		Eigen::SelfAdjointEigenSolver<Eigen::Matrix2d> eigen(coefficients);
-		if(eigen.info() != Eigen::Success || !eigen.eigenvalues().allFinite())
-			return false;
+		Matrix<2, 2> coefficients;
+		coefficients(0, 0) = patch.normalCoefficient;
+		coefficients(1, 0) = patch.crossCoefficient;
+		coefficients(0, 1) = patch.crossCoefficient;
+		coefficients(1, 1) = patch.tangentCoefficient;
+		Vec2 eigenvalues;
+		Matrix<2, 2> eigenvectors;
+		symmetricEigen(coefficients, eigenvalues, eigenvectors);
 		for(int axis = 0; axis < 2; ++axis)
 		{
-			const double value = sign * eigen.eigenvalues()[axis];
+			const double value = sign * eigenvalues[axis];
 			if(value == 0.0)
+			{
 				continue;
-			PatchUpdate update;
+			}
+			m_patchUpdates.emplace_back();
+			PatchUpdate& update = m_patchUpdates.back();
 			update.contact = contact;
 			update.add = value > 0.0;
 			const double scale = std::sqrt(std::abs(value));
 			for(int end = 0; end < 2; ++end)
-				update.vector[end] = scale * (eigen.eigenvectors()(0, axis) * patch.normal[end] +
-					eigen.eigenvectors()(1, axis) * patch.tangent[end]);
-			m_patchUpdates.push_back(update);
+			{
+				update.vector[end] = scale * (eigenvectors(0, axis) * patch.normal[end] +
+											  eigenvectors(1, axis) * patch.tangent[end]);
+			}
 		}
 		return true;
 	}
@@ -243,32 +303,38 @@ private:
 		// order, matching the established forward substitution arithmetic.
 		for(int first = 0; first < m_size; first += 6)
 		{
-			Vec6 current = Eigen::Map<const Vec6>(solution + first);
+			Vec6 current = loadVector<6>(solution + first);
 			for(int axis = 0; axis < 6; ++axis)
 			{
 				if(current[axis] == 0.0)
+				{
 					continue;
+				}
 				const int begin = outer[first + axis];
 				current[axis] /= values[begin];
 				for(int row = axis + 1; row < 6; ++row)
+				{
 					current[row] -= current[axis] * values[begin + row - axis];
+				}
 			}
-			Eigen::Map<Vec6>(solution + first) = current;
+			storeVector<6>(solution + first, current);
 			const int offBegin = outer[first] + 6;
 			const int offEnd = outer[first + 1];
 			for(int entry = offBegin; entry < offEnd; entry += 6)
 			{
 				const int offset = entry - offBegin;
-				Eigen::Map<Vec6> destination(solution + inner[entry]);
-				Vec6 accumulated = destination;
+				double* destination = solution + inner[entry];
 				for(int axis = 0; axis < 6; ++axis)
+				{
 					if(current[axis] != 0.0)
 					{
 						const int address = outer[first + axis] + 6 - axis + offset;
-						const Eigen::Map<const Vec6> coefficients(values + address);
-						accumulated.noalias() -= current[axis] * coefficients;
+						for(int row = 0; row < 6; ++row)
+						{
+							destination[row] -= current[axis] * values[address + row];
+						}
 					}
-				destination = accumulated;
+				}
 			}
 		}
 	}
@@ -286,16 +352,14 @@ private:
 			int entry = begin + 1;
 			const int offBegin = begin + 6 - column % 6;
 			for(; entry < offBegin; ++entry)
+			{
 				current -= values[entry] * solution[inner[entry]];
+			}
 			for(; entry < end; entry += 6)
 			{
-				// Evaluate independent products in packets, then retain the same
-				// left-to-right subtraction order instead of regrouping a dot sum.
-				const Eigen::Map<const Vec6> coefficients(values + entry);
-				const Eigen::Map<const Vec6> solved(solution + inner[entry]);
-				const Vec6 products = coefficients.cwiseProduct(solved);
-				for(int axis = 0; axis < 6; ++axis)
-					current -= products[axis];
+				// Evaluate independent products in packets, then retain their
+				// left-to-right subtraction order.
+				current = subtractDot6(current, values + entry, solution + inner[entry]);
 			}
 			solution[column] = current / values[begin];
 		}
@@ -313,8 +377,8 @@ private:
 		if(m_size == 0)
 		{
 			const Clock::time_point symbolicStart = profileStart(m_profile);
-			const bool samePattern = m_outer.size() == size_t(matrix.outerSize() + 1) &&
-				m_inner.size() == size_t(matrix.nonZeros()) &&
+			const bool samePattern = m_outer.size() == std::uint32_t(matrix.outerSize() + 1) &&
+				m_inner.size() == std::uint32_t(matrix.nonZeros()) &&
 				std::equal(m_outer.begin(), m_outer.end(), matrix.outerIndexPtr()) &&
 				std::equal(m_inner.begin(), m_inner.end(), matrix.innerIndexPtr());
 			if(!samePattern)
@@ -324,16 +388,21 @@ private:
 				m_outer.assign(matrix.outerIndexPtr(), matrix.outerIndexPtr() + matrix.outerSize() + 1);
 				m_inner.assign(matrix.innerIndexPtr(), matrix.innerIndexPtr() + matrix.nonZeros());
 				preparePermutation(matrix);
-				m_factor.analyzePattern(m_permuted, false);
+				m_factor.analyzePattern(m_permuted);
 				++result.symbolicAnalyses;
 			}
 			result.symbolicMs += profileElapsed(m_profile, symbolicStart);
 		}
 		m_size = int(matrix.rows());
-		for(int entry = 0; entry < matrix.nonZeros(); ++entry)
+		const int nonzeroCount = matrix.nonZeros();
+		for(int entry = 0; entry < nonzeroCount; ++entry)
+		{
 			m_permuted.valuePtr()[entry] = matrix.valuePtr()[m_permutedSourceIndices[entry]];
-		if(!m_factor.factorize<false>(m_permuted))
+		}
+		if(!m_factor.factorize(m_permuted))
+		{
 			return false;
+		}
 		if(firstFactor)
 		{
 			// Numeric-factor work is proportional to squared column lengths;
@@ -358,6 +427,7 @@ private:
 			// Counting potential entries conservatively includes inactive rows.
 			// Fixed bilateral curvature never invokes the update/refactor choice.
 			if(problem.equalityRows != problem.rowCount())
+			{
 				for(const CompactContact& contact : problem.contacts)
 				{
 					const int first = contact.rowCount() == 1 ? 2 : 0;
@@ -365,12 +435,19 @@ private:
 					{
 						int count = 0;
 						for(int end = 0; end < 2; ++end)
+						{
 							if(contact.body[end] >= 0)
+							{
 								for(int component = 0; component < 6; ++component)
+								{
 									count += problem.contactEntry(contact, end, axis, component) != 0.0;
+								}
+							}
+						}
 						m_refactorWork += double(count) * (count + 3) * (contact.block > 0 ? 3.0 : 1.0);
 					}
 				}
+			}
 		}
 		++result.factorizations;
 		result.factorMs += profileElapsed(m_profile, factorStart);
@@ -390,45 +467,117 @@ private:
 				const int row = int(entry.row()) / 6;
 				if(row != body && row != previous)
 				{
-					m_bodyEdges.push_back(BodyPair(body, row));
-					m_bodyEdges.push_back(BodyPair(row, body));
+					m_bodyEdges.emplace_back(body, row);
+					m_bodyEdges.emplace_back(row, body);
 				}
 				previous = row;
 			}
 		}
 		std::sort(m_bodyEdges.begin(), m_bodyEdges.end());
-		m_metisOuter.resize(bodies + 1);
-		m_metisInner.resize(m_bodyEdges.size());
-		int edge = 0;
-		for(int body = 0; body < bodies; ++body)
-		{
-			m_metisOuter[body] = idx_t(edge);
-			while(edge < int(m_bodyEdges.size()) && m_bodyEdges[edge].first == body)
-			{
-				m_metisInner[edge] = idx_t(m_bodyEdges[edge].second);
-				++edge;
-			}
-		}
-		m_metisOuter[bodies] = idx_t(edge);
 		m_bodyOrder.resize(bodies);
-		m_metisInverse.resize(bodies);
-		if(bodies > 1)
+		// Retained exact minimum-degree storage avoids METIS setup and heap traffic
+		// on small changing islands. METIS pays for itself on larger graphs.
+		if(bodies < MIN_METIS_BODIES)
 		{
+			orderSmallGraph(bodies);
+		}
+		else
+		{
+			m_metisOuter.resize(bodies + 1);
+			const std::uint32_t edgeCount = std::uint32_t(m_bodyEdges.size());
+			m_metisInner.resize(edgeCount);
+			int edge = 0;
+			for(int body = 0; body < bodies; ++body)
+			{
+				m_metisOuter[body] = idx_t(edge);
+				while(edge < int(edgeCount) && m_bodyEdges[edge].first == body)
+				{
+					m_metisInner[edge] = idx_t(m_bodyEdges[edge].second);
+					++edge;
+				}
+			}
+			m_metisOuter[bodies] = idx_t(edge);
+			m_metisInverse.resize(bodies);
 			idx_t count = idx_t(bodies);
 			idx_t options[METIS_NOPTIONS];
 			Newton_METIS_SetDefaultOptions(options);
 			const int result = Newton_METIS_NodeND(&count, m_metisOuter.data(), m_metisInner.data(), NULL,
 				options, m_bodyOrder.data(), m_metisInverse.data());
 			if(result != METIS_OK)
+			{
 				for(int body = 0; body < bodies; ++body)
+				{
 					m_bodyOrder[body] = body;
+				}
+			}
 		}
-		else if(bodies == 1)
-			m_bodyOrder[0] = 0;
 		m_permutation.resize(matrix.cols());
 		for(int body = 0; body < bodies; ++body)
+		{
 			for(int axis = 0; axis < 6; ++axis)
+			{
 				m_permutation[6 * m_bodyOrder[body] + axis] = 6 * body + axis;
+			}
+		}
+	}
+
+	void orderSmallGraph(int bodies)
+	{
+		const int words = (bodies + 63) / 64;
+		m_smallAdjacency.assign(std::uint32_t(bodies) * std::uint32_t(words), 0);
+		m_smallEliminated.assign(bodies, 0);
+		const std::uint32_t edgeCount = std::uint32_t(m_bodyEdges.size());
+		for(std::uint32_t edge = 0; edge < edgeCount; ++edge)
+		{
+			const BodyPair& pair = m_bodyEdges[edge];
+			m_smallAdjacency[std::uint32_t(pair.first) * std::uint32_t(words) + std::uint32_t(pair.second / 64)] |=
+				std::uint64_t(1) << (pair.second % 64);
+		}
+		for(int position = 0; position < bodies; ++position)
+		{
+			int selected = -1, minimumDegree = bodies;
+			for(int body = 0; body < bodies; ++body)
+			{
+				if(m_smallEliminated[body])
+				{
+					continue;
+				}
+				int degree = 0;
+				for(int word = 0; word < words; ++word)
+				{
+					std::uint64_t bits = m_smallAdjacency[std::uint32_t(body) * std::uint32_t(words) + std::uint32_t(word)];
+					while(bits)
+					{
+						bits &= bits - 1;
+						++degree;
+					}
+				}
+				if(degree < minimumDegree)
+				{
+					selected = body;
+					minimumDegree = degree;
+				}
+			}
+			m_bodyOrder[position] = selected;
+			m_smallEliminated[selected] = 1;
+			for(int body = 0; body < bodies; ++body)
+			{
+				if(m_smallEliminated[body] ||
+				   !(m_smallAdjacency[std::uint32_t(selected) * std::uint32_t(words) + std::uint32_t(body / 64)] &
+					 (std::uint64_t(1) << (body % 64))))
+				{
+					continue;
+				}
+				std::uint64_t* adjacency = m_smallAdjacency.data() + std::uint32_t(body) * std::uint32_t(words);
+				const std::uint64_t* fill = m_smallAdjacency.data() + std::uint32_t(selected) * std::uint32_t(words);
+				for(int word = 0; word < words; ++word)
+				{
+					adjacency[word] |= fill[word];
+				}
+				adjacency[selected / 64] &= ~(std::uint64_t(1) << (selected % 64));
+				adjacency[body / 64] &= ~(std::uint64_t(1) << (body % 64));
+			}
+		}
 	}
 
 	void preparePermutation(const Sparse& matrix)
@@ -439,13 +588,21 @@ private:
 		const int size = int(matrix.cols());
 		m_permutationRowOffsets.resize(size + 1);
 		m_permutationCursors.assign(size, 0);
-		reserveStorage(m_permutedEntries, size_t(matrix.nonZeros()));
-		m_permutedEntries.resize(matrix.nonZeros());
-		reserveStorage(m_permutedSourceIndices, size_t(matrix.nonZeros()));
-		m_permutedSourceIndices.resize(matrix.nonZeros());
+		const int* matrixOuter = matrix.outerIndexPtr();
+		const int* matrixInner = matrix.innerIndexPtr();
+		const int nonzeroCount = matrix.nonZeros();
+		reserveStorage(m_permutedEntries, std::uint32_t(nonzeroCount));
+		m_permutedEntries.resize(nonzeroCount);
+		reserveStorage(m_permutedSourceIndices, std::uint32_t(nonzeroCount));
+		m_permutedSourceIndices.resize(nonzeroCount);
 		for(int column = 0; column < size; ++column)
-			for(int entry = matrix.outerIndexPtr()[column]; entry < matrix.outerIndexPtr()[column + 1]; ++entry)
-				++m_permutationCursors[std::min(m_permutation[column], m_permutation[matrix.innerIndexPtr()[entry]])];
+		{
+			const int end = matrixOuter[column + 1];
+			for(int entry = matrixOuter[column]; entry < end; ++entry)
+			{
+				++m_permutationCursors[std::min(m_permutation[column], m_permutation[matrixInner[entry]])];
+			}
+		}
 		int offset = 0;
 		for(int row = 0; row < size; ++row)
 		{
@@ -456,18 +613,24 @@ private:
 		}
 		m_permutationRowOffsets[size] = offset;
 		for(int column = 0; column < size; ++column)
-			for(int entry = matrix.outerIndexPtr()[column]; entry < matrix.outerIndexPtr()[column + 1]; ++entry)
+		{
+			const int end = matrixOuter[column + 1];
+			for(int entry = matrixOuter[column]; entry < end; ++entry)
 			{
 				const int a = m_permutation[column];
-				const int b = m_permutation[matrix.innerIndexPtr()[entry]];
+				const int b = m_permutation[matrixInner[entry]];
 				PermutedEntry& mapped = m_permutedEntries[m_permutationCursors[std::min(a, b)]++];
 				mapped.column = std::max(a, b);
 				mapped.sourceIndex = entry;
 			}
+		}
 		// Reuse the scatter cursors for columns after the row buckets are filled.
 		std::fill(m_permutationCursors.begin(), m_permutationCursors.end(), 0);
-		for(size_t entry = 0; entry < m_permutedEntries.size(); ++entry)
+		const std::uint32_t entryCount = std::uint32_t(m_permutedEntries.size());
+		for(std::uint32_t entry = 0; entry < entryCount; ++entry)
+		{
 			++m_permutationCursors[m_permutedEntries[entry].column];
+		}
 		m_permuted.resize(size, size);
 		m_permuted.resizeNonZeros(matrix.nonZeros());
 		offset = 0;
@@ -480,6 +643,7 @@ private:
 		}
 		m_permuted.outerIndexPtr()[size] = offset;
 		for(int row = 0; row < size; ++row)
+		{
 			for(int entry = m_permutationRowOffsets[row]; entry < m_permutationRowOffsets[row + 1]; ++entry)
 			{
 				const PermutedEntry& mapped = m_permutedEntries[entry];
@@ -487,19 +651,26 @@ private:
 				m_permuted.innerIndexPtr()[destination] = row;
 				m_permutedSourceIndices[destination] = mapped.sourceIndex;
 			}
+		}
 	}
 
 	bool updateSparse(const Problem& problem, const CompactContact& contact, const Vec3& axis, bool add)
 	{
 		Vec6 vector[2];
 		for(int end = 0; end < 2; ++end)
+		{
 			if(contact.body[end] >= 0)
 			{
 				if(contact.rowCount() == 3)
+				{
 					vector[end] = problem.contactJacobian(contact, end).transpose() * axis;
+				}
 				else
+				{
 					vector[end] = contact.jacobian[end] * axis[2];
+				}
 			}
+		}
 		return updatePair(contact.body, vector, add);
 	}
 
@@ -517,17 +688,21 @@ private:
 		std::fill(m_vector.begin(), m_vector.end(), 0.0);
 		int first = m_size;
 		for(int end = 0; end < 2; ++end)
+		{
 			if(body[end] >= 0)
 			{
 				const Vec6& row = vector[end];
 				for(int component = 0; component < 6; ++component)
+				{
 					if(row[component] != 0.0)
 					{
 						const int column = m_permutation[6 * body[end] + component];
 						m_vector[column] = row[component];
 						first = std::min(first, column);
 					}
+				}
 			}
+		}
 		Sparse& lower = m_factor.m_matrix;
 		const int* outer = lower.outerIndexPtr();
 		const int* inner = lower.innerIndexPtr();
@@ -541,13 +716,18 @@ private:
 			{
 				const double diagonal = values[begin];
 				const double square = diagonal * diagonal + (add ? x * x : -x * x);
-				// Reject lost rank and nonfinite arithmetic; the caller immediately
-				// rebuilds the target Hessian with the full factorization path.
-				if(!(square >= minimumPivotSquare) || !std::isfinite(square))
+				// A nonpositive or undersized pivot requires a full refactorization.
+				if(!(square >= minimumPivotSquare))
+				{
 					return false;
+				}
 				const double r = std::sqrt(square);
-				const double c = r / diagonal, s = x / diagonal;
-				const double inverseC = 1.0 / c, signedSC = (add ? s : -s) / c;
+				const double inverseDiagonal = 1.0 / diagonal;
+				const double inverseR = 1.0 / r;
+				const double c = r * inverseDiagonal;
+				const double s = x * inverseDiagonal;
+				const double inverseC = diagonal * inverseR;
+				const double signedSC = (add ? x : -x) * inverseR;
 				values[begin] = r;
 				// Full body blocks make six consecutive factor entries address six
 				// consecutive work values. Expose those packets without gathers.
@@ -562,10 +742,9 @@ private:
 				}
 				for(; entry < end; entry += 6)
 				{
-					Eigen::Map<Eigen::Array<double, 6, 1>> factor(values + entry);
-					Eigen::Map<Eigen::Array<double, 6, 1>> work(m_vector.data() + inner[entry]);
-					factor = inverseC * factor + signedSC * work;
-					work = c * work - s * factor;
+					double* factor = values + entry;
+					double* work = m_vector.data() + inner[entry];
+					updateCholesky6(factor, work, inverseC, signedSC, c, s);
 				}
 				m_vector[column] = 0.0;
 			}
@@ -580,6 +759,8 @@ private:
 	std::vector<BodyPair> m_bodyEdges;
 	std::vector<int> m_bodyOrder, m_permutation;
 	std::vector<idx_t> m_metisOuter, m_metisInner, m_metisInverse;
+	std::vector<uint64_t> m_smallAdjacency;
+	std::vector<unsigned char> m_smallEliminated;
 	HessianStorage m_hessian;
 	SparseStorage m_permuted;
 	struct PermutedEntry

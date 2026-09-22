@@ -14,9 +14,8 @@ int main(int argc, char** argv)
 	if(!model)
 		return 1;
 	mjData* data = mj_makeData(model);
-	mjThreadPool* pool = mju_threadPoolCreate(8);
-	mju_bindThreadPool(data, pool);
-	size_t allocations = 0, frees = 0;
+	mju_threadpool(data, 8);
+	size_t allocations = 0, frees = 0, dispatchAllocations = 0;
 	for(int step = 0; step < 600; ++step)
 	{
 		mj_step1(model, data);
@@ -27,18 +26,21 @@ int main(int argc, char** argv)
 		newton::MujocoSolverProfile profile;
 		if(step >= 200)
 			allocationAudit::begin();
-		newton::solveMujocoConstraints(model, data, pool, profile);
+		newton::solveMujocoConstraints(model, data, profile);
 		allocationAudit::enabled = false;
 		if(step >= 200)
 		{
 			allocations += allocationAudit::allocations.load();
 			frees += allocationAudit::frees.load();
+			// MuJoCo 3.13 creates one temporary task wrapper per island in
+			// mju_dispatch. Native PhysX does not use this comparison dispatcher.
+			dispatchAllocations += size_t(data->nisland);
 		}
 		mj_Euler(model, data);
 	}
-	mju_threadPoolDestroy(pool);
 	mj_deleteData(data);
 	mj_deleteModel(model);
-	std::printf("PALLET_ALLOCATIONS,steps=400,workers=8,allocations=%zu,frees=%zu\n", allocations, frees);
-	return allocations || frees ? 1 : 0;
+	std::printf("PALLET_ALLOCATIONS,steps=400,workers=8,allocations=%zu,frees=%zu,dispatch_allocations=%zu\n",
+		allocations, frees, dispatchAllocations);
+	return allocations != dispatchAllocations || frees != dispatchAllocations ? 1 : 0;
 }

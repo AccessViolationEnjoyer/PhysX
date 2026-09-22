@@ -1824,17 +1824,11 @@ void DynamicsContext::update(Cm::FlushPool& /*flushPool*/, PxBaseTask* continuat
 	PxvNphaseImplementationContext* nphase, PxU32 /*maxPatches*/, PxU32 maxArticulationLinks,
 	PxReal dt, const PxVec3& gravity, Cm::PinnableBitMap& /*changedHandleMap*/)
 {
-	const bool newtonReady = !mNewtonSolver ||
-		beginNewtonUpdate(*mNewtonSolver, mIslandManager.getAccurateIslandSim().getNbNodes());
-
-	// Preserve shared per-frame resets even if Newton storage growth fails.
-	const bool hasWork = updateShared(nphase, dt, gravity);
-	if(!newtonReady)
+	if(mNewtonSolver)
 	{
-		// No force-threshold task will run. Do not replay last frame's events.
-		getForceChangedThresholdStream().forceSize_Unsafe(0);
-		return;
+		beginNewtonUpdate(*mNewtonSolver, mIslandManager.getAccurateIslandSim().getNbNodes());
 	}
+	const bool hasWork = updateShared(nphase, dt, gravity);
 	if(!hasWork)
 		return;
 

@@ -34,8 +34,6 @@
 #include "core/NewtonSolver.h"
 
 #include <cmath>
-#include <limits>
-#include <new>
 
 namespace physx
 {
@@ -52,7 +50,9 @@ static double projectInitialVelocity(const PxSolverBodyData& body, PxI32 bodyInd
 	const PxVec3& linear, const PxVec3& angular, const NewtonJointSettings& settings)
 {
 	if(bodyIndex < 0)
+	{
 		return projectNewtonVelocity(body, linear, angular);
+	}
 	const Cm::SpatialVector& velocity = settings.initialVelocities[bodyIndex];
 	return double(linear.x) * velocity.linear.x + double(linear.y) * velocity.linear.y +
 		double(linear.z) * velocity.linear.z + double(angular.x) * velocity.angular.x +
@@ -86,16 +86,24 @@ static const char* preprocessNewtonSlerp(Px1DConstraint* rows, PxU32 rowCount,
 	for(PxU32 i = 0; i < rowCount; ++i)
 	{
 		if((rows[i].solveHint >> 8) != 1)
+		{
 			continue;
+		}
 		if(driveCount == 3)
+		{
 			return "Newton SLERP preprocessing requires exactly three drive rows.";
+		}
 		indices[driveCount] = i;
 		driveRows[driveCount++] = rows[i];
 	}
 	if(driveCount == 0)
+	{
 		return NULL;
+	}
 	if(driveCount != 3)
+	{
 		return "Newton SLERP preprocessing requires exactly three drive rows.";
+	}
 
 	// Native SLERP applies acceleration gains and per-axis force caps in response
 	// eigenaxes. Preprocess only this triple; leave other joint rows in their physical axes.
@@ -109,7 +117,9 @@ static const char* preprocessNewtonSlerp(Px1DConstraint* rows, PxU32 rowCount,
 		bodyIndex0 >= 0 ? body0.invMass : 0.0f, bodyIndex1 >= 0 ? body1.invMass : 0.0f,
 		PxConstraintInvMassScale(1.0f, 1.0f, 1.0f, 1.0f), false, true);
 	for(PxU32 i = 0; i < 3; ++i)
+	{
 		rows[indices[i]] = driveRows[i];
+	}
 	return NULL;
 }
 
@@ -119,7 +129,9 @@ const char* prepareNewtonJoint(const Constraint& constraint,
 	newton::Problem& problem, NewtonJointRows& output)
 {
 	if((constraint.flags & PxConstraintFlag::eBROKEN) || (writeback && writeback->broken))
+	{
 		return NULL;
+	}
 
 	NewtonJointWriteback joint;
 	joint.destination = writeback;
@@ -144,23 +156,28 @@ const char* prepareNewtonJoint(const Constraint& constraint,
 			(constraint.flags & PxConstraintFlag::eENABLE_EXTENDED_LIMITS) != 0, anchor0, anchor1);
 		joint.body0WorldOffset = body0WorldOffset;
 		if(rowCount > MAX_CONSTRAINT_ROWS)
+		{
 			return "Newton joint preparation returned more than MAX_CONSTRAINT_ROWS.";
+		}
 		// Per-constraint mass scaling makes different constraints act through different mass
 		// matrices. It cannot be represented by the shared symmetric Newton objective.
 		if(rowCount && (massScales.linear0 != 1.0f || massScales.angular0 != 1.0f ||
-			massScales.linear1 != 1.0f || massScales.angular1 != 1.0f))
+						massScales.linear1 != 1.0f || massScales.angular1 != 1.0f))
+		{
 			return "Newton does not support joint-local inverse mass or inertia scaling.";
+		}
 	}
 
 	if((constraint.flags & PxConstraintFlag::eIMPROVED_SLERP) && !(constraint.flags & PxConstraintFlag::eDISABLE_PREPROCESSING))
 	{
 		const char* error = preprocessNewtonSlerp(rows, rowCount, body0, body1, bodyIndex0, bodyIndex1);
 		if(error)
+		{
 			return error;
+		}
 	}
 
 	const double timestep = settings.timestep;
-	const double infinity = std::numeric_limits<double>::infinity();
 	for(PxU32 i = 0; i < rowCount; ++i)
 	{
 		const Px1DConstraint& row = rows[i];
@@ -177,31 +194,39 @@ const char* prepareNewtonJoint(const Constraint& constraint,
 		}
 		const double response = contact.jacobian[0].squaredNorm() + contact.jacobian[1].squaredNorm();
 		if(response == 0.0)
+		{
 			continue;
+		}
 		const bool spring = (row.flags & Px1DConstraintFlag::eSPRING) != 0;
 		const bool accelerationSpring = (row.flags & Px1DConstraintFlag::eACCELERATION_SPRING) != 0;
 		if((!spring || accelerationSpring) && response <= constraint.minResponseThreshold)
+		{
 			continue;
+		}
 
 		const double freeSpeed = projectNewtonVelocity(body0, row.linear0, row.angular0) -
 			projectNewtonVelocity(body1, row.linear1, row.angular1);
 		const double driveScale = (row.flags & Px1DConstraintFlag::eHAS_DRIVE_LIMIT) &&
 			(constraint.flags & PxConstraintFlag::eDRIVE_LIMITS_ARE_FORCES) ? timestep : 1.0;
-		double lower = row.minImpulse == -PX_MAX_F32 ? -infinity : double(row.minImpulse) * driveScale;
-		double upper = row.maxImpulse == PX_MAX_F32 ? infinity : double(row.maxImpulse) * driveScale;
+		double lower = row.minImpulse == -PX_MAX_F32 ? -newton::MAX_IMPULSE : double(row.minImpulse) * driveScale;
+		double upper = row.maxImpulse == PX_MAX_F32 ? newton::MAX_IMPULSE : double(row.maxImpulse) * driveScale;
 		if(spring)
 		{
 			const double stiffness = row.mods.spring.stiffness;
 			const double damping = row.mods.spring.damping;
 			if(stiffness < 0.0 || damping < 0.0)
+			{
 				return "Newton joint spring stiffness and damping must be nonnegative.";
+			}
 			const double a = timestep * (damping + timestep * stiffness);
 			if(a == 0.0)
 			{
 				// A zero spring produces zero impulse, clamped to any explicitly supplied limits.
 				const double fixedImpulse = PxClamp(0.0, lower, upper);
 				if(fixedImpulse == 0.0)
+				{
 					continue;
+				}
 				lower = upper = fixedImpulse;
 				contact.regularization = response;
 				contact.freeVelocity = freeSpeed;
@@ -239,22 +264,23 @@ const char* prepareNewtonJoint(const Constraint& constraint,
 		outputRow.contactIndex = PxU32(problem.addScalarContact(contact, lower, upper));
 		outputRow.linear0 = (row.flags & Px1DConstraintFlag::eOUTPUT_FORCE) ? row.linear0 : PxVec3(0.0f);
 		outputRow.angular0 = (row.flags & Px1DConstraintFlag::eOUTPUT_FORCE) ? row.angular0 : PxVec3(0.0f);
-		if(!output.rows.pushBack(outputRow))
-			throw std::bad_alloc();
+		output.rows.pushBack(outputRow);
 	}
 	joint.rowCount = output.rows.size() - joint.firstRow;
-	if(!output.joints.pushBack(joint))
-		throw std::bad_alloc();
+	output.joints.pushBack(joint);
 	return NULL;
 }
 
 void writebackNewtonJoints(const NewtonJointRows& rows, const newton::Problem& problem, const newton::Result& result)
 {
-	for(PxU32 i = 0; i < rows.joints.size(); ++i)
+	const PxU32 jointCount = rows.joints.size();
+	for(PxU32 i = 0; i < jointCount; ++i)
 	{
 		const NewtonJointWriteback& joint = rows.joints[i];
 		if(!joint.destination)
+		{
 			continue;
+		}
 		PxVec3 linearImpulse(0.0f), angularImpulse(0.0f);
 		for(PxU32 j = joint.firstRow; j < joint.firstRow + joint.rowCount; ++j)
 		{

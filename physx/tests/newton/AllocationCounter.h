@@ -1,8 +1,7 @@
 #ifndef NEWTON_ALLOCATION_COUNTER_H
 #define NEWTON_ALLOCATION_COUNTER_H
 
-// Test-only Debug CRT hook. Covers this executable and Eigen, including malloc,
-// realloc and C++ new. The release MuJoCo DLL uses a separate, uninstrumented CRT.
+// Test-only Debug CRT hook covering malloc, realloc and C++ new in this process.
 #include <atomic>
 #include <crtdbg.h>
 

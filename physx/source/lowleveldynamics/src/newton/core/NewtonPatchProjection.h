@@ -3,25 +3,10 @@
 
 #include <cmath>
 #include <cstdint>
-#include <cstring>
 #include <limits>
 
 namespace newton
 {
-// The numerical core uses IEEE binary64. MSVC's std::isfinite calls the CRT
-// classifier in this hot projection loop; inspect the exponent bits directly
-// without aliasing or floating-point operations. Signed zeros and subnormals
-// remain finite, and every infinity/NaN payload is rejected.
-inline bool isFiniteDouble(double value)
-{
-	static_assert(sizeof(double) == sizeof(std::uint64_t) && std::numeric_limits<double>::is_iec559 &&
-		std::numeric_limits<double>::digits == 53 && std::numeric_limits<double>::max_exponent == 1024,
-		"Newton finite classification requires IEEE binary64");
-	std::uint64_t bits;
-	std::memcpy(&bits, &value, sizeof(bits));
-	return (bits & 0x7ff0000000000000ull) != 0x7ff0000000000000ull;
-}
-
 // Minimize sum(0.5 * R * lambda^2 + s * lambda), with
 // 0 <= normal[i] <= cap[i] and |tangent[j]| <= friction[j] * sum(normal).
 // Inputs are row residuals s = J*v + freeVelocity and positive diagonal R.
@@ -76,28 +61,34 @@ inline bool projectPatchInternal(const PatchProjectionInput& input, const PatchP
 	if(ValidateInput)
 	{
 		if(input.normalCount < 0 || input.tangentCount < 0 || input.tangentCount > 4)
+		{
 			return false;
+		}
 		if(input.normalCount && (!input.normalVelocity || !input.normalRegularization || !input.normalCap || !output.normalImpulse))
+		{
 			return false;
+		}
 		if(input.tangentCount && (!input.tangentVelocity || !input.tangentRegularization || !input.friction || !output.tangentImpulse))
+		{
 			return false;
+		}
 
-		const double infinity = std::numeric_limits<double>::infinity();
 		for(int i = 0; i < input.normalCount; ++i)
 		{
-			if(!isFiniteDouble(input.normalVelocity[i]) || !isFiniteDouble(input.normalRegularization[i]) ||
-				input.normalRegularization[i] <= 0.0 || input.normalCap[i] < 0.0 ||
-				(!isFiniteDouble(input.normalCap[i]) && input.normalCap[i] != infinity))
+			if(input.normalRegularization[i] <= 0.0 || input.normalCap[i] < 0.0)
+			{
 				return false;
+			}
 		}
 		for(int j = 0; j < input.tangentCount; ++j)
 		{
-			if(!isFiniteDouble(input.tangentVelocity[j]) || !isFiniteDouble(input.tangentRegularization[j]) ||
-				input.tangentRegularization[j] <= 0.0 || !isFiniteDouble(input.friction[j]) || input.friction[j] < 0.0)
+			if(input.tangentRegularization[j] <= 0.0 || input.friction[j] < 0.0)
+			{
 				return false;
+			}
 		}
 	}
-	const double infinity = std::numeric_limits<double>::infinity();
+	const double maximum = (std::numeric_limits<double>::max)();
 	// For a common normal shift q, n_i = clamp((q-s_i)/R_i,0,cap_i).
 	// Stationarity gives q = sum(mu_j * max(|s_j|-R_j*mu_j*N(q),0)).
 	// The left side increases and the right side decreases. Walk its finite
@@ -105,31 +96,38 @@ inline bool projectPatchInternal(const PatchProjectionInput& input, const PatchP
 	double shift = 0.0;
 	double solutionBase = 0.0;
 	double solutionStep = 0.0;
-	unsigned int activeTangents = (1u << input.tangentCount) - 1u;
-	const unsigned long long maximumPieces = 2ull * static_cast<unsigned long long>(input.normalCount) +
-		static_cast<unsigned long long>(input.tangentCount) + 2ull;
+	std::uint32_t activeTangents = (1u << input.tangentCount) - 1u;
+	const std::uint32_t maximumPieces = 2u * std::uint32_t(input.normalCount) +
+		std::uint32_t(input.tangentCount) + 2u;
 	bool solved = false;
-	for(unsigned long long piece = 0; piece < maximumPieces; ++piece)
+	for(std::uint32_t piece = 0; piece < maximumPieces; ++piece)
 	{
 		double normalSum = 0.0;
 		double normalSlope = 0.0;
-		double nextEvent = infinity;
+		double nextEvent = maximum;
 		int tangentEvent = -1;
 		for(int i = 0; i < input.normalCount; ++i)
 		{
 			const double velocity = input.normalVelocity[i];
 			const double regularization = input.normalRegularization[i];
 			const double cap = input.normalCap[i];
-			const double upperEvent = velocity + regularization * cap;
+			const bool capped = cap != maximum;
+			const double upperEvent = capped ? velocity + regularization * cap : maximum;
 			const double impulse = (shift - velocity) / regularization;
-			normalSum += impulse <= 0.0 ? 0.0 : (impulse >= cap ? cap : impulse);
+			normalSum += impulse <= 0.0 ? 0.0 : (capped && impulse >= cap ? cap : impulse);
 			// Right derivative at entry/cap boundaries for the monotone walk.
-			if(shift >= velocity && shift < upperEvent && cap > 0.0)
+			if(shift >= velocity && (!capped || shift < upperEvent) && cap > 0.0)
+			{
 				normalSlope += 1.0 / regularization;
+			}
 			if(velocity > shift && velocity < nextEvent)
+			{
 				nextEvent = velocity;
-			if(upperEvent > shift && upperEvent < nextEvent)
+			}
+			if(capped && upperEvent > shift && upperEvent < nextEvent)
+			{
 				nextEvent = upperEvent;
+			}
 		}
 
 		double tangentShift = 0.0;
@@ -154,11 +152,11 @@ inline bool projectPatchInternal(const PatchProjectionInput& input, const PatchP
 				}
 			}
 			else
+			{
 				activeTangents &= ~(1u << j);
+			}
 		}
 		const double denominator = 1.0 + normalSlope * tangentSlope;
-		if(!isFiniteDouble(normalSum) || !isFiniteDouble(tangentShift) || !isFiniteDouble(denominator))
-			return false;
 		const double step = (tangentShift - shift) / denominator;
 		if(step <= 0.0)
 		{
@@ -169,8 +167,6 @@ inline bool projectPatchInternal(const PatchProjectionInput& input, const PatchP
 		const double root = shift + step;
 		const bool rootInPiece = root <= nextEvent;
 		const double nextShift = rootInPiece ? root : nextEvent;
-		if(!isFiniteDouble(nextShift))
-			return false;
 		if(rootInPiece)
 		{
 			solutionBase = shift;
@@ -183,10 +179,14 @@ inline bool projectPatchInternal(const PatchProjectionInput& input, const PatchP
 		// A tangent event may round to the current q. Consume it explicitly,
 		// so a sub-ulp event cannot be mistaken for convergence or revisited.
 		if(tangentEvent >= 0)
+		{
 			activeTangents &= ~(1u << tangentEvent);
+		}
 	}
 	if(!solved)
+	{
 		return false;
+	}
 
 	result.normalSum = 0.0;
 	result.normalShift = shift;
@@ -205,7 +205,9 @@ inline bool projectPatchInternal(const PatchProjectionInput& input, const PatchP
 		const double diagonal = impulse > 0.0 && impulse < cap ? 1.0 / regularization : 0.0;
 		output.normalImpulse[i] = impulse;
 		if(output.normalDiagonal)
+		{
 			output.normalDiagonal[i] = diagonal;
+		}
 		result.normalSum += impulse;
 		result.normalInverseRegularization += diagonal;
 		result.cost -= impulse * (velocity + 0.5 * regularization * impulse);
@@ -222,16 +224,22 @@ inline bool projectPatchInternal(const PatchProjectionInput& input, const PatchP
 		const double impulse = -sign * (bounded ? limit : unconstrained);
 		output.tangentImpulse[j] = impulse;
 		if(output.tangentDiagonal)
+		{
 			output.tangentDiagonal[j] = bounded ? 0.0 : 1.0 / regularization;
+		}
 		if(output.tangentCoupling)
+		{
 			output.tangentCoupling[j] = bounded ? sign * friction : 0.0;
+		}
 		if(bounded)
+		{
 			result.boundedTangentRegularization += regularization * friction * friction;
+		}
 		result.cost -= impulse * (velocity + 0.5 * regularization * impulse);
 	}
 	const double denominator = 1.0 + result.normalInverseRegularization * result.boundedTangentRegularization;
 	result.inverseCoupling = 1.0 / denominator;
-	return isFiniteDouble(result.normalSum) && isFiniteDouble(result.cost) && isFiniteDouble(denominator);
+	return true;
 }
 
 inline bool projectPatch(const PatchProjectionInput& input, const PatchProjectionOutput& output,
@@ -240,9 +248,8 @@ inline bool projectPatch(const PatchProjectionInput& input, const PatchProjectio
 	return projectPatchInternal<true>(input, output, result);
 }
 
-// Internal prepared-input entry. Counts/pointers, finite residuals, positive R,
-// nonnegative caps and finite nonnegative friction must already be validated.
-// Keep arithmetic/result checks: a failed projection must not publish impulses.
+// Internal prepared-input entry. Counts, pointers, positive R, nonnegative caps
+// and nonnegative friction have already been validated.
 inline bool projectPatchUnchecked(const PatchProjectionInput& input, const PatchProjectionOutput& output,
 	PatchProjectionResult& result)
 {

@@ -8,10 +8,20 @@
 #include <exception>
 #include <stdexcept>
 
+// MuJoCo 3.13 exposes thread-pool creation publicly, while its synchronous
+// task dispatcher remains an internal exported entry point.
+typedef void (*NewtonMujocoTaskFunction)(const mjModel*, mjData*, void*, int, int);
+extern "C" MJAPI void mju_dispatch(const mjModel*, mjData*, NewtonMujocoTaskFunction, void*, int);
+
 // Shared benchmark adapter for independent centered free bodies with diagonal
 // inertia, pyramidal contact rows, and Euler integration.
 namespace newton
 {
+static double mujocoMassDiagonal(const mjModel* model, const mjData* data, int dof)
+{
+	return data->M[model->M_rowadr[dof] + model->M_rownnz[dof] - 1];
+}
+
 struct MujocoSolverProfile
 {
 	// Preparation and solve overlap across islands, so isolated wall times do not exist.
@@ -75,7 +85,7 @@ static void* prepareIsland(void* argument)
 		for(int i = 0; i < dofCount; ++i)
 		{
 			const int dof = data->map_idof2dof[dofStart + i];
-			const double mass = data->qM[model->dof_Madr[dof]];
+			const double mass = mujocoMassDiagonal(model, data, dof);
 			problem.massDiagonal[i] = mass;
 			rootMass[i] = std::sqrt(mass);
 			previous.primal[i] = problem.timestep * rootMass[i] * (data->qacc_warmstart[dof] - data->qacc_smooth[dof]);
@@ -159,16 +169,20 @@ static void scatterIsland(IslandTask& task)
 		data->efc_force[data->map_iefc2efc[rowStart + i]] = task.result.impulse[i] / task.problem.timestep;
 }
 
-static int solveMujocoConstraints(const mjModel* model, mjData* data, mjThreadPool* pool, MujocoSolverProfile& profile)
+static void dispatchIsland(const mjModel*, mjData*, void* argument, int, int task)
+{
+	std::vector<IslandTask>& islands = *static_cast<std::vector<IslandTask>*>(argument);
+	prepareAndSolveIsland(&islands[task]);
+}
+
+static int solveMujocoConstraints(const mjModel* model, mjData* data, MujocoSolverProfile& profile)
 {
 	const newton::Clock::time_point globalPreparationStart = newton::Clock::now();
 	mj_mulJacVec(model, data, data->efc_b, data->qacc_smooth);
 	mju_subFrom(data->efc_b, data->efc_aref, data->nefc);
-	mju_copy(data->qacc, data->qacc_smooth, model->nv);
+	mju_copy(data->qacc, data->qacc_smooth, int(model->nv));
 	static thread_local std::vector<IslandTask> islands;
-	static thread_local std::vector<mjTask> tasks;
 	islands.resize(std::max(islands.size(), size_t(data->nisland)));
-	tasks.resize(data->nisland);
 	for(int i = 0; i < data->nisland; ++i)
 	{
 		islands[i].error = NULL;
@@ -178,22 +192,10 @@ static int solveMujocoConstraints(const mjModel* model, mjData* data, mjThreadPo
 		islands[i].settings.iterations = model->opt.iterations;
 		islands[i].settings.tolerance = model->opt.tolerance;
 		islands[i].settings.profile = profile.enabled;
-		mju_defaultTask(&tasks[i]);
-		tasks[i].func = prepareAndSolveIsland;
-		tasks[i].args = &islands[i];
 	}
 	profile.globalPreparationWallMs = newton::elapsed(globalPreparationStart);
 	const newton::Clock::time_point islandTasksStart = newton::Clock::now();
-	for(int i = 0; i < data->nisland; ++i)
-	{
-		if(pool)
-			mju_threadPoolEnqueue(pool, &tasks[i]);
-		else
-			prepareAndSolveIsland(&islands[i]);
-	}
-	if(pool)
-		for(int i = 0; i < data->nisland; ++i)
-			mju_taskJoin(&tasks[i]);
+	mju_dispatch(model, data, dispatchIsland, &islands, data->nisland);
 	// Each island is fully prepared before its solve. Only the final join is global.
 	profile.islandTasksWallMs = newton::elapsed(islandTasksStart);
 	std::exception_ptr error;
@@ -235,10 +237,10 @@ static void validateMujocoModel(const mjModel* model, mjData* data, size_t bodyC
 		throw std::runtime_error("The MuJoCo adapter requires free boxes, pyramidal contacts and Euler integration");
 	for(int i = 0; i < model->nv; ++i)
 	{
-		int address = model->dof_Madr[i] + 1;
-		for(int parent = model->dof_parentid[i]; parent >= 0; parent = model->dof_parentid[parent])
+		const int diagonal = model->M_rowadr[i] + model->M_rownnz[i] - 1;
+		for(int address = model->M_rowadr[i]; address < diagonal; ++address)
 		{
-			if(std::abs(data->qM[address++]) > 1.0e-12 * data->qM[model->dof_Madr[i]])
+			if(std::abs(data->M[address]) > 1.0e-12 * data->M[diagonal])
 				throw std::runtime_error("The MuJoCo adapter requires diagonal free-body inertia");
 		}
 	}

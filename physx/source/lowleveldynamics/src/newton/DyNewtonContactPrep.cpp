@@ -36,8 +36,6 @@
 #include "core/NewtonSolver.h"
 
 #include <cmath>
-#include <limits>
-#include <new>
 
 namespace physx
 {
@@ -107,15 +105,21 @@ static double prepareContactJacobian(newton::CompactContact& row,
 static void applyContactSlop(PxVec3& vector, double slop)
 {
 	for(PxU32 axis = 0; axis < 3; ++axis)
+	{
 		if(std::abs(double(vector[axis])) < slop)
+		{
 			vector[axis] = 0.0f;
+		}
+	}
 }
 
 static void contactTangents(const PxVec3& normal, const PxVec3& relativeVelocity, PxVec3& tangent0, PxVec3& tangent1)
 {
 	tangent0 = relativeVelocity - normal * normal.dot(relativeVelocity);
 	if(tangent0.magnitudeSquared() <= 0.0001f)
+	{
 		tangent0 = PxAbs(normal.x) < 0.70710678f ? PxVec3(0.0f, -normal.z, normal.y) : PxVec3(-normal.y, normal.x, 0.0f);
+	}
 	tangent0.normalize();
 	tangent1 = normal.cross(tangent0);
 }
@@ -137,14 +141,20 @@ static const char* extractNewtonContacts(PxsContactManagerOutput& contactOutput,
 	buffer.count = 0;
 	separateFrictionCoefficients = false;
 	if(!contactOutput.nbContacts)
+	{
 		return NULL;
+	}
 	PxContactStreamIterator iterator(contactOutput.contactPatches, contactOutput.contactPoints,
 		contactOutput.getInternalFaceIndice(), contactOutput.nbPatches, contactOutput.nbContacts);
 	if(iterator.forceNoResponse)
+	{
 		return NULL;
+	}
 	if(iterator.getInvMassScale0() != 1.0f || iterator.getInvMassScale1() != 1.0f ||
-		iterator.getInvInertiaScale0() != 1.0f || iterator.getInvInertiaScale1() != 1.0f)
+	   iterator.getInvInertiaScale0() != 1.0f || iterator.getInvInertiaScale1() != 1.0f)
+	{
 		return "Newton does not support contact-local inverse mass or inertia scaling.";
+	}
 
 	PxU32 originalIndex = 0;
 	while(iterator.hasNextPatch())
@@ -160,7 +170,9 @@ static const char* extractNewtonContacts(PxsContactManagerOutput& contactOutput,
 			if(maxImpulse != 0.0f)
 			{
 				if(buffer.count == PxContactBuffer::MAX_CONTACTS)
+				{
 					return "Newton contact preparation exceeded PxContactBuffer::MAX_CONTACTS.";
+				}
 				PxContactPoint& contact = buffer.contacts[buffer.count];
 				contact.normal = iterator.getContactNormal();
 				contact.point = iterator.getContactPoint();
@@ -190,8 +202,10 @@ static void appendContactRow(const PxVec3& direction,
 {
 	newton::CompactContact row;
 	if(prepareContactJacobian(row, body0, body1, bodyIndex0, bodyIndex1,
-		rootInverseMass0, rootInverseMass1, direction, angular0, angular1, settings.bodyLockFlags) == 0.0)
+							  rootInverseMass0, rootInverseMass1, direction, angular0, angular1, settings.bodyLockFlags) == 0.0)
+	{
 		return;
+	}
 	row.freeVelocity = freeSpeed - initialSpeed + settings.timestep *
 		(damping * (initialSpeed - targetSpeed) + stiffness * impedance * positionError);
 	row.regularization = regularization;
@@ -207,7 +221,9 @@ static bool prepareCompliantNormal(const PxContactPoint& contact, const PxVec3& 
 	const double response = prepareContactJacobian(row, body0, body1, bodyIndex0, bodyIndex1,
 		rootInverseMass0, rootInverseMass1, normal, angular0, angular1, settings.bodyLockFlags);
 	if(response == 0.0)
+	{
 		return false;
+	}
 	const double speed = contactSpeed(body0, body1, normal, angular0, angular1);
 	const double stiffness = -double(contact.restitution);
 	const double damping = penetration >= 0.0 ? 0.0 : double(contact.damping);
@@ -227,9 +243,11 @@ static void appendCompliantNormal(const PxContactPoint& contact, const PxVec3& n
 {
 	newton::CompactContact row;
 	if(!prepareCompliantNormal(contact, normal, angular0, angular1, penetration,
-		body0, body1, bodyIndex0, bodyIndex1, rootInverseMass0, rootInverseMass1, settings, row))
+							   body0, body1, bodyIndex0, bodyIndex1, rootInverseMass0, rootInverseMass1, settings, row))
+	{
 		return;
-	const double upper = hasContactImpulseLimit(contact.maxImpulse) ? contact.maxImpulse : std::numeric_limits<double>::infinity();
+	}
+	const double upper = hasContactImpulseLimit(contact.maxImpulse) ? contact.maxImpulse : newton::MAX_IMPULSE;
 	problem.addScalarContact(row, 0.0, upper);
 }
 
@@ -242,8 +260,10 @@ static void appendCompliantFriction(const PxContactPoint& contact,
 {
 	newton::CompactContact normal;
 	if(!prepareCompliantNormal(contact, contact.normal, normalAngular0, normalAngular1, penetration,
-		body0, body1, bodyIndex0, bodyIndex1, rootInverseMass0, rootInverseMass1, settings, normal))
+							   body0, body1, bodyIndex0, bodyIndex1, rootInverseMass0, rootInverseMass1, settings, normal))
+	{
 		return;
+	}
 
 	const PxVec3 pointVelocity = body0.linearVelocity + body0.angularVelocity.cross(arm0) -
 		body1.linearVelocity - body1.angularVelocity.cross(arm1);
@@ -252,8 +272,8 @@ static void appendCompliantFriction(const PxContactPoint& contact,
 	newton::Contact block;
 	block.body[0] = bodyIndex0;
 	block.body[1] = bodyIndex1;
-	block.jacobian[0].row(2) = normal.jacobian[0].transpose();
-	block.jacobian[1].row(2) = normal.jacobian[1].transpose();
+	block.jacobian[0].row(2) = normal.jacobian[0];
+	block.jacobian[1].row(2) = normal.jacobian[1];
 	block.freeVelocity[2] = normal.freeVelocity;
 	block.regularization[2] = normal.regularization;
 	double tangentResponse = 0.0;
@@ -268,8 +288,8 @@ static void appendCompliantFriction(const PxContactPoint& contact,
 			bodyIndex0, rootInverseMass0, 1.0, settings.bodyLockFlags);
 		contactJacobian(jacobian1, body1, tangents[tangent], angular1,
 			bodyIndex1, rootInverseMass1, -1.0, settings.bodyLockFlags);
-		block.jacobian[0].row(tangent) = jacobian0.transpose();
-		block.jacobian[1].row(tangent) = jacobian1.transpose();
+		block.jacobian[0].row(tangent) = jacobian0;
+		block.jacobian[1].row(tangent) = jacobian1;
 		block.freeVelocity[tangent] = contactSpeed(body0, body1, tangents[tangent], angular0, angular1) -
 			dotNewtonContact(contact.targetVel, tangents[tangent]);
 		tangentResponse += jacobian0.squaredNorm() + jacobian1.squaredNorm();
@@ -277,8 +297,7 @@ static void appendCompliantFriction(const PxContactPoint& contact,
 	const double tangentRegularization = std::max(1.0e-15, settings.regularization * tangentResponse * 0.5);
 	block.regularization[0] = block.regularization[1] = tangentRegularization;
 	block.friction = friction;
-	block.maxNormalImpulse = hasContactImpulseLimit(contact.maxImpulse) ?
-		contact.maxImpulse : std::numeric_limits<double>::infinity();
+	block.maxNormalImpulse = hasContactImpulseLimit(contact.maxImpulse) ? contact.maxImpulse : newton::MAX_IMPULSE;
 	problem.addContact(block);
 }
 
@@ -289,15 +308,13 @@ static void appendContactPoint(PxU32 firstContact, PxReal* forceDestination, PxU
 {
 	const NewtonContactPoint point = { firstContact, PxU32(problem.contacts.size()) - firstContact, forceDestination };
 	const PxU32 pointIndex = output.points.size();
-	if(!output.points.pushBack(point))
-		throw std::bad_alloc();
+	output.points.pushBack(point);
 	if((frictionState || correctDilatancy) && point.contactCount)
 	{
 		const NewtonFrictionPoint frictionPoint = { pointIndex, friction, PxReal(freeNormalVelocity),
 			PxReal(targetNormalVelocity), PxReal(freeTangentVelocity0), PxReal(freeTangentVelocity1),
 			0.0f, frictionState, correctDilatancy };
-		if(!output.frictionPoints.pushBack(frictionPoint))
-			throw std::bad_alloc();
+		output.frictionPoints.pushBack(frictionPoint);
 	}
 }
 
@@ -336,8 +353,10 @@ static void appendNewtonContact(const PxContactPoint& contact, PxReal restDistan
 			freeTangentVelocity1 = dotNewtonContact(freePointVelocity, tangent1);
 		}
 		else
+		{
 			appendCompliantNormal(contact, contact.normal, normalAngular0, normalAngular1, penetration,
-				body0, body1, bodyIndex0, bodyIndex1, rootInverseMass0, rootInverseMass1, settings, problem);
+								  body0, body1, bodyIndex0, bodyIndex1, rootInverseMass0, rootInverseMass1, settings, problem);
+		}
 	}
 	else
 	{
@@ -375,6 +394,7 @@ static void appendNewtonContact(const PxContactPoint& contact, PxReal restDistan
 				2.0 * mu * mu * ratio * diagonalApproximation);
 			const PxVec3 tangents[2] = { tangent0, tangent1 };
 			for(PxU32 tangent = 0; tangent < 2; ++tangent)
+			{
 				for(PxU32 sign = 0; sign < 2; ++sign)
 				{
 					const double scale = sign ? -mu : mu;
@@ -389,8 +409,9 @@ static void appendNewtonContact(const PxContactPoint& contact, PxReal restDistan
 						target, penetration,
 						stiffness, damping, impedance, edgeRegularization, body0, body1,
 						bodyIndex0, bodyIndex1, rootInverseMass0, rootInverseMass1,
-						settings, problem, std::numeric_limits<double>::infinity());
+						settings, problem, newton::MAX_IMPULSE);
 				}
+			}
 			appendContactPoint(firstContact, forceDestination, separateFrictionCoefficients ? frictionState : NULL,
 				frictionCoefficient, freeNormalVelocity, targetNormalVelocity,
 				freeTangentVelocity0, freeTangentVelocity1, correctDilatancy, problem, output);
@@ -398,7 +419,7 @@ static void appendNewtonContact(const PxContactPoint& contact, PxReal restDistan
 		}
 		const double response = translationResponse > 0.0 ? translationResponse : 1.0;
 		const double regularization = std::max(1.0e-15, ratio * response);
-		const double upper = hasContactImpulseLimit(contact.maxImpulse) ? contact.maxImpulse : std::numeric_limits<double>::infinity();
+		const double upper = hasContactImpulseLimit(contact.maxImpulse) ? contact.maxImpulse : newton::MAX_IMPULSE;
 		appendContactRow(contact.normal, normalAngular0, normalAngular1, initialNormalSpeed,
 			dotNewtonContact(contact.normal, freePointVelocity), normalTarget, penetration,
 			stiffness, damping, impedance, regularization, body0, body1,
@@ -416,9 +437,13 @@ const char* prepareNewtonContacts(PxsContactManager& manager, PxsContactManagerO
 {
 	PxcNpWorkUnit& unit = manager.getWorkUnit();
 	if(contactOutput.contactForces)
+	{
 		PxMemZero(contactOutput.contactForces, sizeof(PxReal) * contactOutput.nbContacts);
+	}
 	if(!unit.getDominance0() || !unit.getDominance1())
+	{
 		return "Newton does not support asymmetric contact dominance.";
+	}
 	const bool sliding = unit.mFrictionPatchCount == NEWTON_FRICTION_STATE_MARKER &&
 		unit.mFrictionDataPtr && *unit.mFrictionDataPtr != 0;
 	PxContactBuffer& buffer = threadContext.mContactBuffer;
@@ -427,7 +452,9 @@ const char* prepareNewtonContacts(PxsContactManager& manager, PxsContactManagerO
 	const char* error = extractNewtonContacts(contactOutput, buffer, originalIndices,
 		PxMin(body0.maxContactImpulse, body1.maxContactImpulse), separateFrictionCoefficients);
 	if(error)
+	{
 		return error;
+	}
 	if(buffer.count == 0)
 	{
 		unit.mFrictionDataPtr = NULL;
@@ -437,7 +464,9 @@ const char* prepareNewtonContacts(PxsContactManager& manager, PxsContactManagerO
 	PxU8* frictionState = separateFrictionCoefficients ?
 		threadContext.mFrictionPatchStreamPair.reserve<PxU8>(sizeof(PxU8)) : NULL;
 	if(frictionState)
+	{
 		*frictionState = 0;
+	}
 	unit.mFrictionDataPtr = frictionState;
 	unit.mFrictionPatchCount = frictionState ? NEWTON_FRICTION_STATE_MARKER : 0;
 
@@ -462,13 +491,14 @@ const char* prepareNewtonContacts(PxsContactManager& manager, PxsContactManagerO
 	const double rootInverseMass1 = bodyIndex1 >= 0 ? std::sqrt(double(body1.invMass)) : 0.0;
 	const double translationResponse = rootInverseMass0 * rootInverseMass0 + rootInverseMass1 * rootInverseMass1;
 	for(PxU32 i = 0; i < buffer.count; ++i)
+	{
 		appendNewtonContact(buffer.contacts[i], unit.mRestDistance, unit.mOffsetSlop, ccdMaxSeparation,
-			body0, body1, bodyIndex0, bodyIndex1, frame0, frame1,
-			rootInverseMass0, rootInverseMass1, translationResponse, settings, sliding, frictionState,
-			contactOutput.contactForces ? contactOutput.contactForces + originalIndices[i] : NULL, problem, output);
+							body0, body1, bodyIndex0, bodyIndex1, frame0, frame1,
+							rootInverseMass0, rootInverseMass1, translationResponse, settings, sliding, frictionState,
+							contactOutput.contactForces ? contactOutput.contactForces + originalIndices[i] : NULL, problem, output);
+	}
 	pair.pointCount = output.points.size() - pair.firstPoint;
-	if(!output.pairs.pushBack(pair))
-		throw std::bad_alloc();
+	output.pairs.pushBack(pair);
 	return NULL;
 }
 
@@ -491,10 +521,14 @@ static double contactVelocityCorrection(const newton::CompactContact& contact, P
 	{
 		const PxI32 body = contact.body[end];
 		if(body < 0)
+		{
 			continue;
+		}
 		for(PxU32 column = 0; column < 6; ++column)
+		{
 			velocity += problem.contactEntry(contact, end, axis, PxI32(column)) *
-				result.primal[6 * body + column];
+						result.primal[6 * body + column];
+		}
 	}
 	return velocity;
 }
@@ -505,7 +539,9 @@ static bool frictionVelocities(const NewtonFrictionPoint& frictionPoint, const N
 {
 	const NewtonContactPoint& point = rows.points[frictionPoint.pointIndex];
 	if(point.contactCount != 4 || frictionPoint.friction <= 0.0f)
+	{
 		return false;
+	}
 	const newton::CompactContact& edge0 = problem.contacts[point.firstContact];
 	const newton::CompactContact& edge1 = problem.contacts[point.firstContact + 1];
 	const newton::CompactContact& edge2 = problem.contacts[point.firstContact + 2];
@@ -526,26 +562,37 @@ bool updateNewtonDilatancyBias(NewtonContactRows& rows, newton::Problem& problem
 	const newton::Result& result, PxReal velocityTolerance)
 {
 	bool changed = false;
-	for(PxU32 i = 0; i < rows.frictionPoints.size(); ++i)
+	const PxU32 frictionPointCount = rows.frictionPoints.size();
+	for(PxU32 i = 0; i < frictionPointCount; ++i)
 	{
 		NewtonFrictionPoint& frictionPoint = rows.frictionPoints[i];
 		if(!frictionPoint.correctDilatancy)
+		{
 			continue;
+		}
 		double normalVelocity, tangentVelocity0, tangentVelocity1;
 		if(!frictionVelocities(frictionPoint, rows, problem, result,
-			normalVelocity, tangentVelocity0, tangentVelocity1))
+							   normalVelocity, tangentVelocity0, tangentVelocity1))
+		{
 			continue;
+		}
 		if(frictionPoint.dilatancyBias == 0.0f &&
-			normalVelocity - frictionPoint.targetNormalVelocity <= velocityTolerance)
+		   normalVelocity - frictionPoint.targetNormalVelocity <= velocityTolerance)
+		{
 			continue;
+		}
 		const double bias = frictionPoint.friction *
 			std::sqrt(tangentVelocity0 * tangentVelocity0 + tangentVelocity1 * tangentVelocity1);
 		const double difference = bias - frictionPoint.dilatancyBias;
 		if(std::abs(difference) <= velocityTolerance)
+		{
 			continue;
+		}
 		const NewtonContactPoint& point = rows.points[frictionPoint.pointIndex];
 		for(PxU32 edge = 0; edge < 4; ++edge)
+		{
 			problem.freeVelocity[problem.contacts[point.firstContact + edge].row] += difference;
+		}
 		frictionPoint.dilatancyBias = PxReal(bias);
 		changed = true;
 	}
@@ -576,7 +623,9 @@ static bool isSliding(const NewtonFrictionPoint& frictionPoint, const NewtonCont
 			contactVelocityCorrection(edge3, 2, problem, result));
 	}
 	else
+	{
 		return frictionPoint.friction == 0.0f;
+	}
 	return tangentVelocity0 * tangentVelocity0 + tangentVelocity1 * tangentVelocity1 >
 		velocityThreshold * velocityThreshold;
 }
@@ -587,27 +636,38 @@ void writebackNewtonContacts(const NewtonContactRows& rows, const newton::Proble
 	if(rows.frictionPoints.size())
 	{
 		const double velocityThreshold = double(PX_EPS_F32) * context.getLengthScale() / context.getDt();
-		for(PxU32 i = 0; i < rows.frictionPoints.size(); ++i)
+		const PxU32 frictionPointCount = rows.frictionPoints.size();
+		for(PxU32 i = 0; i < frictionPointCount; ++i)
 		{
-		const NewtonFrictionPoint& point = rows.frictionPoints[i];
+			const NewtonFrictionPoint& point = rows.frictionPoints[i];
 			if(point.state && *point.state == 0 && isSliding(point, rows, problem, result, velocityThreshold))
+			{
 				*point.state = 1;
+			}
 		}
 	}
-	for(PxU32 i = 0; i < rows.points.size(); ++i)
+	const PxU32 pointCount = rows.points.size();
+	for(PxU32 i = 0; i < pointCount; ++i)
 	{
 		const NewtonContactPoint& point = rows.points[i];
 		if(point.destination)
-			*point.destination = PxReal(normalImpulse(point, problem, result));
+		{
+		*point.destination = PxReal(normalImpulse(point, problem, result));
+		}
 	}
-	for(PxU32 i = 0; i < rows.pairs.size(); ++i)
+	const PxU32 pairCount = rows.pairs.size();
+	for(PxU32 i = 0; i < pairCount; ++i)
 	{
 		const NewtonContactPair& pair = rows.pairs[i];
 		if(!pair.reportThreshold)
-			continue;
+		{
+		continue;
+		}
 		ThresholdStreamElement element = pair.threshold;
 		for(PxU32 j = pair.firstPoint; j < pair.firstPoint + pair.pointCount; ++j)
-			element.normalForce += PxReal(normalImpulse(rows.points[j], problem, result));
+		{
+		element.normalForce += PxReal(normalImpulse(rows.points[j], problem, result));
+		}
 		if(element.normalForce != 0.0f)
 		{
 			const PxU32 index = PxU32(PxAtomicIncrement(&context.mThresholdStreamOut) - 1);
