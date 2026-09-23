@@ -1419,6 +1419,52 @@ static void evaluateGradientColumns(const Problem& problem, const double* NEWTON
 	}
 }
 
+#if defined(NEWTON_AVX2_FMA)
+template<bool HasBody0, bool HasBody1>
+static NEWTON_FORCE_INLINE void accumulateGradientScalarRun(const Problem& problem, const double* NEWTON_RESTRICT impulse,
+	int first, int end, int body0, int body1, double* NEWTON_RESTRICT gradient)
+{
+	__m256d gradient0First = _mm256_setzero_pd(), gradient1First = _mm256_setzero_pd();
+	__m128d gradient0End = _mm_setzero_pd(), gradient1End = _mm_setzero_pd();
+	if(HasBody0)
+	{
+		gradient0First = _mm256_loadu_pd(gradient + 6 * body0);
+		gradient0End = _mm_loadu_pd(gradient + 6 * body0 + 4);
+	}
+	if(HasBody1)
+	{
+		gradient1First = _mm256_loadu_pd(gradient + 6 * body1);
+		gradient1End = _mm_loadu_pd(gradient + 6 * body1 + 4);
+	}
+	for(int contactIndex = first; contactIndex < end; ++contactIndex)
+	{
+		const CompactContact& contact = problem.contacts[contactIndex];
+		assert(contact.row == contactIndex);
+		const __m256d scale = _mm256_set1_pd(impulse[contactIndex]);
+		if(HasBody0)
+		{
+			gradient0First = _mm256_fmadd_pd(scale, _mm256_loadu_pd(contact.jacobian[0].data()), gradient0First);
+			gradient0End = _mm_fmadd_pd(_mm256_castpd256_pd128(scale), _mm_loadu_pd(contact.jacobian[0].data() + 4), gradient0End);
+		}
+		if(HasBody1)
+		{
+			gradient1First = _mm256_fmadd_pd(scale, _mm256_loadu_pd(contact.jacobian[1].data()), gradient1First);
+			gradient1End = _mm_fmadd_pd(_mm256_castpd256_pd128(scale), _mm_loadu_pd(contact.jacobian[1].data() + 4), gradient1End);
+		}
+	}
+	if(HasBody0)
+	{
+		_mm256_storeu_pd(gradient + 6 * body0, gradient0First);
+		_mm_storeu_pd(gradient + 6 * body0 + 4, gradient0End);
+	}
+	if(HasBody1)
+	{
+		_mm256_storeu_pd(gradient + 6 * body1, gradient1First);
+		_mm_storeu_pd(gradient + 6 * body1 + 4, gradient1End);
+	}
+}
+#endif
+
 static void evaluateGradientScalarContacts(const Problem& problem, const double* NEWTON_RESTRICT impulse, const double* NEWTON_RESTRICT velocity, double* NEWTON_RESTRICT gradient)
 {
 	const int columnCount = int(problem.jacobian.cols());
@@ -1434,43 +1480,17 @@ static void evaluateGradientScalarContacts(const Problem& problem, const double*
 		if(end - i > 1 && firstContact.body[0] != firstContact.body[1])
 		{
 			const int body0 = firstContact.body[0], body1 = firstContact.body[1];
-			__m256d gradient0First = _mm256_setzero_pd(), gradient1First = _mm256_setzero_pd();
-			__m128d gradient0End = _mm_setzero_pd(), gradient1End = _mm_setzero_pd();
 			if(body0 >= 0)
 			{
-				gradient0First = _mm256_loadu_pd(gradient + 6 * body0);
-				gradient0End = _mm_loadu_pd(gradient + 6 * body0 + 4);
-			}
-			if(body1 >= 0)
-			{
-				gradient1First = _mm256_loadu_pd(gradient + 6 * body1);
-				gradient1End = _mm_loadu_pd(gradient + 6 * body1 + 4);
-			}
-			for(int contactIndex = i; contactIndex < end; ++contactIndex)
-			{
-				const CompactContact& contact = problem.contacts[contactIndex];
-				assert(contact.row == contactIndex);
-				const __m256d scale = _mm256_set1_pd(impulse[contactIndex]);
-				if(body0 >= 0)
-				{
-					gradient0First = _mm256_fmadd_pd(scale, _mm256_loadu_pd(contact.jacobian[0].data()), gradient0First);
-					gradient0End = _mm_fmadd_pd(_mm256_castpd256_pd128(scale), _mm_loadu_pd(contact.jacobian[0].data() + 4), gradient0End);
-				}
 				if(body1 >= 0)
-				{
-					gradient1First = _mm256_fmadd_pd(scale, _mm256_loadu_pd(contact.jacobian[1].data()), gradient1First);
-					gradient1End = _mm_fmadd_pd(_mm256_castpd256_pd128(scale), _mm_loadu_pd(contact.jacobian[1].data() + 4), gradient1End);
-				}
+					accumulateGradientScalarRun<true, true>(problem, impulse, i, end, body0, body1, gradient);
+				else
+					accumulateGradientScalarRun<true, false>(problem, impulse, i, end, body0, body1, gradient);
 			}
-			if(body0 >= 0)
+			else
 			{
-				_mm256_storeu_pd(gradient + 6 * body0, gradient0First);
-				_mm_storeu_pd(gradient + 6 * body0 + 4, gradient0End);
-			}
-			if(body1 >= 0)
-			{
-				_mm256_storeu_pd(gradient + 6 * body1, gradient1First);
-				_mm_storeu_pd(gradient + 6 * body1 + 4, gradient1End);
+				assert(body1 >= 0);
+				accumulateGradientScalarRun<false, true>(problem, impulse, i, end, body0, body1, gradient);
 			}
 			continue;
 		}
