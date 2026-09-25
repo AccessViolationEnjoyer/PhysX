@@ -758,6 +758,43 @@ public:
 	PxReal newtonRegularization;
 
 	/**
+	\brief Maximum dilatancy corrections after each Newton contact solve.
+
+	Only used by PxSolverType::eNEWTON. Sliding contacts under pyramidal friction gain a small
+	separating velocity (dilatancy) unless their friction edges are biased by the solved slip
+	speed. Each correction re-solves with biases from the previous solution. 0 disables the
+	corrections, which is cheaper when contacts slide but lets sliding contacts separate slightly.
+
+	<b>Default:</b> 4
+	*/
+	PxU32 newtonDilatancyCorrections;
+
+	/**
+	\brief Newton contact regularization at zero penetration.
+
+	Only used by PxSolverType::eNEWTON when newtonStiffeningDepth is greater than zero. Contacts
+	start at this regularization and stiffen smoothly to newtonRegularization as penetration
+	reaches newtonStiffeningDepth, like MuJoCo's position-dependent impedance. Softer first
+	contact converges in fewer iterations; the stiffening limits how far loaded contacts sink.
+	Must be greater than zero.
+
+	<b>Default:</b> 1e-2
+	*/
+	PxReal newtonSurfaceRegularization;
+
+	/**
+	\brief Penetration depth over which Newton contacts stiffen from newtonSurfaceRegularization
+	to newtonRegularization.
+
+	Only used by PxSolverType::eNEWTON. 0 disables stiffening, so every contact uses
+	newtonRegularization. A depth that is short for the contact loads makes the stiffness change
+	sharply between steps, so contacts can oscillate. Must not be negative.
+
+	<b>Default:</b> 2e-5 * PxTolerancesScale::length
+	*/
+	PxReal newtonStiffeningDepth;
+
+	/**
 	\brief A contact with a relative velocity below this will not bounce. A typical value for simulation.
 	stability is about 0.2 * gravity.
 
@@ -1121,6 +1158,9 @@ PX_INLINE PxSceneDesc::PxSceneDesc(const PxTolerancesScale& scale):
 	newtonMaxIterations				(100),
 	newtonTolerance					(1e-8f),
 	newtonRegularization				(1e-4f),
+	newtonDilatancyCorrections			(4),
+	newtonSurfaceRegularization			(1e-2f),
+	newtonStiffeningDepth				(2e-5f * scale.length),
 	bounceThresholdVelocity			(0.2f * scale.speed),
 	frictionOffsetThreshold			(0.04f * scale.length),
 	frictionCorrelationDistance		(0.025f * scale.length),
@@ -1227,6 +1267,10 @@ PX_INLINE bool PxSceneDesc::isValid() const
 			return false;
 		}
 		if(newtonRegularization <= 0.0f)
+		{
+			return false;
+		}
+		if(newtonSurfaceRegularization <= 0.0f || newtonStiffeningDepth < 0.0f)
 		{
 			return false;
 		}

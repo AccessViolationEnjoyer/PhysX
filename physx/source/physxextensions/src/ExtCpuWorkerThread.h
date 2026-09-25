@@ -7,6 +7,8 @@
 #define EXT_CPU_WORKER_THREAD_H
 
 #include "foundation/PxThread.h"
+#include "foundation/PxSync.h"
+#include "foundation/PxAtomic.h"
 #include "ExtTaskQueueHelper.h"
 #include "ExtSharedQueueEntryPool.h"
 
@@ -34,6 +36,16 @@ class DefaultCpuDispatcher;
 		PX_FORCE_INLINE	PxBaseTask*				getJob()	{ return mHelper.fetchTask<highPriorityT>();	}
 
 						void					execute();
+						PxBaseTask*				findTask();
+
+		// A sleeping worker is woken individually, so one submitted job wakes one worker.
+		// Claiming clears the sleeping flag; only the claimant signals the worker. The
+		// sleep order lets submitters wake the most recent sleeper, whose core is warmest.
+		PX_FORCE_INLINE	void					announceSleep(PxI32 order)	{ mWake.reset(); mSleepOrder = order; PxAtomicExchange(&mSleeping, 1);	}
+		PX_FORCE_INLINE	PxI32					sleepOrder()	const	{ return mSleeping ? mSleepOrder : PX_MIN_I32;	}
+		PX_FORCE_INLINE	bool					claimSleeping()			{ return PxAtomicCompareExchange(&mSleeping, 0, 1) == 1;	}
+		PX_FORCE_INLINE	void					wake()					{ mWake.set();	}
+		PX_FORCE_INLINE	void					waitForWake()			{ mWake.wait();	}
 
 		PX_FORCE_INLINE	bool					tryAcceptJobToLocalQueue(PxBaseTask& task, PxThread::Id taskSubmitionThread)
 												{
@@ -45,6 +57,9 @@ class DefaultCpuDispatcher;
 						DefaultCpuDispatcher*	mOwner;
 						TaskQueueHelper			mHelper;
 						PxThread::Id			mThreadId;
+						PxSync					mWake;
+						volatile PxI32			mSleeping;
+						volatile PxI32			mSleepOrder;
 	};
 
 #if PX_VC

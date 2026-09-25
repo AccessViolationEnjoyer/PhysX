@@ -68,13 +68,14 @@ physx/compiler/newton/native-build/profile/MujocoPalletConveyor.exe physx/tests/
 Arguments:
 
 ```text
-SnippetPalletConveyor output-prefix [steps=2000] [dt=.01] [position=16] [velocity=2] [threads=8] [pgs|newton] [regularization=1e-4] [Newton-iterations=100]
+SnippetPalletConveyor output-prefix [steps=2000] [dt=.01] [position=16] [velocity=2] [threads=8] [pgs|newton] [regularization=1e-4] [Newton-iterations=100] [dilatancy-corrections=4] [surface-regularization=1e-2] [stiffening-depth=2e-5]
 MujocoPalletConveyor scene.xml output-prefix mujoco|prototype [steps=2000] [dt=.01] [iterations=100] [threads=8] [impedance=0] [audit=0] [profile=0]
 ```
 
-The optional impedance argument overrides the XML contact impedance; zero means use the XML.
-The XML uses `solref="0.02 1"` and constant `solimp="0.9999 0.9999 0.001 0.5 2"` for hard,
-regularized contacts. Both Newton modes use a maximum of 100 iterations and MuJoCo-style
+The optional impedance argument sets a constant contact impedance (both `solimp` ends); zero
+means use the XML. The XML uses `solref="0.02 1"` and `solimp="0.990099 0.9999 0.00002 0.5 2"`,
+matching PhysX Newton's defaults: regularization 1e-2 at first touch, stiffening to 1e-4 over
+20 um of penetration (impedance 0.9999, or regularization 1e-4, is the former constant setting). Both Newton modes use a maximum of 100 iterations and MuJoCo-style
 normalized stopping tolerance 1e-8. Warm starting is enabled. PhysX uses
 `eENABLE_FRICTION_EVERY_ITERATION` and the requested position/velocity iterations.
 
@@ -116,7 +117,9 @@ constraint solve replaced in prototype mode.
 
 The MuJoCo XML uses a **positive 1 mm contact-detection margin**. The runner removes the
 margin's positional bias from the reference acceleration, keeping the intended rest distance
-at zero, as in PhysX. Thus the margin does not artificially prop the sheets apart. MuJoCo's
+at zero, as in PhysX. MuJoCo also measures `solimp` impedance from the margin, so the runner
+recomputes each contact row's impedance from its penetration and rescales that row's
+regularization and island copies to match; with constant `solimp` only the margin offset changes. Thus the margin does not artificially prop the sheets apart. MuJoCo's
 large positive-margin behavior differs from PhysX's speculative-contact handling; copying
 PhysX's 4 cm pair envelope made the MuJoCo scene unstable. This is a documented engine
 setting difference, not an identical-equations comparison between PhysX and MuJoCo. The two

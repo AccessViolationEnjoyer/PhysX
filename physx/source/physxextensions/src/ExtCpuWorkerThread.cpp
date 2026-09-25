@@ -10,7 +10,7 @@
 
 using namespace physx;
 
-Ext::CpuWorkerThread::CpuWorkerThread() : mOwner(NULL), mThreadId(0)
+Ext::CpuWorkerThread::CpuWorkerThread() : mOwner(NULL), mThreadId(0), mSleeping(0), mSleepOrder(0)
 {
 }
 
@@ -21,6 +21,21 @@ Ext::CpuWorkerThread::~CpuWorkerThread()
 #define HighPriority	true
 #define RegularPriority	false
 
+PxBaseTask* Ext::CpuWorkerThread::findTask()
+{
+	// PT: look for high priority tasks first, across threads
+	PxBaseTask* task = getJob<HighPriority>();
+	if(!task)
+		task = mOwner->fetchNextTask<HighPriority>();
+
+	// PT: then look for regular tasks
+	if(!task)
+		task = getJob<RegularPriority>();
+	if(!task)
+		task = mOwner->fetchNextTask<RegularPriority>();
+	return task;
+}
+
 void Ext::CpuWorkerThread::execute()
 {
 	mThreadId = getId();
@@ -29,19 +44,16 @@ void Ext::CpuWorkerThread::execute()
 
 	while(!quitIsSignalled())
     {
-		if(PxDefaultCpuDispatcherWaitForWorkMode::eWAIT_FOR_WORK == ownerWaitForWorkMode)
-			mOwner->resetWakeSignal();
-
-		// PT: look for high priority tasks first, across threads
-		PxBaseTask* task = getJob<HighPriority>();
-		if(!task)
-			task = mOwner->fetchNextTask<HighPriority>();
-
-		// PT: then look for regular tasks
-		if(!task)
-			task = getJob<RegularPriority>();
-		if(!task)
-			task = mOwner->fetchNextTask<RegularPriority>();
+		PxBaseTask* task = findTask();
+		// The wake signal is reset only before sleeping, so busy workers make no
+		// event calls. Jobs submitted before the announcement are found here.
+		if(!task && PxDefaultCpuDispatcherWaitForWorkMode::eWAIT_FOR_WORK == ownerWaitForWorkMode)
+		{
+			mOwner->prepareToWait(*this);
+			task = findTask();
+			if(task)
+				mOwner->cancelWait(*this);
+		}
 
 		if(task)
 		{
@@ -61,7 +73,7 @@ void Ext::CpuWorkerThread::execute()
 		else
 		{
 			PX_ASSERT(PxDefaultCpuDispatcherWaitForWorkMode::eWAIT_FOR_WORK == ownerWaitForWorkMode);
-			mOwner->waitForWork();
+			waitForWake();
 		}
 	}
 

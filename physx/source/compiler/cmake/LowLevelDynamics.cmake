@@ -202,6 +202,10 @@ SET_TARGET_PROPERTIES(PhysXNewton PROPERTIES
 	POSITION_INDEPENDENT_CODE ON)
 IF(MSVC)
 	TARGET_COMPILE_OPTIONS(PhysXNewton PRIVATE /fp:precise /EHsc)
+ELSEIF(EMSCRIPTEN)
+	# Emscripten's JavaScript exception handling routes every potentially throwing call
+	# through a JavaScript trampoline. The adapter catches nothing, so disable it there.
+	TARGET_COMPILE_OPTIONS(PhysXNewton PRIVATE -fno-fast-math -ffp-contract=off -fno-exceptions)
 ELSE()
 	TARGET_COMPILE_OPTIONS(PhysXNewton PRIVATE -fno-fast-math -ffp-contract=off -fexceptions)
 ENDIF()

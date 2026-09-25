@@ -38,6 +38,9 @@ freeSpeed - initialSpeed + timestep *
     (B * (initialSpeed - targetSpeed) + K * d * positionError)
 ```
 
+The four edges of a contact point are assembled from its normal and tangent Jacobians, and
+the shape's contact offset slop is not applied to Newton rows.
+
 Hard joint rows use the same reference policy. Native spring rows retain their exact implicit
 stiffness and damping law. Positive restitution, compliant contacts, contact modification,
 force caps and threshold reporting remain Newton-only PhysX extensions.
@@ -58,13 +61,29 @@ The maintained implementation lives under `source/lowleveldynamics/src/newton/`:
 The shared task pipeline selects
 `existing start task -> Newton island task -> existing end task` before PGS row packing.
 Independent islands run through PhysX's CPU dispatcher. A connected Newton island remains one
-PhysX task. Large Cholesky factors parallelize independent trailing block updates with up to eight
+PhysX task. Islands smaller than 16 bodies share one task chain, up to 16 bodies in total, so
+scattered resting objects do not each dispatch three tasks; every island in a batch is still
+prepared, factored and solved separately, with results identical to unbatched tasks. Large Cholesky factors parallelize independent trailing block updates with up to eight
 workers from PhysX's CPU dispatcher. The Newton island task participates in the work and waits at
 the same cooperative barriers used by PhysX's parallel PGS solver. Helpers are launched lazily on
 the first sufficiently large factorization and finish when that factorization ends. The established
 left-looking factorization remains unchanged for smaller factors; selection uses symbolic update
 work rather than body count. At most one island recruits helpers while other island tasks continue
 through the serial path. Newton adds no OpenMP dependency, and the PGS and TGS paths are unchanged.
+
+`PxDefaultCpuDispatcher` workers in wait-for-work mode sleep on their own wake signal. A
+submitted job wakes one sleeping worker, the one that slept most recently, instead of every
+sleeper; busy workers make no event calls. This applies to PGS and TGS scenes too.
+
+Sliding pyramid contacts are corrected for dilatancy by up to four continuation solves
+(`PxSceneDesc::newtonDilatancyCorrections`; 0 disables them), each biasing the contact's edges
+by the previous solution's slip speed. The main solve and the last correction use the full
+iteration limit. Intermediate corrections only estimate slip speed for the
+next bias, so they are limited to 20 iterations; if corrections stop while the last one was still
+limited, one more full-limit continuation finishes it. `NewtonSlidingTests` (boxes and a loaded
+container sliding down a ramp, and a loaded container pushed along a floor) measure the resulting
+lift-off: every budget of 15 or more matched the full limit, while 10 let the pushed container's
+load lift 0.6 mm. Without corrections, sliding bodies lift about 30 mm.
 
 Workspaces retain row, matrix, factor and result capacity between jobs. Warm starts store
 physical body corrections and transform angular corrections into the current inertia basis.
@@ -79,8 +98,11 @@ propagate into PGS or TGS.
 ## Current limitations
 
 The pyramidal cone uses static friction while a contact sticks and changes to dynamic friction
-when the solved contact retains tangential velocity. Equal coefficients use the original path
-without friction-state storage or velocity writeback. The pyramid can introduce upward velocity
+for the next step once every loaded point of the pair reaches its friction limit. For edge rows
+that means one inactive edge in each opposing pair; three-row blocks compare each tangent impulse
+with friction times the normal impulse. A slip-speed threshold is not used: soft friction lets a
+holding contact creep in proportion to its load, so such a threshold failed at large scales.
+Equal coefficients use the original path without friction-state storage or velocity writeback. The pyramid can introduce upward velocity
 while sliding; this behavior is covered by bounded regression tests and will be addressed
 separately if it is noticeable in practice.
 

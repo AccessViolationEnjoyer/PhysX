@@ -6,16 +6,28 @@
 #include <cmath>
 #include <type_traits>
 #include <vector>
-#if defined(__AVX2__) && (defined(__FMA__) || defined(_MSC_VER))
+// NEWTON_NO_SIMD selects the scalar reference kernels.
+// WebAssembly never takes the AVX2 path: Emscripten emulates it more slowly than SIMD128.
+#if !defined(NEWTON_NO_SIMD) && !defined(__wasm__) && defined(__AVX2__) && (defined(__FMA__) || defined(_MSC_VER))
 #define NEWTON_AVX2_FMA 1
 #endif
-#if defined(_M_X64) || defined(_M_IX86) || defined(__x86_64__) || defined(__i386__)
+#if !defined(NEWTON_NO_SIMD) && (defined(_M_X64) || defined(_M_IX86) || defined(__x86_64__) || defined(__i386__))
 #define NEWTON_X86_SIMD 1
 #if defined(NEWTON_AVX2_FMA)
 #include <immintrin.h>
 #else
 #include <emmintrin.h>
 #endif
+#endif
+// WebAssembly builds use 128-bit SIMD (Emscripten -msimd128). With -mrelaxed-simd,
+// multiply-adds may fuse, as they do in AVX2 builds.
+#if !defined(NEWTON_NO_SIMD) && defined(__wasm_simd128__)
+#define NEWTON_WASM_SIMD 1
+#include <wasm_simd128.h>
+#endif
+// Kernels without AVX2 use pairs of doubles from SSE2 or WebAssembly SIMD.
+#if defined(NEWTON_X86_SIMD) || defined(NEWTON_WASM_SIMD)
+#define NEWTON_SIMD128 1
 #endif
 
 namespace newton
@@ -28,17 +40,82 @@ namespace newton
 #define NEWTON_RESTRICT __restrict__
 #endif
 
+#if defined(NEWTON_SIMD128)
+// Two-double vector operations shared by the SSE2 and WebAssembly kernels.
+namespace simd
+{
+#if defined(NEWTON_WASM_SIMD)
+typedef v128_t Double2;
+NEWTON_FORCE_INLINE Double2 load(const double* values) { return wasm_v128_load(values); }
+NEWTON_FORCE_INLINE void store(double* values, Double2 value) { wasm_v128_store(values, value); }
+NEWTON_FORCE_INLINE Double2 splat(double value) { return wasm_f64x2_splat(value); }
+NEWTON_FORCE_INLINE Double2 zero() { return wasm_f64x2_const(0.0, 0.0); }
+NEWTON_FORCE_INLINE Double2 make(double low, double high) { return wasm_f64x2_make(low, high); }
+NEWTON_FORCE_INLINE Double2 absolute(Double2 value) { return wasm_f64x2_abs(value); }
+NEWTON_FORCE_INLINE Double2 add(Double2 left, Double2 right) { return wasm_f64x2_add(left, right); }
+NEWTON_FORCE_INLINE Double2 subtract(Double2 left, Double2 right) { return wasm_f64x2_sub(left, right); }
+NEWTON_FORCE_INLINE Double2 multiply(Double2 left, Double2 right) { return wasm_f64x2_mul(left, right); }
+NEWTON_FORCE_INLINE Double2 divide(Double2 left, Double2 right) { return wasm_f64x2_div(left, right); }
+// Pseudo-maximum: left < right ? right : left, which matches SSE2 for ordered values.
+NEWTON_FORCE_INLINE Double2 maximum(Double2 left, Double2 right) { return wasm_f64x2_pmax(left, right); }
+NEWTON_FORCE_INLINE Double2 greater(Double2 left, Double2 right) { return wasm_f64x2_gt(left, right); }
+NEWTON_FORCE_INLINE Double2 greaterEqual(Double2 left, Double2 right) { return wasm_f64x2_ge(left, right); }
+NEWTON_FORCE_INLINE Double2 less(Double2 left, Double2 right) { return wasm_f64x2_lt(left, right); }
+NEWTON_FORCE_INLINE Double2 notEqual(Double2 left, Double2 right) { return wasm_f64x2_ne(left, right); }
+NEWTON_FORCE_INLINE Double2 bitAnd(Double2 left, Double2 right) { return wasm_v128_and(left, right); }
+NEWTON_FORCE_INLINE Double2 bitOr(Double2 left, Double2 right) { return wasm_v128_or(left, right); }
+NEWTON_FORCE_INLINE int mask(Double2 value) { return int(wasm_i64x2_bitmask(value)); }
+NEWTON_FORCE_INLINE bool any(Double2 value) { return wasm_v128_any_true(value); }
+NEWTON_FORCE_INLINE double low(Double2 value) { return wasm_f64x2_extract_lane(value, 0); }
+NEWTON_FORCE_INLINE double high(Double2 value) { return wasm_f64x2_extract_lane(value, 1); }
+#if defined(__wasm_relaxed_simd__)
+NEWTON_FORCE_INLINE Double2 multiplyAdd(Double2 left, Double2 right, Double2 addend) { return wasm_f64x2_relaxed_madd(left, right, addend); }
+NEWTON_FORCE_INLINE Double2 negativeMultiplyAdd(Double2 left, Double2 right, Double2 addend) { return wasm_f64x2_relaxed_nmadd(left, right, addend); }
+#else
+NEWTON_FORCE_INLINE Double2 multiplyAdd(Double2 left, Double2 right, Double2 addend) { return wasm_f64x2_add(wasm_f64x2_mul(left, right), addend); }
+NEWTON_FORCE_INLINE Double2 negativeMultiplyAdd(Double2 left, Double2 right, Double2 addend) { return wasm_f64x2_sub(addend, wasm_f64x2_mul(left, right)); }
+#endif
+#else
+typedef __m128d Double2;
+NEWTON_FORCE_INLINE Double2 load(const double* values) { return _mm_loadu_pd(values); }
+NEWTON_FORCE_INLINE void store(double* values, Double2 value) { _mm_storeu_pd(values, value); }
+NEWTON_FORCE_INLINE Double2 splat(double value) { return _mm_set1_pd(value); }
+NEWTON_FORCE_INLINE Double2 zero() { return _mm_setzero_pd(); }
+NEWTON_FORCE_INLINE Double2 make(double low, double high) { return _mm_set_pd(high, low); }
+NEWTON_FORCE_INLINE Double2 absolute(Double2 value) { return _mm_andnot_pd(_mm_set1_pd(-0.0), value); }
+NEWTON_FORCE_INLINE Double2 add(Double2 left, Double2 right) { return _mm_add_pd(left, right); }
+NEWTON_FORCE_INLINE Double2 subtract(Double2 left, Double2 right) { return _mm_sub_pd(left, right); }
+NEWTON_FORCE_INLINE Double2 multiply(Double2 left, Double2 right) { return _mm_mul_pd(left, right); }
+NEWTON_FORCE_INLINE Double2 divide(Double2 left, Double2 right) { return _mm_div_pd(left, right); }
+NEWTON_FORCE_INLINE Double2 maximum(Double2 left, Double2 right) { return _mm_max_pd(left, right); }
+NEWTON_FORCE_INLINE Double2 greater(Double2 left, Double2 right) { return _mm_cmpgt_pd(left, right); }
+NEWTON_FORCE_INLINE Double2 greaterEqual(Double2 left, Double2 right) { return _mm_cmpge_pd(left, right); }
+NEWTON_FORCE_INLINE Double2 less(Double2 left, Double2 right) { return _mm_cmplt_pd(left, right); }
+NEWTON_FORCE_INLINE Double2 notEqual(Double2 left, Double2 right) { return _mm_cmpneq_pd(left, right); }
+NEWTON_FORCE_INLINE Double2 bitAnd(Double2 left, Double2 right) { return _mm_and_pd(left, right); }
+NEWTON_FORCE_INLINE Double2 bitOr(Double2 left, Double2 right) { return _mm_or_pd(left, right); }
+NEWTON_FORCE_INLINE int mask(Double2 value) { return _mm_movemask_pd(value); }
+NEWTON_FORCE_INLINE bool any(Double2 value) { return _mm_movemask_pd(value) != 0; }
+NEWTON_FORCE_INLINE double low(Double2 value) { return _mm_cvtsd_f64(value); }
+NEWTON_FORCE_INLINE double high(Double2 value) { return _mm_cvtsd_f64(_mm_unpackhi_pd(value, value)); }
+NEWTON_FORCE_INLINE Double2 multiplyAdd(Double2 left, Double2 right, Double2 addend) { return _mm_add_pd(_mm_mul_pd(left, right), addend); }
+NEWTON_FORCE_INLINE Double2 negativeMultiplyAdd(Double2 left, Double2 right, Double2 addend) { return _mm_sub_pd(addend, _mm_mul_pd(left, right)); }
+#endif
+NEWTON_FORCE_INLINE double sum(Double2 value) { return low(value) + high(value); }
+}
+#endif
+
 NEWTON_FORCE_INLINE void addScaled6(double* NEWTON_RESTRICT destination, const double* NEWTON_RESTRICT source, double scale)
 {
 #if defined(NEWTON_AVX2_FMA)
 	const __m256d multiplier = _mm256_set1_pd(scale);
 	_mm256_storeu_pd(destination, _mm256_fmadd_pd(multiplier, _mm256_loadu_pd(source), _mm256_loadu_pd(destination)));
 	_mm_storeu_pd(destination + 4, _mm_fmadd_pd(_mm256_castpd256_pd128(multiplier), _mm_loadu_pd(source + 4), _mm_loadu_pd(destination + 4)));
-#elif defined(NEWTON_X86_SIMD)
-	const __m128d multiplier = _mm_set1_pd(scale);
-	_mm_storeu_pd(destination, _mm_add_pd(_mm_loadu_pd(destination), _mm_mul_pd(multiplier, _mm_loadu_pd(source))));
-	_mm_storeu_pd(destination + 2, _mm_add_pd(_mm_loadu_pd(destination + 2), _mm_mul_pd(multiplier, _mm_loadu_pd(source + 2))));
-	_mm_storeu_pd(destination + 4, _mm_add_pd(_mm_loadu_pd(destination + 4), _mm_mul_pd(multiplier, _mm_loadu_pd(source + 4))));
+#elif defined(NEWTON_SIMD128)
+	const simd::Double2 multiplier = simd::splat(scale);
+	simd::store(destination, simd::multiplyAdd(multiplier, simd::load(source), simd::load(destination)));
+	simd::store(destination + 2, simd::multiplyAdd(multiplier, simd::load(source + 2), simd::load(destination + 2)));
+	simd::store(destination + 4, simd::multiplyAdd(multiplier, simd::load(source + 4), simd::load(destination + 4)));
 #else
 	for(int i = 0; i < 6; ++i)
 	{
@@ -53,11 +130,11 @@ NEWTON_FORCE_INLINE void subtractScaled6(double* NEWTON_RESTRICT destination, co
 	const __m256d multiplier = _mm256_set1_pd(scale);
 	_mm256_storeu_pd(destination, _mm256_fnmadd_pd(multiplier, _mm256_loadu_pd(source), _mm256_loadu_pd(destination)));
 	_mm_storeu_pd(destination + 4, _mm_fnmadd_pd(_mm256_castpd256_pd128(multiplier), _mm_loadu_pd(source + 4), _mm_loadu_pd(destination + 4)));
-#elif defined(NEWTON_X86_SIMD)
-	const __m128d multiplier = _mm_set1_pd(scale);
-	_mm_storeu_pd(destination, _mm_sub_pd(_mm_loadu_pd(destination), _mm_mul_pd(multiplier, _mm_loadu_pd(source))));
-	_mm_storeu_pd(destination + 2, _mm_sub_pd(_mm_loadu_pd(destination + 2), _mm_mul_pd(multiplier, _mm_loadu_pd(source + 2))));
-	_mm_storeu_pd(destination + 4, _mm_sub_pd(_mm_loadu_pd(destination + 4), _mm_mul_pd(multiplier, _mm_loadu_pd(source + 4))));
+#elif defined(NEWTON_SIMD128)
+	const simd::Double2 multiplier = simd::splat(scale);
+	simd::store(destination, simd::negativeMultiplyAdd(multiplier, simd::load(source), simd::load(destination)));
+	simd::store(destination + 2, simd::negativeMultiplyAdd(multiplier, simd::load(source + 2), simd::load(destination + 2)));
+	simd::store(destination + 4, simd::negativeMultiplyAdd(multiplier, simd::load(source + 4), simd::load(destination + 4)));
 #else
 	for(int i = 0; i < 6; ++i)
 	{
@@ -79,20 +156,20 @@ NEWTON_FORCE_INLINE void subtractMatrixVector6(double* NEWTON_RESTRICT destinati
 	}
 	_mm256_storeu_pd(destination, first);
 	_mm_storeu_pd(destination + 4, second);
-#elif defined(NEWTON_X86_SIMD)
-	__m128d first = _mm_loadu_pd(destination);
-	__m128d second = _mm_loadu_pd(destination + 2);
-	__m128d third = _mm_loadu_pd(destination + 4);
+#elif defined(NEWTON_SIMD128)
+	simd::Double2 first = simd::load(destination);
+	simd::Double2 second = simd::load(destination + 2);
+	simd::Double2 third = simd::load(destination + 4);
 	for(int column = 0; column < 6; ++column)
 	{
-		const __m128d multiplier = _mm_set1_pd(vector[column]);
-		first = _mm_sub_pd(first, _mm_mul_pd(multiplier, _mm_loadu_pd(matrix + 6 * column)));
-		second = _mm_sub_pd(second, _mm_mul_pd(multiplier, _mm_loadu_pd(matrix + 6 * column + 2)));
-		third = _mm_sub_pd(third, _mm_mul_pd(multiplier, _mm_loadu_pd(matrix + 6 * column + 4)));
+		const simd::Double2 multiplier = simd::splat(vector[column]);
+		first = simd::negativeMultiplyAdd(multiplier, simd::load(matrix + 6 * column), first);
+		second = simd::negativeMultiplyAdd(multiplier, simd::load(matrix + 6 * column + 2), second);
+		third = simd::negativeMultiplyAdd(multiplier, simd::load(matrix + 6 * column + 4), third);
 	}
-	_mm_storeu_pd(destination, first);
-	_mm_storeu_pd(destination + 2, second);
-	_mm_storeu_pd(destination + 4, third);
+	simd::store(destination, first);
+	simd::store(destination + 2, second);
+	simd::store(destination + 4, third);
 #else
 	for(int column = 0; column < 6; ++column)
 	{
@@ -112,17 +189,10 @@ NEWTON_FORCE_INLINE double dot6(const double* NEWTON_RESTRICT left, const double
 	const __m128d sum = _mm_add_pd(halves, _mm_unpackhi_pd(halves, halves));
 	const __m128d end = _mm_mul_pd(_mm_loadu_pd(left + 4), _mm_loadu_pd(right + 4));
 	return _mm_cvtsd_f64(sum) + _mm_cvtsd_f64(end) + _mm_cvtsd_f64(_mm_unpackhi_pd(end, end));
-#elif defined(NEWTON_X86_SIMD)
-	const __m128d first = _mm_mul_pd(_mm_loadu_pd(left), _mm_loadu_pd(right));
-	const __m128d second = _mm_mul_pd(_mm_loadu_pd(left + 2), _mm_loadu_pd(right + 2));
-	const __m128d third = _mm_mul_pd(_mm_loadu_pd(left + 4), _mm_loadu_pd(right + 4));
-	double result = _mm_cvtsd_f64(first);
-	result += _mm_cvtsd_f64(_mm_unpackhi_pd(first, first));
-	result += _mm_cvtsd_f64(second);
-	result += _mm_cvtsd_f64(_mm_unpackhi_pd(second, second));
-	result += _mm_cvtsd_f64(third);
-	result += _mm_cvtsd_f64(_mm_unpackhi_pd(third, third));
-	return result;
+#elif defined(NEWTON_SIMD128)
+	const simd::Double2 first = simd::multiply(simd::load(left), simd::load(right));
+	const simd::Double2 second = simd::multiplyAdd(simd::load(left + 2), simd::load(right + 2), first);
+	return simd::sum(simd::multiplyAdd(simd::load(left + 4), simd::load(right + 4), second));
 #else
 	double result = left[0] * right[0];
 	for(int i = 1; i < 6; ++i)
@@ -130,6 +200,32 @@ NEWTON_FORCE_INLINE double dot6(const double* NEWTON_RESTRICT left, const double
 		result += left[i] * right[i];
 	}
 	return result;
+#endif
+}
+
+// Number of entries that compare unequal to zero, including NaN.
+NEWTON_FORCE_INLINE int nonzeroCount6(const double* values)
+{
+#if defined(NEWTON_AVX2_FMA)
+	const int head = _mm256_movemask_pd(_mm256_cmp_pd(_mm256_loadu_pd(values), _mm256_setzero_pd(), _CMP_NEQ_UQ));
+	const int tail = _mm_movemask_pd(_mm_cmp_pd(_mm_loadu_pd(values + 4), _mm_setzero_pd(), _CMP_NEQ_UQ));
+	return int(_mm_popcnt_u32(unsigned(head | (tail << 4))));
+#elif defined(NEWTON_SIMD128)
+	const simd::Double2 zero = simd::zero();
+	int count = 0;
+	for(int i = 0; i < 6; i += 2)
+	{
+		const int nonzero = simd::mask(simd::notEqual(simd::load(values + i), zero));
+		count += (nonzero & 1) + (nonzero >> 1);
+	}
+	return count;
+#else
+	int count = 0;
+	for(int i = 0; i < 6; ++i)
+	{
+		count += values[i] != 0.0;
+	}
+	return count;
 #endif
 }
 
@@ -144,6 +240,13 @@ NEWTON_FORCE_INLINE double dot6Pair(const double* NEWTON_RESTRICT left0, const d
 	const __m128d halves = _mm_add_pd(_mm256_castpd256_pd128(first), _mm256_extractf128_pd(first, 1));
 	const __m128d sum = _mm_add_pd(halves, _mm_unpackhi_pd(halves, halves));
 	return _mm_cvtsd_f64(sum) + _mm_cvtsd_f64(end) + _mm_cvtsd_f64(_mm_unpackhi_pd(end, end));
+#elif defined(NEWTON_SIMD128)
+	simd::Double2 sum = simd::multiplyAdd(simd::load(left1), simd::load(right1), simd::multiply(simd::load(left0), simd::load(right0)));
+	sum = simd::multiplyAdd(simd::load(left0 + 2), simd::load(right0 + 2), sum);
+	sum = simd::multiplyAdd(simd::load(left1 + 2), simd::load(right1 + 2), sum);
+	sum = simd::multiplyAdd(simd::load(left0 + 4), simd::load(right0 + 4), sum);
+	sum = simd::multiplyAdd(simd::load(left1 + 4), simd::load(right1 + 4), sum);
+	return simd::sum(sum);
 #else
 	return dot6(left0, right0) + dot6(left1, right1);
 #endif
@@ -200,22 +303,41 @@ NEWTON_FORCE_INLINE void subtractProduct6(double* NEWTON_RESTRICT destination, c
 	_mm_storeu_pd(destination + 28, second4);
 	_mm256_storeu_pd(destination + 30, first5);
 	_mm_storeu_pd(destination + 34, second5);
-#elif defined(NEWTON_X86_SIMD)
-	for(int column = 0; column < 6; ++column)
+#elif defined(NEWTON_SIMD128)
+	// Three result columns share each loaded left column: nine accumulators fit the
+	// sixteen SSE2 registers and V8's WebAssembly register allocation.
+	for(int column = 0; column < 6; column += 3)
 	{
-		__m128d first = _mm_loadu_pd(destination + 6 * column);
-		__m128d second = _mm_loadu_pd(destination + 6 * column + 2);
-		__m128d third = _mm_loadu_pd(destination + 6 * column + 4);
+		double* target = destination + 6 * column;
+		simd::Double2 first0 = simd::load(target), second0 = simd::load(target + 2), third0 = simd::load(target + 4);
+		simd::Double2 first1 = simd::load(target + 6), second1 = simd::load(target + 8), third1 = simd::load(target + 10);
+		simd::Double2 first2 = simd::load(target + 12), second2 = simd::load(target + 14), third2 = simd::load(target + 16);
 		for(int inner = 0; inner < 6; ++inner)
 		{
-			const __m128d multiplier = _mm_set1_pd(right[6 * inner + column]);
-			first = _mm_sub_pd(first, _mm_mul_pd(multiplier, _mm_loadu_pd(left + 6 * inner)));
-			second = _mm_sub_pd(second, _mm_mul_pd(multiplier, _mm_loadu_pd(left + 6 * inner + 2)));
-			third = _mm_sub_pd(third, _mm_mul_pd(multiplier, _mm_loadu_pd(left + 6 * inner + 4)));
+			const double* source = left + 6 * inner;
+			const simd::Double2 leftFirst = simd::load(source), leftSecond = simd::load(source + 2), leftThird = simd::load(source + 4);
+			simd::Double2 multiplier = simd::splat(right[6 * inner + column]);
+			first0 = simd::negativeMultiplyAdd(multiplier, leftFirst, first0);
+			second0 = simd::negativeMultiplyAdd(multiplier, leftSecond, second0);
+			third0 = simd::negativeMultiplyAdd(multiplier, leftThird, third0);
+			multiplier = simd::splat(right[6 * inner + column + 1]);
+			first1 = simd::negativeMultiplyAdd(multiplier, leftFirst, first1);
+			second1 = simd::negativeMultiplyAdd(multiplier, leftSecond, second1);
+			third1 = simd::negativeMultiplyAdd(multiplier, leftThird, third1);
+			multiplier = simd::splat(right[6 * inner + column + 2]);
+			first2 = simd::negativeMultiplyAdd(multiplier, leftFirst, first2);
+			second2 = simd::negativeMultiplyAdd(multiplier, leftSecond, second2);
+			third2 = simd::negativeMultiplyAdd(multiplier, leftThird, third2);
 		}
-		_mm_storeu_pd(destination + 6 * column, first);
-		_mm_storeu_pd(destination + 6 * column + 2, second);
-		_mm_storeu_pd(destination + 6 * column + 4, third);
+		simd::store(target, first0);
+		simd::store(target + 2, second0);
+		simd::store(target + 4, third0);
+		simd::store(target + 6, first1);
+		simd::store(target + 8, second1);
+		simd::store(target + 10, third1);
+		simd::store(target + 12, first2);
+		simd::store(target + 14, second2);
+		simd::store(target + 16, third2);
 	}
 #else
 	for(int column = 0; column < 6; ++column)
@@ -267,6 +389,51 @@ NEWTON_FORCE_INLINE void subtractLowerOuterProduct6(double* destination, const d
 	_mm_store_sd(destination + 23, column3End);
 	_mm_storeu_pd(destination + 28, column4);
 	_mm_store_sd(destination + 35, column5);
+#elif defined(NEWTON_SIMD128)
+	// Even-aligned row pairs: columns 0 and 1 over rows 0-5, then columns 2 and 3 over
+	// rows 2-5 and columns 4 and 5 over rows 4 and 5. Column 1's row 0 and column 3's
+	// row 2 are upper entries, which are never read.
+	simd::Double2 column00 = simd::load(destination), column01 = simd::load(destination + 2), column02 = simd::load(destination + 4);
+	simd::Double2 column10 = simd::load(destination + 6), column11 = simd::load(destination + 8), column12 = simd::load(destination + 10);
+	for(int vector = 0; vector < 6; ++vector)
+	{
+		const double* value = vectors + 6 * vector;
+		const simd::Double2 rows0 = simd::load(value), rows2 = simd::load(value + 2), rows4 = simd::load(value + 4);
+		const simd::Double2 scale0 = simd::splat(value[0]), scale1 = simd::splat(value[1]);
+		column00 = simd::negativeMultiplyAdd(scale0, rows0, column00);
+		column01 = simd::negativeMultiplyAdd(scale0, rows2, column01);
+		column02 = simd::negativeMultiplyAdd(scale0, rows4, column02);
+		column10 = simd::negativeMultiplyAdd(scale1, rows0, column10);
+		column11 = simd::negativeMultiplyAdd(scale1, rows2, column11);
+		column12 = simd::negativeMultiplyAdd(scale1, rows4, column12);
+	}
+	simd::store(destination, column00);
+	simd::store(destination + 2, column01);
+	simd::store(destination + 4, column02);
+	simd::store(destination + 6, column10);
+	simd::store(destination + 8, column11);
+	simd::store(destination + 10, column12);
+	simd::Double2 column21 = simd::load(destination + 14), column22 = simd::load(destination + 16);
+	simd::Double2 column31 = simd::load(destination + 20), column32 = simd::load(destination + 22);
+	simd::Double2 column42 = simd::load(destination + 28), column52 = simd::load(destination + 34);
+	for(int vector = 0; vector < 6; ++vector)
+	{
+		const double* value = vectors + 6 * vector;
+		const simd::Double2 rows2 = simd::load(value + 2), rows4 = simd::load(value + 4);
+		const simd::Double2 scale2 = simd::splat(value[2]), scale3 = simd::splat(value[3]);
+		column21 = simd::negativeMultiplyAdd(scale2, rows2, column21);
+		column22 = simd::negativeMultiplyAdd(scale2, rows4, column22);
+		column31 = simd::negativeMultiplyAdd(scale3, rows2, column31);
+		column32 = simd::negativeMultiplyAdd(scale3, rows4, column32);
+		column42 = simd::negativeMultiplyAdd(simd::splat(value[4]), rows4, column42);
+		column52 = simd::negativeMultiplyAdd(simd::splat(value[5]), rows4, column52);
+	}
+	simd::store(destination + 14, column21);
+	simd::store(destination + 16, column22);
+	simd::store(destination + 20, column31);
+	simd::store(destination + 22, column32);
+	simd::store(destination + 28, column42);
+	simd::store(destination + 34, column52);
 #else
 	for(int column = 0; column < 6; ++column)
 	{
@@ -294,17 +461,10 @@ NEWTON_FORCE_INLINE double subtractDot6(double value, const double* left, const 
 	value -= _mm_cvtsd_f64(end);
 	value -= _mm_cvtsd_f64(_mm_unpackhi_pd(end, end));
 	return value;
-#elif defined(NEWTON_X86_SIMD)
-	const __m128d first = _mm_mul_pd(_mm_loadu_pd(left), _mm_loadu_pd(right));
-	const __m128d second = _mm_mul_pd(_mm_loadu_pd(left + 2), _mm_loadu_pd(right + 2));
-	const __m128d third = _mm_mul_pd(_mm_loadu_pd(left + 4), _mm_loadu_pd(right + 4));
-	value -= _mm_cvtsd_f64(first);
-	value -= _mm_cvtsd_f64(_mm_unpackhi_pd(first, first));
-	value -= _mm_cvtsd_f64(second);
-	value -= _mm_cvtsd_f64(_mm_unpackhi_pd(second, second));
-	value -= _mm_cvtsd_f64(third);
-	value -= _mm_cvtsd_f64(_mm_unpackhi_pd(third, third));
-	return value;
+#elif defined(NEWTON_SIMD128)
+	const simd::Double2 first = simd::multiply(simd::load(left), simd::load(right));
+	const simd::Double2 second = simd::multiplyAdd(simd::load(left + 2), simd::load(right + 2), first);
+	return value - simd::sum(simd::multiplyAdd(simd::load(left + 4), simd::load(right + 4), second));
 #else
 	for(int i = 0; i < 6; ++i)
 	{
@@ -329,15 +489,15 @@ NEWTON_FORCE_INLINE void updateCholesky6(double* NEWTON_RESTRICT factor, double*
 	const __m128d nextFactorEnd = _mm_fmadd_pd(updateEnd, oldWorkEnd, _mm_mul_pd(inverseEnd, _mm_loadu_pd(factor + 4)));
 	_mm_storeu_pd(factor + 4, nextFactorEnd);
 	_mm_storeu_pd(work + 4, _mm_fmsub_pd(cosineEnd, oldWorkEnd, _mm_mul_pd(sineEnd, nextFactorEnd)));
-#elif defined(NEWTON_X86_SIMD)
-	const __m128d inverse = _mm_set1_pd(inverseC), update = _mm_set1_pd(signedSC);
-	const __m128d cosine = _mm_set1_pd(c), sine = _mm_set1_pd(s);
+#elif defined(NEWTON_SIMD128)
+	const simd::Double2 inverse = simd::splat(inverseC), update = simd::splat(signedSC);
+	const simd::Double2 cosine = simd::splat(c), sine = simd::splat(s);
 	for(int axis = 0; axis < 6; axis += 2)
 	{
-		const __m128d oldWork = _mm_loadu_pd(work + axis);
-		const __m128d nextFactor = _mm_add_pd(_mm_mul_pd(inverse, _mm_loadu_pd(factor + axis)), _mm_mul_pd(update, oldWork));
-		_mm_storeu_pd(factor + axis, nextFactor);
-		_mm_storeu_pd(work + axis, _mm_sub_pd(_mm_mul_pd(cosine, oldWork), _mm_mul_pd(sine, nextFactor)));
+		const simd::Double2 oldWork = simd::load(work + axis);
+		const simd::Double2 nextFactor = simd::multiplyAdd(update, oldWork, simd::multiply(inverse, simd::load(factor + axis)));
+		simd::store(factor + axis, nextFactor);
+		simd::store(work + axis, simd::negativeMultiplyAdd(sine, nextFactor, simd::multiply(cosine, oldWork)));
 	}
 #else
 	for(int axis = 0; axis < 6; ++axis)
@@ -873,6 +1033,15 @@ public:
 			result += _mm_cvtsd_f64(_mm_unpackhi_pd(low, low));
 			result += _mm_cvtsd_f64(high);
 			result += _mm_cvtsd_f64(_mm_unpackhi_pd(high, high));
+		}
+		for(; i < count; ++i)
+#elif defined(NEWTON_SIMD128)
+		std::uint32_t i = 0;
+		for(; i + 2 <= count; i += 2)
+		{
+			const simd::Double2 products = simd::multiply(simd::load(m_values.data() + i), simd::load(other.m_values.data() + i));
+			result += simd::low(products);
+			result += simd::high(products);
 		}
 		for(; i < count; ++i)
 #else

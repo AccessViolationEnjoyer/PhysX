@@ -129,6 +129,23 @@ struct Problem
 	std::vector<int> hessianContactBlocks;
 	std::vector<int> hessianDiagonalBlocks;
 	int equalityRows = 0;
+	// Structural arithmetic of a fresh factorization's contact outer products, counting
+	// potential entries of inactive rows too. It is computed when the update or refactor
+	// choice first needs it; solves that never update skip it.
+	mutable double contactRebuildWork = -1.0;
+	double rebuildWorkEstimate() const
+	{
+		if(contactRebuildWork < 0.0)
+		{
+			double work = 0.0;
+			for(const CompactContact& contact : contacts)
+			{
+				work += rebuildWork(contact);
+			}
+			contactRebuildWork = work;
+		}
+		return contactRebuildWork;
+	}
 	bool isUnilateral() const { return equalityRows == 0 && coupledContacts.empty() && scalarBounds.empty() && patches.empty(); }
 	VectorStorage freeVelocity;
 	VectorStorage regularization;
@@ -221,6 +238,32 @@ struct Problem
 		}
 		return block(contact).tangentJacobian[end].row(axis).transpose();
 	}
+	double rebuildWork(const CompactContact& contact) const
+	{
+		if(contact.rowCount() == 1)
+		{
+			const int count = (contact.body[0] >= 0 ? nonzeroCount6(contact.jacobian[0].data()) : 0) +
+				(contact.body[1] >= 0 ? nonzeroCount6(contact.jacobian[1].data()) : 0);
+			return double(count) * (count + 3);
+		}
+		double work = 0.0;
+		for(int axis = 0; axis < 3; ++axis)
+		{
+			int count = 0;
+			for(int end = 0; end < 2; ++end)
+			{
+				if(contact.body[end] >= 0)
+				{
+					for(int column = 0; column < 6; ++column)
+					{
+						count += contactEntry(contact, end, axis, column) != 0.0;
+					}
+				}
+			}
+			work += double(count) * (count + 3) * (contact.block > 0 ? 3.0 : 1.0);
+		}
+		return work;
+	}
 	double contactEntry(const CompactContact& contact, int end, int axis, int column) const
 	{
 		return axis == 2 ? contact.jacobian[end][column] : block(contact).tangentJacobian[end](axis, column);
@@ -247,6 +290,7 @@ struct SolverStatistics
 	int rankUpdates = 0;
 	int reusedFactors = 0;
 	int factorFallbacks = 0;
+	int interiorPointSteps = 0;
 	double matrixMs = 0.0;
 	double evaluationMs = 0.0;
 	double lineSearchMs = 0.0;
@@ -282,8 +326,23 @@ struct Settings
 	ParallelExecutor* parallelExecutor = NULL;
 	double tolerance = 1.0e-8;
 	double lineTolerance = 0.01;
+	// Unilateral solves continue with interior-point steps once Newton has run at least
+	// interiorPointSwitch iterations with three consecutive short line-search steps, or
+	// four times that many iterations (negative disables). They return to Newton once
+	// the scaled gradient is below interiorPointExit. Each step counts as an iteration.
+	int interiorPointSwitch = 20;
+	double interiorPointExit = 1.0e-3;
+	// Rows whose interior-point weight times compliance is below this are omitted from
+	// the factored Hessian only; interior-point step equations use every exact weight.
+	double interiorPointDrop = 1.0e-7;
+	// Continuations of an interior-point solve warm start with multipliers shifted by
+	// this fraction of their mean (negative restarts with Newton).
+	double interiorPointWarmShift = 1.0e-1;
 	bool checkFactor = false;
-	bool profile = false; // Detailed phase timers; total solve time is always measured.
+	bool profile = false; // Detailed phase timers.
+	// Measures Result::elapsedMs. Clock reads leave WebAssembly, so callers that do not
+	// read the total can disable it.
+	bool timing = true;
 };
 
 // Pack scalar rows and construct J from the contact blocks. Called during constraint preparation.

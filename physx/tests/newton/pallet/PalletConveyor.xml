@@ -4,7 +4,7 @@
 	<option timestep="0.01" gravity="0 -9.81 0" integrator="Euler" solver="Newton"
 		cone="pyramidal" jacobian="sparse" iterations="100" tolerance="1e-8" ls_tolerance="0.01"/>
 	<default><geom type="box" condim="3" friction="0.5 0 0" margin="0.001" gap="0"
-		solref="0.02 1" solimp="0.9999 0.9999 0.001 0.5 2"/></default>
+		solref="0.02 1" solimp="0.990099 0.9999 0.00002 0.5 2"/></default>
 	<visual><global offwidth="1280" offheight="720"/><headlight ambient="0.4 0.4 0.4"/></visual>
 	<worldbody>
 		<light pos="0 10 0" dir="0 -1 0" directional="true"/>

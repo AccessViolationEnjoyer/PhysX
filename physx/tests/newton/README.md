@@ -14,8 +14,19 @@ criteria and safeguarded line search. `IncrementalCholesky.h` orders small body 
 retained minimum-degree implementation and larger graphs with METIS,
 constructs the permuted sparse matrix in linear time, and chooses incremental updates or a
 fresh factorization using structural work estimates. `BlockCholesky.h` supplies small rigid-body
-block kernels, retaining scalar LLT for thin factors and failed block pivots. Positive updates
+block kernels for every factor, retaining scalar LLT only for failed block pivots. The serial block
+factor reads the Hessian's 6x6 body-pair blocks directly; the scalar CSC Hessian is exported only
+for symbolic analysis and the scalar or parallel paths. Positive updates
 precede downdates. A numerical loss of rank triggers a complete current-Hessian rebuild.
+
+Stiff contacts (small compliance R) make the objective's curvature jump by about 1/R at each
+row's kink, so Newton's exact line search can stop after only a few active-set changes. Such
+solves needed 60-180 iterations on the pallet fall-off. Unilateral solves that are still
+unconverged after `Settings::interiorPointSwitch` Newton iterations, with repeated short steps,
+continue with Mehrotra predictor-corrector interior-point steps. Their Newton system has the same
+`I + J' D J` shape, so they reuse the Hessian assembly and sparse factor; they need about 25
+steps on those problems. Newton finishes once the scaled gradient is below `interiorPointExit`.
+Continuations of such a solve warm start the interior point from its previous multipliers.
 
 A native island uses one ordinary `solveNewton` call. Each new island and timestep starts a
 fresh numerical factor; there is no cross-timestep numerical-factor reuse. Scratch capacity and
@@ -63,10 +74,22 @@ switching is not implemented.
 
 Native Newton uses the existing island startup and completion tasks, with its own constraint
 preparation and solve between them. Scene settings default to `newtonMaxIterations = 100`,
-`newtonTolerance = 1e-8` and `newtonRegularization = 1e-4`. Contacts use MuJoCo's four-edge
+`newtonTolerance = 1e-8` and `newtonRegularization = 1e-4`, with contacts softened to 1e-2 at
+first touch (see below). Contacts use MuJoCo's four-edge
 pyramidal formulation and reference-acceleration equation. Hard joint rows use the same reference
 policy; spring rows retain their specified implicit stiffness and damping. Invalid settings and
 unsupported articulation/GPU insertion paths are checked in Release as well as Checked builds.
+
+`newtonSurfaceRegularization` and `newtonStiffeningDepth` soften contacts at first touch, like
+MuJoCo's position-dependent impedance: the impedance follows MuJoCo's smooth step (midpoint 0.5,
+power 2) from the surface value at zero penetration to `newtonRegularization` at the stiffening
+depth, using each point's penetration at the start of the step. The defaults are 1e-2 over
+20 um (scaled by `PxTolerancesScale::length`); a depth of 0 restores constant regularization.
+On the five-pallet conveyor this raised the slipsheet overlap from 0.72 to 13.8 um and made the
+WebAssembly fall-off 28% faster; the connected 125-, 500- and 1,000-box piles took 3 instead of
+5 Newton iterations per step and ran 37-40% faster, with the bottom layer 8-11 um into the ground
+and no added motion at rest. Curves that are too steep for the load (surface 1e-1 over 2-10 um,
+or 1e-2 over 5 um) made contacts bob between steps and tripled iterations.
 
 The `native/` tests cover SDK rejection and allocation-recovery paths, joints, contact modification,
 compliance, friction, rolling and scale/orientation cases. Native profile CSV fields named
@@ -99,6 +122,25 @@ The standalone benchmark enables `PX_NEWTON_USE_AVX2` by default. The core optio
 off in other PhysX builds so the SDK retains its existing CPU requirement. Enable it explicitly
 on AVX2/FMA targets; the option applies only to the Newton numerical core and does not change
 PGS or TGS code generation.
+
+Without AVX2, the kernels use 128-bit pairs of doubles: SSE2 on x86, and WebAssembly SIMD128 in
+Emscripten builds, where the core adds `-msimd128`. `PX_NEWTON_USE_WASM_RELAXED_SIMD` also enables
+relaxed SIMD, which fuses multiply-adds where the host supports it and so changes rounding between
+hosts. Defining `NEWTON_NO_SIMD` selects the scalar reference kernels.
+
+Emscripten builds of the SDK use the Linux platform files. PhysX's dispatcher threads need
+`-pthread` on every object and a `-sPTHREAD_POOL_SIZE` of at least the worker count at link
+time; Node.js runs such builds directly. Emscripten 6's Clang reports new warnings in the
+existing SDK sources, so those builds need `-Wno-error`. The native adapter is compiled without
+C++ exceptions there, since Emscripten's JavaScript exception support routes each potentially
+throwing call through JavaScript. The SDK disables the solver's own clock reads
+(`Settings::timing`), which also leave WebAssembly.
+
+On the five-pallet conveyor with eight workers, a release WebAssembly build under Node.js runs
+about 11-14% behind native SSE2, uniformly across the solver's phases. Relaxed SIMD
+(`PX_NEWTON_USE_WASM_RELAXED_SIMD`) removes most of that gap (belt and fall-off steps about 11%
+faster) but requires a host with relaxed SIMD and makes rounding host-dependent. LTO measured
+within 1%.
 
 Test-only dependencies: Eigen 3.4.0, MuJoCo 3.13.0 (commit
 `123347c0eeab7e13c8da0828ab593bbd95bcf335`), and NumPy 1.26.4.

@@ -86,25 +86,10 @@ public:
 		{
 			m_blockOuter[k + 1] = m_blockOuter[k] + m_counts[k] + 1;
 		}
-		double scalarWork = 0.0, scalarEntries = 0.0;
-		for(int body = 0; body < bodies; ++body)
-		{
-			for(int axis = 0; axis < 6; ++axis)
-			{
-				const double count = 6 * (m_counts[body] + 1) - axis;
-				scalarEntries += count;
-				scalarWork += (count - 1.0) * (count + 2.0);
-			}
-		}
-		// Dense block kernels amortize their packing/export work on columns
-		// with substantial fill. Thin sparse factors use the established
-		// scalar path directly; the decision uses only symbolic work.
-		m_useBlocks = scalarWork >= 32.0 * scalarEntries;
-		if(!m_useBlocks)
-		{
-			StorageCholesky::analyzePattern(ap);
-			return;
-		}
+		// Block kernels read the Hessian's body-pair blocks directly, and measured faster
+		// than the scalar LLT even for thin chains, so every analyzed pattern uses them.
+		// The scalar LLT remains the fallback for a nonpositive block pivot.
+		m_useBlocks = true;
 		const int blocks = m_blockOuter[bodies];
 		m_blockRows.resize(blocks);
 		m_blockColumns.resize(blocks);
@@ -292,21 +277,122 @@ public:
 				return factorizeParallel(ap);
 			}
 		}
-		const int bodies = int(ap.cols()) / 6;
+		return factorizeSerial(&ap, NULL) || scalarFallback(ap);
+	}
+
+	// The serial block factor can read the Hessian's body-pair blocks directly,
+	// avoiding the scalar CSC export and permutation of every factorization.
+	bool readsBlocks() const { return m_useBlocks && m_updateTargets.empty(); }
+
+	// pairs are the Hessian's sorted (first, second) body pairs; permutation maps
+	// a body's first coordinate to its factor coordinate.
+	void prepareBlockInput(const std::vector<std::uint64_t>& pairs, const std::vector<int>& permutation)
+	{
+		if(!m_useBlocks)
+		{
+			return;
+		}
+		const int bodies = int(m_blockOuter.size()) - 1;
+		const std::uint32_t pairCount = std::uint32_t(pairs.size());
+		m_blockInputOuter.assign(bodies + 1, 0);
+		for(std::uint32_t pair = 0; pair < pairCount; ++pair)
+		{
+			const int first = permutation[6 * int(pairs[pair] >> 32)] / 6;
+			const int second = permutation[6 * int(std::uint32_t(pairs[pair]))] / 6;
+			++m_blockInputOuter[std::max(first, second) + 1];
+		}
+		for(int body = 0; body < bodies; ++body)
+		{
+			m_blockInputOuter[body + 1] += m_blockInputOuter[body];
+		}
+		m_counts.assign(m_blockInputOuter.begin(), m_blockInputOuter.end() - 1);
+		m_blockInputs.resize(pairCount);
+		for(std::uint32_t pair = 0; pair < pairCount; ++pair)
+		{
+			const int first = permutation[6 * int(pairs[pair] >> 32)] / 6;
+			const int second = permutation[6 * int(std::uint32_t(pairs[pair]))] / 6;
+			// A pair block holds rows of its second body and columns of its first.
+			// Factor column k reads row block k, so a second body factored first
+			// supplies the transposed block.
+			BlockInput& input = m_blockInputs[m_counts[std::max(first, second)]++];
+			input.source = int(pair);
+			input.target = std::min(first, second);
+			input.transpose = first > second;
+		}
+	}
+
+	// Factor directly from body-pair blocks. False leaves the caller to use the
+	// scalar input path, including its failed-pivot fallback.
+	bool factorizeBlocks(const Block* hessian)
+	{
+		return factorizeSerial(NULL, hessian);
+	}
+
+private:
+	struct BlockInput
+	{
+		int source;
+		int target;
+		bool transpose;
+	};
+
+	// Scatter row block k of the upper scalar input into the lower work blocks.
+	void scatterInputRow(const SparseStorage& ap, int k)
+	{
 		const int* inputOuter = ap.outerIndexPtr();
 		const double* inputValues = ap.valuePtr();
+		for(int axis = 0; axis < 6; ++axis)
+		{
+			const int column = 6 * k + axis;
+			const int end = inputOuter[column + 1];
+			for(int entry = inputOuter[column]; entry < end; ++entry)
+			{
+				const int coordinate = m_inputCoordinates[entry];
+				m_work[coordinate >> 3].data()[6 * (coordinate & 7) + axis] = inputValues[entry];
+			}
+		}
+	}
+
+	// Copy row block k of the Hessian's body-pair blocks into the work blocks.
+	void loadBlockRow(const Block* hessian, int k)
+	{
+		for(int index = m_blockInputOuter[k]; index < m_blockInputOuter[k + 1]; ++index)
+		{
+			const BlockInput& input = m_blockInputs[index];
+			Block& work = m_work[input.target];
+			const Block& source = hessian[input.source];
+			if(input.transpose)
+			{
+				for(int column = 0; column < 6; ++column)
+				{
+					for(int row = 0; row < 6; ++row)
+					{
+						work(row, column) = source(column, row);
+					}
+				}
+			}
+			else
+			{
+				work = source;
+			}
+		}
+	}
+
+	// Left-looking block factor reading row block k from the Hessian blocks when
+	// given, otherwise from the scalar input. A failed pivot clears the work
+	// blocks and returns false.
+	bool factorizeSerial(const SparseStorage* ap, const Block* hessian)
+	{
+		const int bodies = int(m_blockOuter.size()) - 1;
 		for(int k = 0; k < bodies; ++k)
 		{
-			// Scatter the upper input into the corresponding lower block row.
-			for(int axis = 0; axis < 6; ++axis)
+			if(hessian)
 			{
-				const int column = 6 * k + axis;
-				const int end = inputOuter[column + 1];
-				for(int entry = inputOuter[column]; entry < end; ++entry)
-				{
-					const int coordinate = m_inputCoordinates[entry];
-					m_work[coordinate >> 3].data()[6 * (coordinate & 7) + axis] = inputValues[entry];
-				}
+				loadBlockRow(hessian, k);
+			}
+			else
+			{
+				scatterInputRow(*ap, k);
 			}
 			Block& diagonal = m_work[k];
 			for(int rowEntry = m_rowOuter[k]; rowEntry < m_rowOuter[k + 1]; ++rowEntry)
@@ -348,7 +434,7 @@ public:
 				{
 					m_work[body].setZero();
 				}
-				return scalarFallback(ap);
+				return false;
 			}
 			m_blocks[m_blockOuter[k]] = lower;
 			for(int column = 0; column < 6; ++column)
@@ -362,7 +448,6 @@ public:
 		return true;
 	}
 
-private:
 	struct ParallelUpdate
 	{
 		BlockCholesky* factor;
@@ -629,7 +714,8 @@ private:
 	std::vector<int> m_blockOuter, m_blockRows, m_blockColumns, m_rowOuter, m_rowEntries, m_inputCoordinates;
 	std::vector<double> m_inverseDiagonal;
 	std::vector<int> m_solveLevels, m_solveLevelOuter, m_solveBodies;
-	std::vector<int> m_updateOuter, m_updateTargets, m_inputBlocks;
+	std::vector<int> m_updateOuter, m_updateTargets, m_inputBlocks, m_blockInputOuter;
+	std::vector<BlockInput> m_blockInputs;
 	std::vector<Block> m_blocks, m_work;
 };
 }

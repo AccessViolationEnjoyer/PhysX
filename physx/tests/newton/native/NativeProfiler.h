@@ -63,8 +63,9 @@ public:
 		{
 			return;
 		}
-		const uint64_t start = uint64_t(reinterpret_cast<uintptr_t>(data));
 		const uint64_t end = now();
+		// 32-bit targets keep only the start time's low bits; zones are far shorter than 4 s.
+		const uint64_t start = end - uint64_t(uintptr_t(uintptr_t(end) - reinterpret_cast<uintptr_t>(data)));
 		if(std::strcmp(name, "Dynamics.newtonIsland") == 0)
 		{
 			uint64_t earliest = firstStart.load();

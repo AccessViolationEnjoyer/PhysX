@@ -48,6 +48,11 @@ namespace physx
 namespace Dy
 {
 static volatile PxI32 gNewtonParallelTaskActive = 0;
+// Pyramid friction separates sliding contacts unless each edge is biased by the solved
+// slip speed (PxSceneDesc::newtonDilatancyCorrections). Intermediate corrections only
+// estimate that speed for the next bias, so they run a bounded number of iterations;
+// the final solve uses the full limit.
+static const int NEWTON_DILATANCY_ESTIMATE_ITERATIONS = 20;
 
 class NewtonParallelExecutor;
 
@@ -266,10 +271,13 @@ class NewtonSolver : public PxUserAllocated
 {
 	PX_NOCOPY(NewtonSolver)
 public:
-	explicit NewtonSolver(const PxSceneDesc& desc) : regularization(desc.newtonRegularization), update(0), errorReported(0)
+	explicit NewtonSolver(const PxSceneDesc& desc) : regularization(desc.newtonRegularization), dilatancyCorrections(desc.newtonDilatancyCorrections),
+		surfaceRegularization(desc.newtonSurfaceRegularization), stiffeningDepth(desc.newtonStiffeningDepth), update(0), errorReported(0)
 	{
 		settings.iterations = int(desc.newtonMaxIterations);
 		settings.tolerance = desc.newtonTolerance;
+		// The SDK reports solve time through profile zones, not Result::elapsedMs.
+		settings.timing = false;
 		// Dispatcher workers and a synchronous caller bound concurrent island solves.
 		const PxU32 workerCount = desc.cpuDispatcher ? desc.cpuDispatcher->getWorkerCount() : 0u;
 		const PxU32 workspaceCount = PxMax(workerCount + 1, 1u);
@@ -317,6 +325,9 @@ public:
 
 	newton::Settings settings;
 	PxReal regularization;
+	PxU32 dilatancyCorrections;
+	PxReal surfaceRegularization;
+	PxReal stiffeningDepth;
 	PxU64 update;
 	PxArray<NewtonBodySeed> seeds;
 	PxMutex mutex;
@@ -405,7 +416,7 @@ static void applyNewtonLocks(PxSolverBodyData& data, PxU8 lockFlags)
 	}
 }
 
-static void prepareNewtonBodies(NewtonSolver& solver, NewtonIslandWorkspace& workspace, ThreadContext& threadContext, PxSolverBodyData* bodyData, PxU32 bodyCount, PxReal timestep)
+static void prepareNewtonBodies(NewtonSolver& solver, NewtonIslandWorkspace& workspace, PxsBodyCore* const* bodyCores, const PxU32* nodeIndices, PxSolverBodyData* bodyData, PxU32 bodyCount, PxReal timestep)
 {
 	newton::Problem& problem = workspace.problem;
 	problem.timestep = timestep;
@@ -417,7 +428,7 @@ static void prepareNewtonBodies(NewtonSolver& solver, NewtonIslandWorkspace& wor
 
 	for(PxU32 i = 0; i < bodyCount; ++i)
 	{
-		const PxsBodyCore& body = *threadContext.mBodyCoreArray[i];
+		const PxsBodyCore& body = *bodyCores[i];
 		PxSolverBodyData& data = bodyData[i];
 		const PxU8 bodyLockFlags = PxU8(body.lockFlags);
 		workspace.lockFlags[i] = bodyLockFlags;
@@ -444,7 +455,7 @@ static void prepareNewtonBodies(NewtonSolver& solver, NewtonIslandWorkspace& wor
 			problem.freeBodyVelocity[bodyOffset + axis] = data.linearVelocity[axis];
 			problem.freeBodyVelocity[bodyOffset + axis + 3] = data.angularVelocity[axis];
 		}
-		const NewtonBodySeed& seed = solver.seeds[threadContext.mNodeIndexArray[i]];
+		const NewtonBodySeed& seed = solver.seeds[nodeIndices[i]];
 		if(matchesNewtonSeed(seed, body, solver.update) && seed.timestep == timestep)
 		{
 			const double rootMass = std::sqrt(mass);
@@ -480,7 +491,7 @@ static PxI32 newtonBodyIndex(PxU32 dataIndex, PxU32 firstBodyIndex, PxU32 bodyCo
 	return dataIndex > firstBodyIndex && dataIndex <= firstBodyIndex + bodyCount ? PxI32(dataIndex - firstBodyIndex - 1) : -1;
 }
 
-static void prepareNewtonRows(NewtonSolver& solver, NewtonIslandWorkspace& workspace, DynamicsContext& context, ThreadContext& threadContext, PxSolverBodyData* bodyData, PxU32 firstBodyIndex, PxU32 bodyCount)
+static void prepareNewtonRows(NewtonSolver& solver, NewtonIslandWorkspace& workspace, DynamicsContext& context, ThreadContext& threadContext, const Cm::SpatialVector* motionVelocities, PxSolverBodyData* bodyData, PxU32 firstBodyIndex, PxU32 bodyCount)
 {
 	newton::Problem& problem = workspace.problem;
 	problem.clearContacts();
@@ -492,16 +503,22 @@ static void prepareNewtonRows(NewtonSolver& solver, NewtonIslandWorkspace& works
 	jointSettings.timestep = timestep;
 	jointSettings.regularization = solver.regularization;
 	jointSettings.bodyLockFlags = workspace.lockFlags.begin();
-	jointSettings.initialVelocities = threadContext.motionVelocityArray;
+	jointSettings.initialVelocities = motionVelocities;
 	NewtonContactSettings contactSettings;
 	contactSettings.timestep = timestep;
 	contactSettings.regularization = solver.regularization;
 	contactSettings.bounceThreshold = context.getBounceThreshold();
 	contactSettings.ccdMaxSeparation = context.getCCDSeparationThreshold();
 	contactSettings.dilatancyTolerance = 1.0e-5f * context.getLengthScale();
-	contactSettings.correctDilatancy = true;
+	contactSettings.correctDilatancy = solver.dilatancyCorrections > 0;
+	contactSettings.impedance = 1.0 / (1.0 + double(contactSettings.regularization));
+	const double timeConstant = std::max(0.02, 2.0 * double(timestep));
+	contactSettings.damping = 2.0 / (contactSettings.impedance * timeConstant);
+	contactSettings.stiffness = 1.0 / (contactSettings.impedance * contactSettings.impedance * timeConstant * timeConstant);
+	contactSettings.surfaceImpedance = 1.0 / (1.0 + double(solver.surfaceRegularization));
+	contactSettings.stiffeningDepth = solver.stiffeningDepth;
 	contactSettings.bodyLockFlags = workspace.lockFlags.begin();
-	contactSettings.initialVelocities = threadContext.motionVelocityArray;
+	contactSettings.initialVelocities = motionVelocities;
 	const PxU32 contactDescriptionCount = threadContext.contactDescArraySize;
 	for(PxU32 i = 0; i < contactDescriptionCount; ++i)
 	{
@@ -510,6 +527,11 @@ static void prepareNewtonRows(NewtonSolver& solver, NewtonIslandWorkspace& works
 		const PxSolverBodyData& body1 = bodyData[desc.bodyBDataIndex];
 		const PxI32 index0 = newtonBodyIndex(desc.bodyADataIndex, firstBodyIndex, bodyCount);
 		const PxI32 index1 = newtonBodyIndex(desc.bodyBDataIndex, firstBodyIndex, bodyCount);
+		// A task batch may hold several small islands; each is solved separately.
+		if(index0 < 0 && index1 < 0)
+		{
+			continue;
+		}
 		if(desc.constraintType == DY_SC_TYPE_RB_1D)
 		{
 			const Constraint& constraint = *reinterpret_cast<const Constraint*>(desc.constraint);
@@ -560,11 +582,12 @@ static bool solveNewtonSystem(NewtonSolver& solver, NewtonIslandWorkspace& works
 	return status == newton::SolveStatus::eSUCCESS || status == newton::SolveStatus::eITERATION_LIMIT;
 }
 
-static bool continueNewtonSystem(NewtonSolver& solver, NewtonIslandWorkspace& workspace, newton::ParallelExecutor* parallelExecutor)
+static bool continueNewtonSystem(NewtonSolver& solver, NewtonIslandWorkspace& workspace, newton::ParallelExecutor* parallelExecutor, int iterations)
 {
 	workspace.previous = workspace.result;
 	newton::Settings settings = solver.settings;
 	settings.parallelExecutor = parallelExecutor;
+	settings.iterations = PxMin(settings.iterations, iterations);
 	const newton::SolveStatus::Enum status = newton::continueNewton(workspace.problem, settings, workspace.result, workspace.numeric, &workspace.previous);
 	PX_ASSERT(status != newton::SolveStatus::eINVALID_INPUT);
 	if(status == newton::SolveStatus::eSUCCESS || status == newton::SolveStatus::eITERATION_LIMIT)
@@ -590,18 +613,21 @@ static void profileNewtonSolve(const NewtonIslandWorkspace& workspace, PxU64 con
 	PX_PROFILE_VALUE(PxReal(workspace.result.scaledGradient), "Dynamics.newtonScaledGradient", contextId);
 }
 
-static bool solveNewtonRows(NewtonSolver& solver, NewtonIslandWorkspace& workspace, DynamicsContext& context, ThreadContext& threadContext, PxSolverBody* bodies, PxSolverBodyData* allBodyData, PxU32 firstBodyIndex, PxU32 bodyCount, newton::ParallelExecutor* parallelExecutor)
+static bool solveNewtonRows(NewtonSolver& solver, NewtonIslandWorkspace& workspace, DynamicsContext& context, ThreadContext& threadContext, PxSolverBody* bodies, PxSolverBodyData* allBodyData, PxU32 firstBodyIndex, PxU32 threadBodyOffset, PxU32 bodyCount, newton::ParallelExecutor* parallelExecutor)
 {
+	PxsBodyCore* const* bodyCores = threadContext.mBodyCoreArray + threadBodyOffset;
+	const PxU32* nodeIndices = threadContext.mNodeIndexArray + threadBodyOffset;
+	Cm::SpatialVector* motionVelocities = threadContext.motionVelocityArray + threadBodyOffset;
 	PX_PROFILE_ZONE("Dynamics.newtonIsland", context.getContextId());
 	PxSolverBodyData* bodyData = allBodyData + firstBodyIndex + 1;
 	const PxReal timestep = context.getDt();
 	{
 		PX_PROFILE_ZONE("Dynamics.newtonPrepare", context.getContextId());
-		prepareNewtonBodies(solver, workspace, threadContext, bodyData, bodyCount, timestep);
-		prepareNewtonRows(solver, workspace, context, threadContext, allBodyData, firstBodyIndex, bodyCount);
+		prepareNewtonBodies(solver, workspace, bodyCores, nodeIndices, bodyData, bodyCount, timestep);
+		prepareNewtonRows(solver, workspace, context, threadContext, motionVelocities, allBodyData, firstBodyIndex, bodyCount);
 		newton::prepareCompactProblemFromColumnCounts(workspace.problem);
 	}
-	threadContext.mAxisConstraintCount = PxU32(workspace.problem.rowCount());
+	threadContext.mAxisConstraintCount += PxU32(workspace.problem.rowCount());
 	{
 		PX_PROFILE_ZONE("Dynamics.newtonSolve", context.getContextId());
 		if(!solveNewtonSystem(solver, workspace, &workspace.previous, parallelExecutor))
@@ -609,29 +635,41 @@ static bool solveNewtonRows(NewtonSolver& solver, NewtonIslandWorkspace& workspa
 			solver.report("Newton position solve failed.");
 			return false;
 		}
+		// Dilatancy corrections re-solve with biases from the previous solution. The main and
+		// final solves use the full limit; intermediate ones only estimate slip speed, and one
+		// that meets its tolerance within that estimate budget is already final.
 		const PxReal velocityTolerance = 1.0e-5f * context.getLengthScale() / timestep;
-		for(PxU32 iteration = 0; iteration < 4; ++iteration)
+		const int fullIterations = solver.settings.iterations;
+		bool converged = true;
+		for(PxU32 iteration = 0; iteration < solver.dilatancyCorrections; ++iteration)
 		{
 			if(!updateNewtonDilatancyBias(workspace.contacts, workspace.problem, workspace.result, velocityTolerance))
 			{
 				break;
 			}
-			if(!continueNewtonSystem(solver, workspace, parallelExecutor))
+			const bool final = iteration + 1 == solver.dilatancyCorrections;
+			if(!continueNewtonSystem(solver, workspace, parallelExecutor, final ? fullIterations : NEWTON_DILATANCY_ESTIMATE_ITERATIONS))
 			{
 				solver.report("Newton dilatancy correction failed.");
+				converged = true;
 				break;
 			}
+			converged = final || workspace.result.status == newton::SolveStatus::eSUCCESS;
+		}
+		if(!converged && !continueNewtonSystem(solver, workspace, parallelExecutor, fullIterations))
+		{
+			solver.report("Newton dilatancy correction failed.");
 		}
 		profileNewtonSolve(workspace, context.getContextId());
 	}
-	storeNewtonCorrection(workspace.result, bodyData, threadContext.motionVelocityArray, NULL, bodyCount);
+	storeNewtonCorrection(workspace.result, bodyData, motionVelocities, NULL, bodyCount);
 	storeNewtonCorrection(workspace.result, bodyData, NULL, bodies, bodyCount);
 	writebackNewtonJoints(workspace.joints, workspace.problem, workspace.result);
 	writebackNewtonContacts(workspace.contacts, workspace.problem, workspace.result, context);
 	for(PxU32 i = 0; i < bodyCount; ++i)
 	{
-		NewtonBodySeed& seed = solver.seeds[threadContext.mNodeIndexArray[i]];
-		const PxsBodyCore& body = *threadContext.mBodyCoreArray[i];
+		NewtonBodySeed& seed = solver.seeds[nodeIndices[i]];
+		const PxsBodyCore& body = *bodyCores[i];
 		seed.body = &body;
 		seed.update = solver.update;
 		seed.linearCorrection = bodies[i].linearVelocity;
@@ -644,18 +682,18 @@ static bool solveNewtonRows(NewtonSolver& solver, NewtonIslandWorkspace& workspa
 	return true;
 }
 
-static bool solveNewtonIslandInternal(NewtonSolver& solver, DynamicsContext& context, ThreadContext& threadContext, PxSolverBody* bodies, PxSolverBodyData* bodyData, PxU32 firstBodyIndex, PxU32 bodyCount, newton::ParallelExecutor* parallelExecutor)
+static bool solveNewtonIslandInternal(NewtonSolver& solver, DynamicsContext& context, ThreadContext& threadContext, PxSolverBody* bodies, PxSolverBodyData* bodyData, PxU32 firstBodyIndex, PxU32 threadBodyOffset, PxU32 bodyCount, newton::ParallelExecutor* parallelExecutor)
 {
 	NewtonIslandWorkspace* workspace = solver.acquire();
-	const bool success = solveNewtonRows(solver, *workspace, context, threadContext, bodies, bodyData, firstBodyIndex, bodyCount, parallelExecutor);
+	const bool success = solveNewtonRows(solver, *workspace, context, threadContext, bodies, bodyData, firstBodyIndex, threadBodyOffset, bodyCount, parallelExecutor);
 	solver.release(workspace);
 	return success;
 }
 
-bool solveNewtonIsland(NewtonSolver& solver, DynamicsContext& context, ThreadContext& threadContext, PxSolverBody* bodies, PxSolverBodyData* bodyData, PxU32 firstBodyIndex, PxU32 bodyCount, PxBaseTask* continuation, PxU32 workerCount)
+bool solveNewtonIsland(NewtonSolver& solver, DynamicsContext& context, ThreadContext& threadContext, PxSolverBody* bodies, PxSolverBodyData* bodyData, PxU32 firstBodyIndex, PxU32 threadBodyOffset, PxU32 bodyCount, PxBaseTask* continuation, PxU32 workerCount)
 {
 	NewtonParallelExecutor parallelExecutor(context, continuation, workerCount);
-	const bool success = solveNewtonIslandInternal(solver, context, threadContext, bodies, bodyData, firstBodyIndex, bodyCount, &parallelExecutor);
+	const bool success = solveNewtonIslandInternal(solver, context, threadContext, bodies, bodyData, firstBodyIndex, threadBodyOffset, bodyCount, &parallelExecutor);
 	parallelExecutor.finish();
 	return success;
 }

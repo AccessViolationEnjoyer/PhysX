@@ -41,7 +41,9 @@ public:
 		m_factor.setParallelExecutor(parallelExecutor);
 	}
 
-	bool factor(const Problem& problem, Curvature& weights, Result& result)
+	// changedRows optionally lists every diagonal row whose weight differs from
+	// m_weights; otherwise the complete diagonal is compared.
+	bool factor(const Problem& problem, Curvature& weights, Result& result, const int* changedRows = NULL, int changedCount = 0)
 	{
 		reserveStorage(m_updates, std::uint32_t(problem.rowCount()));
 		if(m_size == 0)
@@ -59,21 +61,25 @@ public:
 		m_updates.clear();
 		m_patchUpdates.clear();
 		reserveStorage(m_patchUpdates, 4u * std::uint32_t(problem.patches.size()));
-		const int diagonalCount = weights.diagonal.size();
-		for(int row = 0; row < diagonalCount; ++row)
+		if(changedRows)
 		{
-			const double change = weights.diagonal[row] - m_weights.diagonal[row];
-			if(change == 0.0)
+			for(int i = 0; i < changedCount; ++i)
 			{
-				continue;
+				const int row = changedRows[i];
+				appendDiagonalUpdate(problem, row, weights.diagonal[row] - m_weights.diagonal[row]);
 			}
-			m_updates.emplace_back();
-			RankUpdate& update = m_updates.back();
-			update.contact = problem.rowContact[row];
-			const CompactContact& contact = problem.contacts[update.contact];
-			const int axis = contact.rowCount() == 1 ? 2 : row - contact.row;
-			update.axis = Vec3::Unit(axis) * std::sqrt(std::abs(change));
-			update.add = change > 0.0;
+		}
+		else
+		{
+			const int diagonalCount = weights.diagonal.size();
+			for(int row = 0; row < diagonalCount; ++row)
+			{
+				const double change = weights.diagonal[row] - m_weights.diagonal[row];
+				if(change != 0.0)
+				{
+					appendDiagonalUpdate(problem, row, change);
+				}
+			}
 		}
 		const int coupledCount = int(weights.coupled.size());
 		for(int block = 0; block < coupledCount; ++block)
@@ -129,7 +135,7 @@ public:
 		// estimate is deterministic and depends on the sparse pattern and
 		// current changed contacts, never wall time or a scene identifier.
 		// Matrix assembly remains serial; only discount the numeric factor work.
-		double refactorWork = m_refactorWork;
+		double refactorWork = m_factorWork + problem.rebuildWorkEstimate();
 		const int parallelWorkers = m_factor.parallelWorkerCount();
 		if(parallelWorkers > 1)
 		{
@@ -252,6 +258,14 @@ public:
 		return true;
 	}
 
+	// Numerically factor the Hessian of these weights without comparing them to the
+	// retained factor. Interior-point steps change every weight.
+	bool factorFresh(const Problem& problem, Curvature& weights, Result& result)
+	{
+		reserveStorage(m_updates, std::uint32_t(problem.rowCount()));
+		return refactor(problem, weights, result);
+	}
+
 	void solveDirection(ConstVector gradient, MutableVector direction)
 	{
 		// Solve H * direction = -gradient directly into the caller's buffer.
@@ -361,6 +375,22 @@ private:
 				}
 				_mm256_storeu_pd(destination, firstFour);
 				_mm_storeu_pd(destination + 4, lastTwo);
+#elif defined(NEWTON_SIMD128)
+				simd::Double2 low = simd::load(destination), middle = simd::load(destination + 2), high = simd::load(destination + 4);
+				for(int axis = 0; axis < 6; ++axis)
+				{
+					if(current[axis] != 0.0)
+					{
+						const double* column = values + entry + offColumn[axis];
+						const simd::Double2 scale = simd::splat(current[axis]);
+						low = simd::negativeMultiplyAdd(scale, simd::load(column), low);
+						middle = simd::negativeMultiplyAdd(scale, simd::load(column + 2), middle);
+						high = simd::negativeMultiplyAdd(scale, simd::load(column + 4), high);
+					}
+				}
+				simd::store(destination, low);
+				simd::store(destination + 2, middle);
+				simd::store(destination + 4, high);
 #else
 				for(int axis = 0; axis < 6; ++axis)
 				{
@@ -404,42 +434,71 @@ private:
 		}
 	}
 
+	void appendDiagonalUpdate(const Problem& problem, int row, double change)
+	{
+		m_updates.emplace_back();
+		RankUpdate& update = m_updates.back();
+		update.contact = problem.rowContact[row];
+		const CompactContact& contact = problem.contacts[update.contact];
+		const int axis = contact.rowCount() == 1 ? 2 : row - contact.row;
+		update.axis = Vec3::Unit(axis) * std::sqrt(std::abs(change));
+		update.add = change > 0.0;
+	}
+
+	// Exports the scalar CSC Hessian on first use within one refactorization.
+	const Sparse& exportedHessian(const Problem& problem, const Sparse*& matrix)
+	{
+		if(!matrix)
+		{
+			matrix = &exportHessian(problem, m_hessian);
+		}
+		return *matrix;
+	}
+
 	bool refactor(const Problem& problem, Curvature& weights, Result& result)
 	{
 		const bool firstFactor = m_size == 0;
 		bool changedPattern = false;
 		const Clock::time_point assemblyStart = profileStart(m_profile);
-		const Sparse& matrix = makeHessian(problem, weights, m_hessian);
+		assembleHessianBlocks(problem, weights, m_hessian);
+		// The scalar CSC Hessian is exported only for symbolic analysis and for
+		// factor paths that do not read the body-pair blocks directly.
+		const Sparse* matrix = NULL;
 		const double assemblyMs = profileElapsed(m_profile, assemblyStart);
 		result.matrixMs += assemblyMs;
 		const Clock::time_point factorStart = profileStart(m_profile);
 		if(m_size == 0)
 		{
 			const Clock::time_point symbolicStart = profileStart(m_profile);
-			const bool samePattern = m_outer.size() == std::uint32_t(matrix.outerSize() + 1) && m_inner.size() == std::uint32_t(matrix.nonZeros()) && std::equal(m_outer.begin(), m_outer.end(), matrix.outerIndexPtr()) && std::equal(m_inner.begin(), m_inner.end(), matrix.innerIndexPtr());
-			if(!samePattern)
+			// Sorted body pairs determine the complete sparse pattern.
+			if(m_pairs != problem.hessianPairs)
 			{
 				changedPattern = true;
-				orderBodies(matrix);
-				m_outer.assign(matrix.outerIndexPtr(), matrix.outerIndexPtr() + matrix.outerSize() + 1);
-				m_inner.assign(matrix.innerIndexPtr(), matrix.innerIndexPtr() + matrix.nonZeros());
-				preparePermutation(matrix);
+				const Sparse& pattern = exportedHessian(problem, matrix);
+				orderBodies(pattern);
+				m_pairs = problem.hessianPairs;
+				preparePermutation(pattern);
 				m_factor.analyzePattern(m_permuted);
+				m_factor.prepareBlockInput(m_pairs, m_permutation);
 				++result.symbolicAnalyses;
 			}
 			result.symbolicMs += profileElapsed(m_profile, symbolicStart);
 		}
-		m_size = int(matrix.rows());
+		m_size = problem.bodyCount() * 6;
 		m_vector.resize(m_size);
 		m_solution.resize(m_size);
-		const int nonzeroCount = matrix.nonZeros();
-		for(int entry = 0; entry < nonzeroCount; ++entry)
+		if(!m_factor.readsBlocks() || !m_factor.factorizeBlocks(m_hessian.blocks.data()))
 		{
-			m_permuted.valuePtr()[entry] = matrix.valuePtr()[m_permutedSourceIndices[entry]];
-		}
-		if(!m_factor.factorize(m_permuted))
-		{
-			return false;
+			const Sparse& values = exportedHessian(problem, matrix);
+			const int nonzeroCount = values.nonZeros();
+			for(int entry = 0; entry < nonzeroCount; ++entry)
+			{
+				m_permuted.valuePtr()[entry] = values.valuePtr()[m_permutedSourceIndices[entry]];
+			}
+			if(!m_factor.factorize(m_permuted))
+			{
+				return false;
+			}
 		}
 		m_updateInverseCurrent = false;
 		if(firstFactor)
@@ -451,7 +510,7 @@ private:
 			{
 				const Sparse& lower = m_factor.m_matrix;
 				m_reachWork.resize(m_size);
-				m_factorWork = double(matrix.nonZeros());
+				m_factorWork = double(exportedHessian(problem, matrix).nonZeros());
 				for(int column = m_size - 1; column >= 0; --column)
 				{
 					const int begin = lower.outerIndexPtr()[column], end = lower.outerIndexPtr()[column + 1];
@@ -459,32 +518,6 @@ private:
 					const int parent = count ? lower.innerIndexPtr()[begin + 1] : m_size;
 					m_reachWork[column] = 6.0 * count + 12.0 + (parent < m_size ? m_reachWork[parent] : 0.0);
 					m_factorWork += double(count) * (count + 3) + 12.0;
-				}
-			}
-			m_refactorWork = m_factorWork;
-			// Include the local contact outer products in the rebuild estimate.
-			// Counting potential entries conservatively includes inactive rows.
-			// Fixed bilateral curvature never invokes the update/refactor choice.
-			if(problem.equalityRows != problem.rowCount())
-			{
-				for(const CompactContact& contact : problem.contacts)
-				{
-					const int first = contact.rowCount() == 1 ? 2 : 0;
-					for(int axis = first; axis < 3; ++axis)
-					{
-						int count = 0;
-						for(int end = 0; end < 2; ++end)
-						{
-							if(contact.body[end] >= 0)
-							{
-								for(int component = 0; component < 6; ++component)
-								{
-									count += problem.contactEntry(contact, end, axis, component) != 0.0;
-								}
-							}
-						}
-						m_refactorWork += double(count) * (count + 3) * (contact.block > 0 ? 3.0 : 1.0);
-					}
 				}
 			}
 		}
@@ -822,9 +855,9 @@ private:
 	};
 	std::vector<PermutedEntry> m_permutedEntries;
 	std::vector<int> m_permutedSourceIndices, m_permutationRowOffsets, m_permutationCursors;
-	std::vector<int> m_outer, m_inner;
+	std::vector<std::uint64_t> m_pairs;
 	std::vector<double> m_vector, m_solution, m_reachWork, m_updateInverseDiagonal;
-	double m_refactorWork = 0.0, m_factorWork = 0.0;
+	double m_factorWork = 0.0;
 	bool m_updateInverseCurrent;
 	Curvature m_weights;
 	std::vector<RankUpdate> m_updates;

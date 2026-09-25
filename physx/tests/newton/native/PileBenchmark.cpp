@@ -13,7 +13,7 @@ int main(int argc, char** argv)
 {
 	if(argc < 2)
 	{
-		printf("NewtonNativePile output.csv [steps=200] [newton|pgs] [workers=8] [width=10] [depth=10] [layers=5] [regularization=1e-4]\n");
+		printf("NewtonNativePile output.csv [steps=200] [newton|pgs] [workers=8] [width=10] [depth=10] [layers=5] [regularization=1e-4] [surface-regularization=1e-2] [stiffening-depth=2e-5]\n");
 		return 1;
 	}
 	const int steps = argc > 2 ? std::atoi(argv[2]) : 200;
@@ -36,6 +36,8 @@ int main(int argc, char** argv)
 	desc.gravity = PxVec3(0.0f, -9.81f, 0.0f);
 	desc.solverType = solver;
 	desc.newtonRegularization = argc > 8 ? PxReal(std::atof(argv[8])) : desc.newtonRegularization;
+	desc.newtonSurfaceRegularization = argc > 9 ? PxReal(std::atof(argv[9])) : desc.newtonSurfaceRegularization;
+	desc.newtonStiffeningDepth = argc > 10 ? PxReal(std::atof(argv[10])) : desc.newtonStiffeningDepth;
 	desc.flags |= PxSceneFlag::eENABLE_FRICTION_EVERY_ITERATION;
 	PxScene* scene = physics->createScene(desc);
 	if(!scene)

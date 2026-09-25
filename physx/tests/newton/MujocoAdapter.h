@@ -54,6 +54,9 @@ struct IslandTask
 	newton::Settings settings;
 	newton::Result result;
 	double preparationMs = 0.0;
+	// Each island retains its own solver workspace; a per-thread workspace would grow
+	// whenever a worker first receives a larger island.
+	newton::Workspace workspace;
 };
 
 static void* prepareIsland(void* argument)
@@ -128,7 +131,7 @@ static void* prepareIsland(void* argument)
 static void* solvePreparedIsland(void* argument)
 {
 	IslandTask& task = *static_cast<IslandTask*>(argument);
-	newton::solveNewton(task.problem, task.settings, task.result, &task.previous);
+	newton::solveNewton(task.problem, task.settings, task.result, task.workspace, &task.previous);
 	return NULL;
 }
 

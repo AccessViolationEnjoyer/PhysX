@@ -304,6 +304,17 @@ static std::uint64_t bodyPairKey(int body0, int body1)
 	return (std::uint64_t(first) << 32) | second;
 }
 
+// A topology group is one run of rows sharing a body pair, or one row when ungrouped.
+static NEWTON_FORCE_INLINE std::uint32_t topologyGroupFirst(const std::vector<ScalarContactRun>& runs, bool grouped, std::uint32_t group)
+{
+	return grouped ? std::uint32_t(runs[group].first) : group;
+}
+
+static NEWTON_FORCE_INLINE std::uint32_t topologyGroupEnd(const std::vector<ScalarContactRun>& runs, bool grouped, std::uint32_t group)
+{
+	return grouped ? std::uint32_t(runs[group].end) : group + 1;
+}
+
 static void prepareHessianTopology(Problem& problem)
 {
 	const std::uint32_t bodyCount = std::uint32_t(problem.bodyCount());
@@ -312,9 +323,14 @@ static void prepareHessianTopology(Problem& problem)
 	pairs.clear();
 	problem.hessianDiagonalBlocks.resize(bodyCount);
 	problem.hessianContactBlocks.assign(contactCount, -1);
+	// Unilateral problems group consecutive rows of one body pair into runs, so each run
+	// needs one lookup rather than one per row; other problems treat every row alone.
+	const std::vector<ScalarContactRun>& runs = problem.scalarContactRuns;
+	const bool grouped = !runs.empty();
+	const std::uint32_t groupCount = grouped ? std::uint32_t(runs.size()) : contactCount;
 	// Dense contact graphs contain many rows for the same body pair. For small
 	// bodies, a retained direct lookup avoids sorting all duplicates and doing a
-	// binary search for every row. Sparse and large systems keep the compact path.
+	// binary search for every group. Sparse and large systems keep the compact path.
 	const bool useDenseLookup = bodyCount <= 256 && contactCount >= 8 * bodyCount;
 	if(useDenseLookup)
 	{
@@ -324,9 +340,9 @@ static void prepareHessianTopology(Problem& problem)
 		{
 			lookup[std::size_t(body) * bodyCount + body] = 0;
 		}
-		for(std::uint32_t i = 0; i < contactCount; ++i)
+		for(std::uint32_t group = 0; group < groupCount; ++group)
 		{
-			const CompactContact& contact = problem.contacts[i];
+			const CompactContact& contact = problem.contacts[topologyGroupFirst(runs, grouped, group)];
 			if(contact.body[0] >= 0 && contact.body[1] >= 0)
 			{
 				const std::uint32_t first = std::uint32_t(std::min(contact.body[0], contact.body[1]));
@@ -334,7 +350,7 @@ static void prepareHessianTopology(Problem& problem)
 				lookup[std::size_t(first) * bodyCount + second] = 0;
 			}
 		}
-		reserveStorage(pairs, bodyCount + contactCount);
+		reserveStorage(pairs, bodyCount + groupCount);
 		for(std::uint32_t first = 0; first < bodyCount; ++first)
 		{
 			for(std::uint32_t second = first; second < bodyCount; ++second)
@@ -348,27 +364,28 @@ static void prepareHessianTopology(Problem& problem)
 			}
 			problem.hessianDiagonalBlocks[first] = lookup[std::size_t(first) * bodyCount + first];
 		}
-		for(std::uint32_t i = 0; i < contactCount; ++i)
+		for(std::uint32_t group = 0; group < groupCount; ++group)
 		{
-			const CompactContact& contact = problem.contacts[i];
+			const std::uint32_t begin = topologyGroupFirst(runs, grouped, group), end = topologyGroupEnd(runs, grouped, group);
+			const CompactContact& contact = problem.contacts[begin];
 			if(contact.body[0] >= 0 && contact.body[1] >= 0)
 			{
 				const std::uint32_t first = std::uint32_t(std::min(contact.body[0], contact.body[1]));
 				const std::uint32_t second = std::uint32_t(std::max(contact.body[0], contact.body[1]));
-				problem.hessianContactBlocks[i] = lookup[std::size_t(first) * bodyCount + second];
+				std::fill(problem.hessianContactBlocks.begin() + begin, problem.hessianContactBlocks.begin() + end, lookup[std::size_t(first) * bodyCount + second]);
 			}
 		}
 		return;
 	}
 
-	reserveStorage(pairs, bodyCount + contactCount);
+	reserveStorage(pairs, bodyCount + groupCount);
 	for(std::uint32_t body = 0; body < bodyCount; ++body)
 	{
 		pairs.emplace_back((std::uint64_t(body) << 32) | body);
 	}
-	for(std::uint32_t i = 0; i < contactCount; ++i)
+	for(std::uint32_t group = 0; group < groupCount; ++group)
 	{
-		const CompactContact& contact = problem.contacts[i];
+		const CompactContact& contact = problem.contacts[topologyGroupFirst(runs, grouped, group)];
 		if(contact.body[0] >= 0 && contact.body[1] >= 0)
 		{
 			pairs.emplace_back(bodyPairKey(contact.body[0], contact.body[1]));
@@ -385,13 +402,15 @@ static void prepareHessianTopology(Problem& problem)
 			problem.hessianDiagonalBlocks[first] = int(pair);
 		}
 	}
-	for(std::uint32_t i = 0; i < contactCount; ++i)
+	for(std::uint32_t group = 0; group < groupCount; ++group)
 	{
-		const CompactContact& contact = problem.contacts[i];
+		const std::uint32_t begin = topologyGroupFirst(runs, grouped, group), end = topologyGroupEnd(runs, grouped, group);
+		const CompactContact& contact = problem.contacts[begin];
 		if(contact.body[0] >= 0 && contact.body[1] >= 0)
 		{
 			const std::uint64_t key = bodyPairKey(contact.body[0], contact.body[1]);
-			problem.hessianContactBlocks[i] = int(std::lower_bound(pairs.begin(), pairs.end(), key) - pairs.begin());
+			const int block = int(std::lower_bound(pairs.begin(), pairs.end(), key) - pairs.begin());
+			std::fill(problem.hessianContactBlocks.begin() + begin, problem.hessianContactBlocks.begin() + end, block);
 		}
 	}
 }
@@ -481,12 +500,34 @@ static void prepareProblemInternal(Problem& problem)
 	}
 	int nextRow = 0;
 	std::uint32_t nextPatch = 0;
+	// Runs of rows sharing a body pair are gathered in the same pass over the contact
+	// records, only while the problem can still be unilateral.
+	std::vector<ScalarContactRun>& runs = problem.scalarContactRuns;
+	runs.clear();
+	bool detectRuns = problem.scalarBounds.empty() && problem.patches.empty();
+	if(detectRuns)
+	{
+		reserveStorage(runs, std::uint32_t(contactCount));
+	}
 	for(int i = 0; i < contactCount; ++i)
 	{
 		CompactContact& contact = problem.contacts[i];
 		if(!CountEntries)
 		{
 			assert(validContact(problem, contact));
+		}
+		detectRuns = detectRuns && !contact.block;
+		if(detectRuns)
+		{
+			if(i && contact.body[0] == problem.contacts[i - 1].body[0] && contact.body[1] == problem.contacts[i - 1].body[1])
+			{
+				runs.back().end = i + 1;
+			}
+			else
+			{
+				const ScalarContactRun run = { i, i + 1 };
+				runs.push_back(run);
+			}
 		}
 		while(nextPatch < patchCount && i >= problem.patches[nextPatch].firstContact + problem.patches[nextPatch].normalCount + problem.patches[nextPatch].tangentCount)
 		{
@@ -570,22 +611,10 @@ static void prepareProblemInternal(Problem& problem)
 		}
 	}
 	assert(nextRow == rows);
-	problem.scalarContactRuns.clear();
-	if(problem.isUnilateral())
+	problem.contactRebuildWork = -1.0;
+	if(!problem.isUnilateral())
 	{
-		reserveStorage(problem.scalarContactRuns, std::uint32_t(contactCount));
-		for(int first = 0; first < contactCount;)
-		{
-			const CompactContact& contact = problem.contacts[first];
-			int end = first + 1;
-			while(end < contactCount && problem.contacts[end].body[0] == contact.body[0] && problem.contacts[end].body[1] == contact.body[1])
-			{
-				++end;
-			}
-			const ScalarContactRun run = { first, end };
-			problem.scalarContactRuns.push_back(run);
-			first = end;
-		}
+		runs.clear();
 	}
 	problem.prepared = true;
 	prepareHessianTopology(problem);
@@ -795,45 +824,6 @@ static void addOuterProduct(BodyBlock& block, const Vec6& left, const Vec6& righ
 	}
 }
 
-template<int Count>
-static NEWTON_FORCE_INLINE void addScaledTail(double* NEWTON_RESTRICT destination, const double* NEWTON_RESTRICT source, double scale)
-{
-#if defined(NEWTON_AVX2_FMA)
-	const __m256d multiplier = _mm256_set1_pd(scale);
-	int offset = 0;
-	if(Count >= 4)
-	{
-		_mm256_storeu_pd(destination, _mm256_fmadd_pd(multiplier, _mm256_loadu_pd(source), _mm256_loadu_pd(destination)));
-		offset = 4;
-	}
-	if(Count - offset >= 2)
-	{
-		_mm_storeu_pd(destination + offset, _mm_fmadd_pd(_mm256_castpd256_pd128(multiplier), _mm_loadu_pd(source + offset), _mm_loadu_pd(destination + offset)));
-		offset += 2;
-	}
-	if(Count - offset == 1)
-	{
-		destination[offset] += scale * source[offset];
-	}
-#else
-	for(int i = 0; i < Count; ++i)
-	{
-		destination[i] += scale * source[i];
-	}
-#endif
-}
-
-static void addLowerOuterProduct(BodyBlock& block, const Vec6& vector, double weight)
-{
-	const double* source = vector.data();
-	if(source[0] != 0.0) addScaledTail<6>(block.data(), source, weight * source[0]);
-	if(source[1] != 0.0) addScaledTail<5>(block.data() + 7, source + 1, weight * source[1]);
-	if(source[2] != 0.0) addScaledTail<4>(block.data() + 14, source + 2, weight * source[2]);
-	if(source[3] != 0.0) addScaledTail<3>(block.data() + 21, source + 3, weight * source[3]);
-	if(source[4] != 0.0) addScaledTail<2>(block.data() + 28, source + 4, weight * source[4]);
-	if(source[5] != 0.0) block(5, 5) += weight * source[5] * source[5];
-}
-
 static void addJacobianProduct(BodyBlock& block, const Jacobian& left, const Mat3& weight, const Jacobian& right)
 {
 	for(int column = 0; column < 6; ++column)
@@ -858,17 +848,17 @@ static void addJacobianProduct(BodyBlock& block, const Jacobian& left, const Mat
 		valueEnd = _mm_fmadd_pd(multiplier1End, _mm_set_pd(left(1, 5), left(1, 4)), valueEnd);
 		valueEnd = _mm_fmadd_pd(multiplier2End, _mm_set_pd(left(2, 5), left(2, 4)), valueEnd);
 		_mm_storeu_pd(destination + 4, _mm_add_pd(_mm_loadu_pd(destination + 4), valueEnd));
-#elif defined(NEWTON_X86_SIMD)
-		const __m128d multiplier0 = _mm_set1_pd(weighted0);
-		const __m128d multiplier1 = _mm_set1_pd(weighted1);
-		const __m128d multiplier2 = _mm_set1_pd(weighted2);
+#elif defined(NEWTON_SIMD128)
+		const simd::Double2 multiplier0 = simd::splat(weighted0);
+		const simd::Double2 multiplier1 = simd::splat(weighted1);
+		const simd::Double2 multiplier2 = simd::splat(weighted2);
 		for(int row = 0; row < 6; row += 2)
 		{
-			__m128d value = _mm_mul_pd(multiplier0, _mm_set_pd(left(0, row + 1), left(0, row)));
-			value = _mm_add_pd(value, _mm_mul_pd(multiplier1, _mm_set_pd(left(1, row + 1), left(1, row))));
-			value = _mm_add_pd(value, _mm_mul_pd(multiplier2, _mm_set_pd(left(2, row + 1), left(2, row))));
+			simd::Double2 value = simd::multiply(multiplier0, simd::make(left(0, row), left(0, row + 1)));
+			value = simd::multiplyAdd(multiplier1, simd::make(left(1, row), left(1, row + 1)), value);
+			value = simd::multiplyAdd(multiplier2, simd::make(left(2, row), left(2, row + 1)), value);
 			double* destination = block.data() + 6 * column + row;
-			_mm_storeu_pd(destination, _mm_add_pd(_mm_loadu_pd(destination), value));
+			simd::store(destination, simd::add(simd::load(destination), value));
 		}
 #else
 		for(int row = 0; row < 6; ++row)
@@ -879,9 +869,206 @@ static void addJacobianProduct(BodyBlock& block, const Jacobian& left, const Mat
 	}
 }
 
-static const Sparse& makeHessian(const Problem& problem, const Curvature& weights, HessianStorage& storage)
+// Adds sum_i weight_i * left_i * right_i' over one run of scalar rows sharing a body
+// pair. The block stays in registers for the whole run, so each destination is read
+// and written once rather than once per row.
+static void addRunOuterProducts(BodyBlock& block, const CompactContact* NEWTON_RESTRICT contacts, int first, int end, const double* NEWTON_RESTRICT weights, int leftEnd, int rightEnd)
 {
-	const int bodies = problem.bodyCount(), size = bodies * 6;
+#if defined(NEWTON_AVX2_FMA)
+	__m256d head[6];
+	__m128d tail[6];
+	for(int column = 0; column < 6; ++column)
+	{
+		head[column] = _mm256_setzero_pd();
+		tail[column] = _mm_setzero_pd();
+	}
+	// The weight scales the left vector, so every column multiplier is a broadcast
+	// load rather than a scalar product followed by a register shuffle.
+	for(int i = first; i < end; ++i)
+	{
+		const double weight = weights[contacts[i].row];
+		if(weight == 0.0)
+		{
+			continue;
+		}
+		const double* left = contacts[i].jacobian[leftEnd].data();
+		const double* right = contacts[i].jacobian[rightEnd].data();
+		const __m256d leftHead = _mm256_mul_pd(_mm256_set1_pd(weight), _mm256_loadu_pd(left));
+		const __m128d leftTail = _mm_mul_pd(_mm_set1_pd(weight), _mm_loadu_pd(left + 4));
+		for(int column = 0; column < 6; ++column)
+		{
+			const __m256d scale = _mm256_broadcast_sd(right + column);
+			head[column] = _mm256_fmadd_pd(scale, leftHead, head[column]);
+			tail[column] = _mm_fmadd_pd(_mm256_castpd256_pd128(scale), leftTail, tail[column]);
+		}
+	}
+	double* destination = block.data();
+	for(int column = 0; column < 6; ++column)
+	{
+		_mm256_storeu_pd(destination + 6 * column, _mm256_add_pd(_mm256_loadu_pd(destination + 6 * column), head[column]));
+		_mm_storeu_pd(destination + 6 * column + 4, _mm_add_pd(_mm_loadu_pd(destination + 6 * column + 4), tail[column]));
+	}
+#elif defined(NEWTON_SIMD128)
+	// A full block needs 18 two-double accumulators, so the run is read twice:
+	// three columns per pass keep nine accumulators in registers.
+	double* destination = block.data();
+	for(int half = 0; half < 6; half += 3)
+	{
+		simd::Double2 accumulated[9];
+		for(int k = 0; k < 9; ++k)
+		{
+			accumulated[k] = simd::zero();
+		}
+		for(int i = first; i < end; ++i)
+		{
+			const double weight = weights[contacts[i].row];
+			if(weight == 0.0)
+			{
+				continue;
+			}
+			const double* left = contacts[i].jacobian[leftEnd].data();
+			const double* right = contacts[i].jacobian[rightEnd].data() + half;
+			const simd::Double2 multiplier = simd::splat(weight);
+			const simd::Double2 left0 = simd::multiply(multiplier, simd::load(left));
+			const simd::Double2 left2 = simd::multiply(multiplier, simd::load(left + 2));
+			const simd::Double2 left4 = simd::multiply(multiplier, simd::load(left + 4));
+			for(int column = 0; column < 3; ++column)
+			{
+				const simd::Double2 scale = simd::splat(right[column]);
+				accumulated[3 * column] = simd::multiplyAdd(scale, left0, accumulated[3 * column]);
+				accumulated[3 * column + 1] = simd::multiplyAdd(scale, left2, accumulated[3 * column + 1]);
+				accumulated[3 * column + 2] = simd::multiplyAdd(scale, left4, accumulated[3 * column + 2]);
+			}
+		}
+		for(int column = 0; column < 3; ++column)
+		{
+			for(int pair = 0; pair < 3; ++pair)
+			{
+				double* target = destination + 6 * (half + column) + 2 * pair;
+				simd::store(target, simd::add(simd::load(target), accumulated[3 * column + pair]));
+			}
+		}
+	}
+#else
+	for(int i = first; i < end; ++i)
+	{
+		const double weight = weights[contacts[i].row];
+		if(weight != 0.0)
+		{
+			addOuterProduct(block, contacts[i].jacobian[leftEnd], contacts[i].jacobian[rightEnd], weight);
+		}
+	}
+#endif
+}
+
+// Adds sum_i weight_i * v_i * v_i' to a diagonal block for one run, where v_i is
+// the rows' jacobian at one end. Only the lower triangle is accumulated: columns
+// two and three share rows two to five, and columns four and five share rows four
+// and five, so eight packed products replace twelve. Upper entries are never read.
+static void addRunLowerOuterProducts(BodyBlock& block, const CompactContact* NEWTON_RESTRICT contacts, int first, int end, const double* NEWTON_RESTRICT weights, int side)
+{
+#if defined(NEWTON_AVX2_FMA)
+	__m256d head0 = _mm256_setzero_pd(), head1 = _mm256_setzero_pd(), middle2 = _mm256_setzero_pd(), middle3 = _mm256_setzero_pd();
+	__m128d tail0 = _mm_setzero_pd(), tail1 = _mm_setzero_pd(), tail4 = _mm_setzero_pd(), tail5 = _mm_setzero_pd();
+	for(int i = first; i < end; ++i)
+	{
+		const double weight = weights[contacts[i].row];
+		if(weight == 0.0)
+		{
+			continue;
+		}
+		const double* vector = contacts[i].jacobian[side].data();
+		const __m256d multiplier = _mm256_set1_pd(weight);
+		const __m256d vectorHead = _mm256_mul_pd(multiplier, _mm256_loadu_pd(vector));
+		const __m256d vectorMiddle = _mm256_mul_pd(multiplier, _mm256_loadu_pd(vector + 2));
+		const __m128d vectorTail = _mm_mul_pd(_mm256_castpd256_pd128(multiplier), _mm_loadu_pd(vector + 4));
+		const __m256d scale0 = _mm256_broadcast_sd(vector), scale1 = _mm256_broadcast_sd(vector + 1);
+		const __m256d scale2 = _mm256_broadcast_sd(vector + 2), scale3 = _mm256_broadcast_sd(vector + 3);
+		const __m128d scale4 = _mm_loaddup_pd(vector + 4), scale5 = _mm_loaddup_pd(vector + 5);
+		head0 = _mm256_fmadd_pd(scale0, vectorHead, head0);
+		tail0 = _mm_fmadd_pd(_mm256_castpd256_pd128(scale0), vectorTail, tail0);
+		head1 = _mm256_fmadd_pd(scale1, vectorHead, head1);
+		tail1 = _mm_fmadd_pd(_mm256_castpd256_pd128(scale1), vectorTail, tail1);
+		middle2 = _mm256_fmadd_pd(scale2, vectorMiddle, middle2);
+		middle3 = _mm256_fmadd_pd(scale3, vectorMiddle, middle3);
+		tail4 = _mm_fmadd_pd(scale4, vectorTail, tail4);
+		tail5 = _mm_fmadd_pd(scale5, vectorTail, tail5);
+	}
+	double* destination = block.data();
+	_mm256_storeu_pd(destination, _mm256_add_pd(_mm256_loadu_pd(destination), head0));
+	_mm_storeu_pd(destination + 4, _mm_add_pd(_mm_loadu_pd(destination + 4), tail0));
+	_mm256_storeu_pd(destination + 6, _mm256_add_pd(_mm256_loadu_pd(destination + 6), head1));
+	_mm_storeu_pd(destination + 10, _mm_add_pd(_mm_loadu_pd(destination + 10), tail1));
+	_mm256_storeu_pd(destination + 14, _mm256_add_pd(_mm256_loadu_pd(destination + 14), middle2));
+	_mm256_storeu_pd(destination + 20, _mm256_add_pd(_mm256_loadu_pd(destination + 20), middle3));
+	_mm_storeu_pd(destination + 28, _mm_add_pd(_mm_loadu_pd(destination + 28), tail4));
+	_mm_storeu_pd(destination + 34, _mm_add_pd(_mm_loadu_pd(destination + 34), tail5));
+#elif defined(NEWTON_SIMD128)
+	// Two passes of six accumulators: columns 0 and 1 over rows 0-5, then columns 2 and 3
+	// over rows 2-5 and columns 4 and 5 over rows 4 and 5. Column 1's row 0 and column 3's
+	// row 2 are unread upper entries.
+	double* destination = block.data();
+	simd::Double2 lowColumns[6], highColumns[6];
+	for(int k = 0; k < 6; ++k)
+	{
+		lowColumns[k] = simd::zero();
+		highColumns[k] = simd::zero();
+	}
+	for(int i = first; i < end; ++i)
+	{
+		const double weight = weights[contacts[i].row];
+		if(weight == 0.0)
+		{
+			continue;
+		}
+		const double* vector = contacts[i].jacobian[side].data();
+		const simd::Double2 multiplier = simd::splat(weight);
+		const simd::Double2 vector0 = simd::multiply(multiplier, simd::load(vector));
+		const simd::Double2 vector2 = simd::multiply(multiplier, simd::load(vector + 2));
+		const simd::Double2 vector4 = simd::multiply(multiplier, simd::load(vector + 4));
+		const simd::Double2 scale0 = simd::splat(vector[0]), scale1 = simd::splat(vector[1]);
+		lowColumns[0] = simd::multiplyAdd(scale0, vector0, lowColumns[0]);
+		lowColumns[1] = simd::multiplyAdd(scale0, vector2, lowColumns[1]);
+		lowColumns[2] = simd::multiplyAdd(scale0, vector4, lowColumns[2]);
+		lowColumns[3] = simd::multiplyAdd(scale1, vector0, lowColumns[3]);
+		lowColumns[4] = simd::multiplyAdd(scale1, vector2, lowColumns[4]);
+		lowColumns[5] = simd::multiplyAdd(scale1, vector4, lowColumns[5]);
+	}
+	for(int i = first; i < end; ++i)
+	{
+		const double weight = weights[contacts[i].row];
+		if(weight == 0.0)
+		{
+			continue;
+		}
+		const double* vector = contacts[i].jacobian[side].data();
+		const simd::Double2 multiplier = simd::splat(weight);
+		const simd::Double2 vector2 = simd::multiply(multiplier, simd::load(vector + 2));
+		const simd::Double2 vector4 = simd::multiply(multiplier, simd::load(vector + 4));
+		const simd::Double2 scale2 = simd::splat(vector[2]), scale3 = simd::splat(vector[3]);
+		highColumns[0] = simd::multiplyAdd(scale2, vector2, highColumns[0]);
+		highColumns[1] = simd::multiplyAdd(scale2, vector4, highColumns[1]);
+		highColumns[2] = simd::multiplyAdd(scale3, vector2, highColumns[2]);
+		highColumns[3] = simd::multiplyAdd(scale3, vector4, highColumns[3]);
+		highColumns[4] = simd::multiplyAdd(simd::splat(vector[4]), vector4, highColumns[4]);
+		highColumns[5] = simd::multiplyAdd(simd::splat(vector[5]), vector4, highColumns[5]);
+	}
+	const int firstOffsets[6] = { 0, 2, 4, 6, 8, 10 };
+	const int secondOffsets[6] = { 14, 16, 20, 22, 28, 34 };
+	for(int k = 0; k < 6; ++k)
+	{
+		simd::store(destination + firstOffsets[k], simd::add(simd::load(destination + firstOffsets[k]), lowColumns[k]));
+		simd::store(destination + secondOffsets[k], simd::add(simd::load(destination + secondOffsets[k]), highColumns[k]));
+	}
+#else
+	addRunOuterProducts(block, contacts, first, end, weights, side, side);
+#endif
+}
+
+// Accumulate the Hessian's 6x6 body-pair blocks. Diagonal blocks are read only
+// through their lower triangles.
+static void assembleHessianBlocks(const Problem& problem, const Curvature& weights, HessianStorage& storage)
+{
 	const std::vector<std::uint64_t>& pairs = problem.hessianPairs;
 	const std::uint32_t pairCount = std::uint32_t(pairs.size());
 	reserveStorage(storage.blocks, pairCount);
@@ -903,26 +1090,25 @@ static const Sparse& makeHessian(const Problem& problem, const Curvature& weight
 	const std::uint32_t contactCount = std::uint32_t(problem.contacts.size());
 	if(problem.isUnilateral())
 	{
-		for(std::uint32_t i = 0; i < contactCount; ++i)
+		// Runs share one ordered body pair, so their three blocks accumulate together.
+		const CompactContact* contacts = problem.contacts.data();
+		const double* diagonal = weights.diagonal.data();
+		const std::uint32_t runCount = std::uint32_t(problem.scalarContactRuns.size());
+		for(std::uint32_t run = 0; run < runCount; ++run)
 		{
-			const CompactContact& contact = problem.contacts[i];
-			const double weight = weights.diagonal[contact.row];
-			if(weight == 0.0)
+			const int first = problem.scalarContactRuns[run].first, end = problem.scalarContactRuns[run].end;
+			const int a = contacts[first].body[0], b = contacts[first].body[1];
+			for(int side = 0; side < 2; ++side)
 			{
-				continue;
-			}
-			for(int end = 0; end < 2; ++end)
-			{
-				if(contact.body[end] >= 0)
+				if(contacts[first].body[side] >= 0)
 				{
-					addLowerOuterProduct(storage.blocks[problem.hessianDiagonalBlocks[contact.body[end]]], contact.jacobian[end], weight);
+					addRunLowerOuterProducts(storage.blocks[problem.hessianDiagonalBlocks[contacts[first].body[side]]], contacts, first, end, diagonal, side);
 				}
 			}
-			const int a = contact.body[0], b = contact.body[1];
 			if(a >= 0 && b >= 0)
 			{
 				const int low = a < b ? 0 : 1;
-				addOuterProduct(storage.blocks[problem.hessianContactBlocks[i]], contact.jacobian[1 - low], contact.jacobian[low], weight);
+				addRunOuterProducts(storage.blocks[problem.hessianContactBlocks[first]], contacts, first, end, diagonal, 1 - low, low);
 			}
 		}
 	}
@@ -1007,6 +1193,14 @@ static const Sparse& makeHessian(const Problem& problem, const Curvature& weight
 			}
 		}
 	}
+}
+
+// Export assembled blocks as the scalar upper-triangular CSC Hessian.
+static const Sparse& exportHessian(const Problem& problem, HessianStorage& storage)
+{
+	const int bodies = problem.bodyCount(), size = bodies * 6;
+	const std::vector<std::uint64_t>& pairs = problem.hessianPairs;
+	const std::uint32_t pairCount = std::uint32_t(pairs.size());
 	SparseStorage& matrix = storage.matrix;
 	const bool sameStructure = storage.pairs == pairs;
 	// Sorted body pairs emit 21 entries per diagonal block and 36 per
@@ -1056,6 +1250,12 @@ static const Sparse& makeHessian(const Problem& problem, const Curvature& weight
 		outer[size] = entry;
 	}
 	return matrix;
+}
+
+static const Sparse& makeHessian(const Problem& problem, const Curvature& weights, HessianStorage& storage)
+{
+	assembleHessianBlocks(problem, weights, storage);
+	return exportHessian(problem, storage);
 }
 
 static bool solveDenseReference(const Sparse& matrix, ConstVector gradient, MutableVector solution)
@@ -1146,6 +1346,21 @@ static void evaluateUnilateralImpulses(ConstVector contactVelocity, ConstVector 
 		}
 	}
 	for(; row < rowCount; ++row)
+#elif defined(NEWTON_SIMD128)
+	const simd::Double2 zero = simd::zero();
+	int row = 0;
+	for(; row + 2 <= rowCount; row += 2)
+	{
+		const simd::Double2 root = simd::load(inverseRoot.data() + row);
+		const simd::Double2 velocity = simd::load(contactVelocity.data() + row);
+		const simd::Double2 drive = simd::maximum(zero, simd::multiply(simd::subtract(zero, root), velocity));
+		simd::store(impulse.data() + row, simd::multiply(root, drive));
+		if(weights)
+		{
+			simd::store(weights->diagonal.data() + row, simd::bitAnd(simd::less(velocity, zero), simd::multiply(root, root)));
+		}
+	}
+	for(; row < rowCount; ++row)
 #else
 	for(int row = 0; row < rowCount; ++row)
 #endif
@@ -1156,6 +1371,96 @@ static void evaluateUnilateralImpulses(ConstVector contactVelocity, ConstVector 
 			weights->diagonal[row] = contactVelocity[row] < 0.0 ? inverseRoot[row] * inverseRoot[row] : 0.0;
 		}
 	}
+}
+
+// After a line search, advance the contact velocity along the accepted step
+// and reevaluate unilateral impulses and curvature in the same pass. Rows whose
+// curvature differs from the retained factor are listed for its next update.
+// Returns sum(R * lambda^2); for an active row R * lambda^2 is its squared drive.
+static double evaluateUnilateralStep(int rowCount, double alpha, bool advance, double* NEWTON_RESTRICT contactVelocity, const double* NEWTON_RESTRICT contactDirection,
+	const double* NEWTON_RESTRICT inverseRoot, double* NEWTON_RESTRICT impulse, double* NEWTON_RESTRICT diagonal, const double* NEWTON_RESTRICT factorDiagonal,
+	int* NEWTON_RESTRICT changedRows, int& changedCount)
+{
+	int changes = 0;
+	int row = 0;
+	double quadratic = 0.0;
+#if defined(NEWTON_AVX2_FMA)
+	const __m256d zero = _mm256_setzero_pd();
+	const __m256d step = _mm256_set1_pd(advance ? alpha : 0.0);
+	__m256d quadraticSum = zero;
+	for(; row + 4 <= rowCount; row += 4)
+	{
+		__m256d velocity = _mm256_loadu_pd(contactVelocity + row);
+		if(advance)
+		{
+			velocity = _mm256_fmadd_pd(step, _mm256_loadu_pd(contactDirection + row), velocity);
+			_mm256_storeu_pd(contactVelocity + row, velocity);
+		}
+		const __m256d root = _mm256_loadu_pd(inverseRoot + row);
+		const __m256d active = _mm256_cmp_pd(velocity, zero, _CMP_LT_OQ);
+		const __m256d drive = _mm256_max_pd(zero, _mm256_mul_pd(_mm256_sub_pd(zero, root), velocity));
+		_mm256_storeu_pd(impulse + row, _mm256_mul_pd(root, drive));
+		const __m256d weight = _mm256_and_pd(active, _mm256_mul_pd(root, root));
+		_mm256_storeu_pd(diagonal + row, weight);
+		quadraticSum = _mm256_fmadd_pd(drive, drive, quadraticSum);
+		int changed = _mm256_movemask_pd(_mm256_cmp_pd(weight, _mm256_loadu_pd(factorDiagonal + row), _CMP_NEQ_UQ));
+		while(changed)
+		{
+			const int lane = int(_tzcnt_u32(unsigned(changed)));
+			changedRows[changes++] = row + lane;
+			changed &= changed - 1;
+		}
+	}
+	const __m128d quadraticHalves = _mm_add_pd(_mm256_castpd256_pd128(quadraticSum), _mm256_extractf128_pd(quadraticSum, 1));
+	quadratic = _mm_cvtsd_f64(_mm_add_pd(quadraticHalves, _mm_unpackhi_pd(quadraticHalves, quadraticHalves)));
+#elif defined(NEWTON_SIMD128)
+	const simd::Double2 zero = simd::zero();
+	const simd::Double2 step = simd::splat(advance ? alpha : 0.0);
+	simd::Double2 quadraticSum = zero;
+	for(; row + 2 <= rowCount; row += 2)
+	{
+		simd::Double2 velocity = simd::load(contactVelocity + row);
+		if(advance)
+		{
+			velocity = simd::multiplyAdd(step, simd::load(contactDirection + row), velocity);
+			simd::store(contactVelocity + row, velocity);
+		}
+		const simd::Double2 root = simd::load(inverseRoot + row);
+		const simd::Double2 drive = simd::maximum(zero, simd::multiply(simd::subtract(zero, root), velocity));
+		simd::store(impulse + row, simd::multiply(root, drive));
+		const simd::Double2 weight = simd::bitAnd(simd::less(velocity, zero), simd::multiply(root, root));
+		simd::store(diagonal + row, weight);
+		quadraticSum = simd::multiplyAdd(drive, drive, quadraticSum);
+		const int changed = simd::mask(simd::notEqual(weight, simd::load(factorDiagonal + row)));
+		if(changed & 1)
+		{
+			changedRows[changes++] = row;
+		}
+		if(changed & 2)
+		{
+			changedRows[changes++] = row + 1;
+		}
+	}
+	quadratic = simd::sum(quadraticSum);
+#endif
+	for(; row < rowCount; ++row)
+	{
+		if(advance)
+		{
+			contactVelocity[row] += alpha * contactDirection[row];
+		}
+		const double velocity = contactVelocity[row];
+		const double drive = std::max(0.0, -inverseRoot[row] * velocity);
+		impulse[row] = inverseRoot[row] * drive;
+		diagonal[row] = velocity < 0.0 ? inverseRoot[row] * inverseRoot[row] : 0.0;
+		quadratic += drive * drive;
+		if(diagonal[row] != factorDiagonal[row])
+		{
+			changedRows[changes++] = row;
+		}
+	}
+	changedCount = changes;
+	return quadratic;
 }
 
 static bool evaluateImpulses(const Problem& problem, ConstVector contactVelocity, ConstVector inverseRoot, MutableVector impulse, Curvature* weights, PatchScratch& scratch)
@@ -1438,6 +1743,11 @@ static NEWTON_FORCE_INLINE void accumulateGradientScalarRun(const Problem& probl
 	}
 	for(int contactIndex = first; contactIndex < end; ++contactIndex)
 	{
+		// Inactive rows contribute nothing and dominate separating or sliding contacts.
+		if(impulse[contactIndex] == 0.0)
+		{
+			continue;
+		}
 		const CompactContact& contact = problem.contacts[contactIndex];
 		assert(contact.row == contactIndex);
 		const __m256d scale = _mm256_set1_pd(impulse[contactIndex]);
@@ -1463,13 +1773,65 @@ static NEWTON_FORCE_INLINE void accumulateGradientScalarRun(const Problem& probl
 		_mm_storeu_pd(gradient + 6 * body1 + 4, gradient1End);
 	}
 }
+#elif defined(NEWTON_SIMD128)
+template<bool HasBody0, bool HasBody1>
+static NEWTON_FORCE_INLINE void accumulateGradientScalarRun(const Problem& problem, const double* NEWTON_RESTRICT impulse,
+	int first, int end, int body0, int body1, double* NEWTON_RESTRICT gradient)
+{
+	simd::Double2 gradient0[3] = { simd::zero(), simd::zero(), simd::zero() };
+	simd::Double2 gradient1[3] = { simd::zero(), simd::zero(), simd::zero() };
+	for(int pair = 0; pair < 3; ++pair)
+	{
+		if(HasBody0)
+		{
+			gradient0[pair] = simd::load(gradient + 6 * body0 + 2 * pair);
+		}
+		if(HasBody1)
+		{
+			gradient1[pair] = simd::load(gradient + 6 * body1 + 2 * pair);
+		}
+	}
+	for(int contactIndex = first; contactIndex < end; ++contactIndex)
+	{
+		// Inactive rows contribute nothing and dominate separating or sliding contacts.
+		if(impulse[contactIndex] == 0.0)
+		{
+			continue;
+		}
+		const CompactContact& contact = problem.contacts[contactIndex];
+		assert(contact.row == contactIndex);
+		const simd::Double2 scale = simd::splat(impulse[contactIndex]);
+		for(int pair = 0; pair < 3; ++pair)
+		{
+			if(HasBody0)
+			{
+				gradient0[pair] = simd::multiplyAdd(scale, simd::load(contact.jacobian[0].data() + 2 * pair), gradient0[pair]);
+			}
+			if(HasBody1)
+			{
+				gradient1[pair] = simd::multiplyAdd(scale, simd::load(contact.jacobian[1].data() + 2 * pair), gradient1[pair]);
+			}
+		}
+	}
+	for(int pair = 0; pair < 3; ++pair)
+	{
+		if(HasBody0)
+		{
+			simd::store(gradient + 6 * body0 + 2 * pair, gradient0[pair]);
+		}
+		if(HasBody1)
+		{
+			simd::store(gradient + 6 * body1 + 2 * pair, gradient1[pair]);
+		}
+	}
+}
 #endif
 
 static void evaluateGradientScalarContacts(const Problem& problem, const double* NEWTON_RESTRICT impulse, const double* NEWTON_RESTRICT velocity, double* NEWTON_RESTRICT gradient)
 {
 	const int columnCount = int(problem.jacobian.cols());
 	std::fill_n(gradient, columnCount, 0.0);
-#if defined(NEWTON_AVX2_FMA)
+#if defined(NEWTON_AVX2_FMA) || defined(NEWTON_SIMD128)
 	const int runCount = int(problem.scalarContactRuns.size());
 	for(int runIndex = 0; runIndex < runCount; ++runIndex)
 	{
@@ -1596,6 +1958,16 @@ static double primalCost(const Problem& problem, ConstVector velocity, ConstVect
 		quadratic += _mm_cvtsd_f64(_mm_unpackhi_pd(high, high));
 	}
 	for(; row < rowCount; ++row)
+#elif defined(NEWTON_SIMD128)
+	int row = 0;
+	for(; row + 2 <= rowCount; row += 2)
+	{
+		const simd::Double2 values = simd::load(impulse.data() + row);
+		const simd::Double2 products = simd::multiply(simd::multiply(values, simd::load(problem.regularization.data() + row)), values);
+		quadratic += simd::low(products);
+		quadratic += simd::high(products);
+	}
+	for(; row < rowCount; ++row)
 #else
 	for(int row = 0; row < rowCount; ++row)
 #endif
@@ -1690,6 +2062,32 @@ static DirectionMetrics evaluateDirectionMetrics(ConstVector gradient, ConstVect
 		result.directionInfinity = std::max(result.directionInfinity, _mm_cvtsd_f64(_mm_unpackhi_pd(directionAbsoluteHigh, directionAbsoluteHigh)));
 	}
 	for(; row < count; ++row)
+#elif defined(NEWTON_SIMD128)
+	// Sums keep the scalar order; maxima are order-independent and stay packed.
+	simd::Double2 velocityInfinity = simd::zero(), directionInfinity = simd::zero();
+	int row = 0;
+	for(; row + 2 <= count; row += 2)
+	{
+		const simd::Double2 directionValues = simd::load(direction.data() + row);
+		const simd::Double2 velocityValues = simd::load(velocity.data() + row);
+		const simd::Double2 gradientProducts = simd::multiply(simd::load(gradient.data() + row), directionValues);
+		const simd::Double2 velocityProducts = simd::multiply(velocityValues, directionValues);
+		const simd::Double2 normProducts = simd::multiply(directionValues, directionValues);
+		const simd::Double2 weightedProducts = simd::multiply(normProducts, simd::load(inverseMassDiagonal.data() + row));
+		result.gradient += simd::low(gradientProducts);
+		result.gradient += simd::high(gradientProducts);
+		result.velocity += simd::low(velocityProducts);
+		result.velocity += simd::high(velocityProducts);
+		result.squaredNorm += simd::low(normProducts);
+		result.squaredNorm += simd::high(normProducts);
+		result.weightedNorm += simd::low(weightedProducts);
+		result.weightedNorm += simd::high(weightedProducts);
+		velocityInfinity = simd::maximum(velocityInfinity, simd::absolute(velocityValues));
+		directionInfinity = simd::maximum(directionInfinity, simd::absolute(directionValues));
+	}
+	result.velocityInfinity = std::max(simd::low(velocityInfinity), simd::high(velocityInfinity));
+	result.directionInfinity = std::max(simd::low(directionInfinity), simd::high(directionInfinity));
+	for(; row < count; ++row)
 #else
 	for(int row = 0; row < count; ++row)
 #endif
@@ -1753,6 +2151,34 @@ static ConvexLineValue evaluateUnilateralLine(int rowCount, ConstVector contactV
 			_mm_cvtsd_f64(curvatureHigh) + _mm_cvtsd_f64(_mm_unpackhi_pd(curvatureHigh, curvatureHigh));
 	}
 	for(; row < rowCount; ++row)
+#elif defined(NEWTON_SIMD128)
+	const simd::Double2 zero = simd::zero();
+	const simd::Double2 alphaVector = simd::splat(alpha);
+	simd::Double2 slopeSum = zero, curvatureSum = zero;
+	int row = 0;
+	for(; row + 2 <= rowCount; row += 2)
+	{
+		const simd::Double2 direction = simd::load(contactDirection.data() + row);
+		const simd::Double2 drive = simd::subtract(simd::subtract(zero, simd::load(contactVelocity.data() + row)), simd::multiply(alphaVector, direction));
+		const simd::Double2 active = simd::greater(drive, zero);
+		if(!simd::any(active))
+		{
+			continue;
+		}
+		const simd::Double2 root = simd::load(inverseRoot.data() + row);
+		slopeSum = simd::add(slopeSum, simd::bitAnd(active, simd::multiply(direction, simd::multiply(root, simd::multiply(root, drive)))));
+		if(ComputeCurvature)
+		{
+			const simd::Double2 inverseCompliance = simd::multiply(root, root);
+			curvatureSum = simd::add(curvatureSum, simd::bitAnd(active, simd::multiply(direction, simd::multiply(inverseCompliance, direction))));
+		}
+	}
+	result.slope -= simd::sum(slopeSum);
+	if(ComputeCurvature)
+	{
+		result.curvature += simd::sum(curvatureSum);
+	}
+	for(; row < rowCount; ++row)
 #else
 	for(int row = 0; row < rowCount; ++row)
 #endif
@@ -1807,6 +2233,24 @@ static ConvexLineValue evaluateUnilateralInitialLine(int rowCount, ConstVector c
 	result.curvature += _mm_cvtsd_f64(curvatureLow) + _mm_cvtsd_f64(_mm_unpackhi_pd(curvatureLow, curvatureLow)) +
 		_mm_cvtsd_f64(curvatureHigh) + _mm_cvtsd_f64(_mm_unpackhi_pd(curvatureHigh, curvatureHigh));
 	for(; row < rowCount; ++row)
+#elif defined(NEWTON_SIMD128)
+	const simd::Double2 zero = simd::zero();
+	simd::Double2 slopeSum = zero, curvatureSum = zero;
+	int row = 0;
+	for(; row + 2 <= rowCount; row += 2)
+	{
+		const simd::Double2 inverseCompliance = simd::load(diagonal.data() + row);
+		if(!simd::any(simd::notEqual(inverseCompliance, zero)))
+		{
+			continue;
+		}
+		const simd::Double2 direction = simd::load(contactDirection.data() + row);
+		slopeSum = simd::multiplyAdd(direction, simd::load(impulse.data() + row), slopeSum);
+		curvatureSum = simd::add(curvatureSum, simd::multiply(direction, simd::multiply(inverseCompliance, direction)));
+	}
+	result.slope -= simd::sum(slopeSum);
+	result.curvature += simd::sum(curvatureSum);
+	for(; row < rowCount; ++row)
 #else
 	for(int row = 0; row < rowCount; ++row)
 #endif
@@ -1834,6 +2278,22 @@ static bool staysInUnilateralSegment(int rowCount, ConstVector contactVelocity, 
 		const __m256d crossedActive = _mm256_and_pd(initiallyActive, _mm256_cmp_pd(candidateVelocity, zero, _CMP_GT_OQ));
 		const __m256d crossedInactive = _mm256_and_pd(initiallyInactive, _mm256_cmp_pd(candidateVelocity, zero, _CMP_LT_OQ));
 		if(_mm256_movemask_pd(_mm256_or_pd(crossedActive, crossedInactive)) != 0)
+		{
+			return false;
+		}
+	}
+	for(; row < rowCount; ++row)
+#elif defined(NEWTON_SIMD128)
+	const simd::Double2 zero = simd::zero();
+	const simd::Double2 alphaVector = simd::splat(alpha);
+	int row = 0;
+	for(; row + 2 <= rowCount; row += 2)
+	{
+		const simd::Double2 velocity = simd::load(contactVelocity.data() + row);
+		const simd::Double2 candidateVelocity = simd::multiplyAdd(alphaVector, simd::load(contactDirection.data() + row), velocity);
+		const simd::Double2 crossedActive = simd::bitAnd(simd::less(velocity, zero), simd::greater(candidateVelocity, zero));
+		const simd::Double2 crossedInactive = simd::bitAnd(simd::greaterEqual(velocity, zero), simd::less(candidateVelocity, zero));
+		if(simd::any(simd::bitOr(crossedActive, crossedInactive)))
 		{
 			return false;
 		}
@@ -1935,18 +2395,39 @@ static ConvexLineValue evaluateConvexLine(const Problem& problem, ConstVector co
 	return result;
 }
 
+// Inputs of one line search; unilateral problems use the specialized scalar evaluation.
+struct LineInput
+{
+	const Problem* problem;
+	const VectorStorage* contactVelocity;
+	const VectorStorage* contactDirection;
+	const VectorStorage* compliance;
+	const VectorStorage* inverseRoot;
+	double velocitySlope;
+	double directionNorm;
+	PatchScratch* scratch;
+	bool unilateral;
+};
+
+static ConvexLineValue evaluateLine(const LineInput& line, double alpha, bool computeCurvature)
+{
+	if(!line.unilateral)
+	{
+		return evaluateConvexLine(*line.problem, *line.contactVelocity, *line.contactDirection, *line.compliance, *line.inverseRoot, line.velocitySlope, line.directionNorm, alpha, *line.scratch);
+	}
+	const int rows = line.problem->rowCount();
+	return computeCurvature ? evaluateUnilateralLine<true>(rows, *line.contactVelocity, *line.contactDirection, *line.inverseRoot, line.velocitySlope, line.directionNorm, alpha) :
+		evaluateUnilateralLine<false>(rows, *line.contactVelocity, *line.contactDirection, *line.inverseRoot, line.velocitySlope, line.directionNorm, alpha);
+}
+
 static bool searchConvex(const Problem& problem, ConstVector direction, ConstVector contactVelocity, ConstVector impulse, const Curvature& weights, ConstVector inverseRoot, MutableVector contactDirection, int& evaluations, PatchScratch& scratch, ParallelExecutor* parallelExecutor, double velocitySlope, double directionNorm, double slopeTolerance, double& alphaResult)
 {
 	// Reuse the contact velocity from the current objective/gradient evaluation.
 	ConstVector compliance = problem.regularization;
 	multiplyJacobianCsc(problem, direction, contactDirection, parallelExecutor);
 	const bool unilateral = problem.isUnilateral();
-	const auto evaluate = [&](double alpha)
-	{
-		return unilateral ? evaluateUnilateralLine<true>(problem.rowCount(), contactVelocity, contactDirection, inverseRoot, velocitySlope, directionNorm, alpha) :
-			evaluateConvexLine(problem, contactVelocity, contactDirection, compliance, inverseRoot, velocitySlope, directionNorm, alpha, scratch);
-	};
-	const ConvexLineValue initial = unilateral ? evaluateUnilateralInitialLine(problem.rowCount(), contactDirection, impulse, weights.diagonal, velocitySlope, directionNorm) : evaluate(0.0);
+	const LineInput line = { &problem, &contactVelocity, &contactDirection, &compliance, &inverseRoot, velocitySlope, directionNorm, &scratch, unilateral };
+	const ConvexLineValue initial = unilateral ? evaluateUnilateralInitialLine(problem.rowCount(), contactDirection, impulse, weights.diagonal, velocitySlope, directionNorm) : evaluateLine(line, 0.0, true);
 	++evaluations;
 	if(!initial.valid)
 	{
@@ -1963,15 +2444,9 @@ static bool searchConvex(const Problem& problem, ConstVector direction, ConstVec
 		alphaResult = initialCandidate;
 		return true;
 	}
-	const auto evaluateUpper = [&](double alpha, bool computeCurvature)
-	{
-		return unilateral ? (computeCurvature ? evaluateUnilateralLine<true>(problem.rowCount(), contactVelocity, contactDirection, inverseRoot, velocitySlope, directionNorm, alpha) :
-			evaluateUnilateralLine<false>(problem.rowCount(), contactVelocity, contactDirection, inverseRoot, velocitySlope, directionNorm, alpha)) :
-			evaluateConvexLine(problem, contactVelocity, contactDirection, compliance, inverseRoot, velocitySlope, directionNorm, alpha, scratch);
-	};
 	double lower = 0.0, upper = 1.0;
 	bool upperHasCurvature = unilateral && initialCandidate >= upper;
-	ConvexLineValue atUpper = evaluateUpper(upper, upperHasCurvature);
+	ConvexLineValue atUpper = evaluateLine(line, upper, upperHasCurvature);
 	++evaluations;
 	if(!atUpper.valid)
 	{
@@ -1982,7 +2457,7 @@ static bool searchConvex(const Problem& problem, ConstVector direction, ConstVec
 		lower = upper;
 		upper *= 2.0;
 		upperHasCurvature = unilateral && initialCandidate >= upper;
-		atUpper = evaluateUpper(upper, upperHasCurvature);
+		atUpper = evaluateLine(line, upper, upperHasCurvature);
 		++evaluations;
 		if(!atUpper.valid)
 		{
@@ -1993,7 +2468,7 @@ static bool searchConvex(const Problem& problem, ConstVector direction, ConstVec
 	for(int i = 0; i < 50; ++i)
 	{
 		const bool reuseUpper = i == 0 && alpha == upper && upperHasCurvature;
-		const ConvexLineValue value = reuseUpper ? atUpper : evaluate(alpha);
+		const ConvexLineValue value = reuseUpper ? atUpper : evaluateLine(line, alpha, true);
 		evaluations += !reuseUpper;
 		if(!value.valid)
 		{
@@ -2019,12 +2494,327 @@ static bool searchConvex(const Problem& problem, ConstVector direction, ConstVec
 	return true;
 }
 
+// Stiff unilateral rows make Newton's piecewise-quadratic objective change curvature
+// by 1/R at every kink, so an exact line search stops after a few active-set changes.
+// When Newton has not converged quickly, a primal-dual interior-point method follows
+// the smooth central path instead. With multipliers lambda >= 0 and gaps w >= 0,
+//   v = J' lambda,   w = J v + f + R lambda,   lambda_i w_i = mu,
+// and each Mehrotra predictor-corrector step solves (I + J' D J) dv = rhs with
+// D = lambda / (w + R lambda), the Newton Hessian shape with weights in (0, 1/R).
+// It returns once the stiff objective's scaled gradient is below exitGradient;
+// ordinary Newton iterations then finish from that point.
+struct InteriorPointData
+{
+	VectorStorage lambda, slack, weight, inverseLambda, inverseSlack, primalResidual, scaled, target;
+	VectorStorage affineLambda, affineSlack, stepLambda, stepSlack, stepContact;
+	VectorStorage dualResidual, stepVelocity, rhs, zero;
+	// The multipliers belong to the problem last solved; continuations may warm start.
+	bool warm = false;
+};
+
+#if defined(NEWTON_AVX2_FMA)
+static NEWTON_FORCE_INLINE double sum4(__m256d value)
+{
+	const __m128d halves = _mm_add_pd(_mm256_castpd256_pd128(value), _mm256_extractf128_pd(value, 1));
+	return _mm_cvtsd_f64(_mm_add_pd(halves, _mm_unpackhi_pd(halves, halves)));
+}
+
+static NEWTON_FORCE_INLINE double max4(__m256d value)
+{
+	const __m128d halves = _mm_max_pd(_mm256_castpd256_pd128(value), _mm256_extractf128_pd(value, 1));
+	return _mm_cvtsd_f64(_mm_max_pd(halves, _mm_unpackhi_pd(halves, halves)));
+}
+#endif
+
+// Solve for the velocity step of the current `scaled` right-hand side, then recover
+// multiplier and gap steps: dl = scaled - D J dv, dw = (target - w dl) / lambda.
+// Returns the largest ratio max(-dl / lambda, -dw / w), i.e. the inverse step to
+// the boundary, and accumulates sum(dl * dw).
+static double interiorPointDirection(const Problem& problem, IncrementalCholesky& factor, InteriorPointData& data, ParallelExecutor* parallelExecutor,
+	double* NEWTON_RESTRICT stepLambda, double* NEWTON_RESTRICT stepSlack, double& stepProduct)
+{
+	const int rows = problem.rowCount(), bodies = problem.bodyCount() * 6;
+	// The factor solves H x = -gradient, so pass dualResidual - J' scaled.
+	evaluatePrimalGradientCsc(problem, data.zero, data.scaled, data.rhs, parallelExecutor);
+	for(int i = 0; i < bodies; ++i)
+	{
+		data.rhs[i] += data.dualResidual[i];
+	}
+	factor.solveDirection(data.rhs, data.stepVelocity);
+	multiplyJacobianCsc(problem, data.stepVelocity, data.stepContact, parallelExecutor);
+	const double* NEWTON_RESTRICT scaled = data.scaled.data();
+	const double* NEWTON_RESTRICT weight = data.weight.data();
+	const double* NEWTON_RESTRICT contact = data.stepContact.data();
+	const double* NEWTON_RESTRICT target = data.target.data();
+	const double* NEWTON_RESTRICT slack = data.slack.data();
+	const double* NEWTON_RESTRICT inverseLambda = data.inverseLambda.data();
+	const double* NEWTON_RESTRICT inverseSlack = data.inverseSlack.data();
+	double ratio = 0.0, product = 0.0;
+	int row = 0;
+#if defined(NEWTON_AVX2_FMA)
+	const __m256d zero = _mm256_setzero_pd();
+	__m256d ratios = zero, products = zero;
+	for(; row + 4 <= rows; row += 4)
+	{
+		const __m256d dl = _mm256_fnmadd_pd(_mm256_loadu_pd(weight + row), _mm256_loadu_pd(contact + row), _mm256_loadu_pd(scaled + row));
+		const __m256d dw = _mm256_mul_pd(_mm256_fnmadd_pd(_mm256_loadu_pd(slack + row), dl, _mm256_loadu_pd(target + row)), _mm256_loadu_pd(inverseLambda + row));
+		_mm256_storeu_pd(stepLambda + row, dl);
+		_mm256_storeu_pd(stepSlack + row, dw);
+		ratios = _mm256_max_pd(ratios, _mm256_max_pd(_mm256_mul_pd(_mm256_sub_pd(zero, dl), _mm256_loadu_pd(inverseLambda + row)),
+			_mm256_mul_pd(_mm256_sub_pd(zero, dw), _mm256_loadu_pd(inverseSlack + row))));
+		products = _mm256_fmadd_pd(dl, dw, products);
+	}
+	ratio = max4(ratios);
+	product = sum4(products);
+#elif defined(NEWTON_SIMD128)
+	const simd::Double2 zero = simd::zero();
+	simd::Double2 ratios = zero, products = zero;
+	for(; row + 2 <= rows; row += 2)
+	{
+		const simd::Double2 dl = simd::negativeMultiplyAdd(simd::load(weight + row), simd::load(contact + row), simd::load(scaled + row));
+		const simd::Double2 dw = simd::multiply(simd::negativeMultiplyAdd(simd::load(slack + row), dl, simd::load(target + row)), simd::load(inverseLambda + row));
+		simd::store(stepLambda + row, dl);
+		simd::store(stepSlack + row, dw);
+		ratios = simd::maximum(ratios, simd::maximum(simd::multiply(simd::subtract(zero, dl), simd::load(inverseLambda + row)),
+			simd::multiply(simd::subtract(zero, dw), simd::load(inverseSlack + row))));
+		products = simd::multiplyAdd(dl, dw, products);
+	}
+	ratio = std::max(simd::low(ratios), simd::high(ratios));
+	product = simd::sum(products);
+#endif
+	for(; row < rows; ++row)
+	{
+		const double dl = scaled[row] - weight[row] * contact[row];
+		const double dw = (target[row] - slack[row] * dl) * inverseLambda[row];
+		stepLambda[row] = dl;
+		stepSlack[row] = dw;
+		ratio = std::max(ratio, std::max(-dl * inverseLambda[row], -dw * inverseSlack[row]));
+		product += dl * dw;
+	}
+	stepProduct = product;
+	return ratio;
+}
+
+// velocity/contactVelocity are updated in place; impulse and gradient hold the stiff
+// objective's projected impulses and gradient at the returned point.
+static int solveInteriorPoint(const Problem& problem, const Settings& settings, const NewtonStopping& stopping, IncrementalCholesky& factor, Curvature& weights,
+	InteriorPointData& data, VectorStorage& velocity, VectorStorage& contactVelocity, ConstVector inverseRoot, VectorStorage& impulse, VectorStorage& gradient,
+	int maxSteps, double exitGradient, double warmShift, Result& result, bool& failed)
+{
+	failed = false;
+	const bool warm = warmShift >= 0.0 && data.warm && data.lambda.size() == problem.rowCount();
+	const int rows = problem.rowCount(), bodies = problem.bodyCount() * 6;
+	VectorStorage* rowVectors[] = { &data.lambda, &data.slack, &data.weight, &data.inverseLambda, &data.inverseSlack, &data.primalResidual, &data.scaled, &data.target,
+		&data.affineLambda, &data.affineSlack, &data.stepLambda, &data.stepSlack, &data.stepContact };
+	for(VectorStorage* vector : rowVectors)
+	{
+		vector->resize(rows);
+	}
+	data.dualResidual.resize(bodies);
+	data.stepVelocity.resize(bodies);
+	data.rhs.resize(bodies);
+	data.zero.setZero(bodies);
+	double* NEWTON_RESTRICT lambda = data.lambda.data();
+	double* NEWTON_RESTRICT slack = data.slack.data();
+	double* NEWTON_RESTRICT weight = data.weight.data();
+	double* NEWTON_RESTRICT inverseLambda = data.inverseLambda.data();
+	double* NEWTON_RESTRICT inverseSlack = data.inverseSlack.data();
+	double* NEWTON_RESTRICT primalResidual = data.primalResidual.data();
+	double* NEWTON_RESTRICT scaled = data.scaled.data();
+	double* NEWTON_RESTRICT target = data.target.data();
+	double* NEWTON_RESTRICT contact = contactVelocity.data();
+	const double* NEWTON_RESTRICT compliance = problem.regularization.data();
+	// A cold start uses the penalty multipliers and gaps at the current velocity,
+	// shifted by their mean magnitudes into a well-centered interior point. A warm
+	// start keeps the previous multipliers, recomputes gaps for the changed free
+	// velocities and shifts both by a small fraction of their means.
+	multiplyJacobianCsc(problem, velocity, contactVelocity, settings.parallelExecutor);
+	contactVelocity += problem.freeVelocity;
+	double lambdaMean = 0.0, slackMean = 0.0;
+	for(int row = 0; row < rows; ++row)
+	{
+		const double s = contact[row];
+		if(!warm)
+		{
+			lambda[row] = s < 0.0 ? -s * inverseRoot[row] * inverseRoot[row] : 0.0;
+		}
+		slack[row] = std::max(0.0, s + compliance[row] * lambda[row]);
+		lambdaMean += lambda[row];
+		slackMean += slack[row];
+	}
+	const double shift = warm ? warmShift : 1.0;
+	lambdaMean = std::max(shift * lambdaMean / rows, 1.0e-12);
+	slackMean = std::max(shift * slackMean / rows, 1.0e-12);
+	for(int row = 0; row < rows; ++row)
+	{
+		lambda[row] += lambdaMean;
+		slack[row] += slackMean;
+	}
+	data.warm = true;
+	double* NEWTON_RESTRICT diagonal = weights.diagonal.data();
+	const double drop = settings.interiorPointDrop;
+	int steps = 0;
+	while(steps < maxSteps)
+	{
+		// dualResidual = v - J' lambda
+		evaluatePrimalGradientCsc(problem, velocity, data.lambda, data.dualResidual, settings.parallelExecutor);
+		// Residuals, weights and reciprocals; the predictor targets zero complementarity,
+		// so its right-hand side is D (rp - w).
+		double complementarity = 0.0;
+		int row = 0;
+#if defined(NEWTON_AVX2_FMA)
+		{
+			const __m256d one = _mm256_set1_pd(1.0), dropVector = _mm256_set1_pd(drop);
+			__m256d sum = _mm256_setzero_pd();
+			for(; row + 4 <= rows; row += 4)
+			{
+				const __m256d l = _mm256_loadu_pd(lambda + row), w = _mm256_loadu_pd(slack + row), r = _mm256_loadu_pd(compliance + row);
+				const __m256d rp = _mm256_sub_pd(_mm256_sub_pd(w, _mm256_loadu_pd(contact + row)), _mm256_mul_pd(r, l));
+				const __m256d lw = _mm256_mul_pd(l, w);
+				sum = _mm256_add_pd(sum, lw);
+				const __m256d d = _mm256_div_pd(l, _mm256_fmadd_pd(r, l, w));
+				_mm256_storeu_pd(primalResidual + row, rp);
+				_mm256_storeu_pd(weight + row, d);
+				// Negligible curvature from clearly separated rows is omitted from the
+				// factored Hessian only; the step equations keep every exact weight.
+				_mm256_storeu_pd(diagonal + row, _mm256_and_pd(_mm256_cmp_pd(_mm256_mul_pd(d, r), dropVector, _CMP_GT_OQ), d));
+				_mm256_storeu_pd(inverseLambda + row, _mm256_div_pd(one, l));
+				_mm256_storeu_pd(inverseSlack + row, _mm256_div_pd(one, w));
+				_mm256_storeu_pd(target + row, _mm256_sub_pd(_mm256_setzero_pd(), lw));
+				_mm256_storeu_pd(scaled + row, _mm256_mul_pd(d, _mm256_sub_pd(rp, w)));
+			}
+			complementarity = sum4(sum);
+		}
+#elif defined(NEWTON_SIMD128)
+		{
+			const simd::Double2 one = simd::splat(1.0), dropVector = simd::splat(drop), zero = simd::zero();
+			simd::Double2 sum = zero;
+			for(; row + 2 <= rows; row += 2)
+			{
+				const simd::Double2 l = simd::load(lambda + row), w = simd::load(slack + row), r = simd::load(compliance + row);
+				const simd::Double2 rp = simd::subtract(simd::subtract(w, simd::load(contact + row)), simd::multiply(r, l));
+				const simd::Double2 lw = simd::multiply(l, w);
+				sum = simd::add(sum, lw);
+				const simd::Double2 d = simd::divide(l, simd::multiplyAdd(r, l, w));
+				simd::store(primalResidual + row, rp);
+				simd::store(weight + row, d);
+				simd::store(diagonal + row, simd::bitAnd(simd::greater(simd::multiply(d, r), dropVector), d));
+				simd::store(inverseLambda + row, simd::divide(one, l));
+				simd::store(inverseSlack + row, simd::divide(one, w));
+				simd::store(target + row, simd::subtract(zero, lw));
+				simd::store(scaled + row, simd::multiply(d, simd::subtract(rp, w)));
+			}
+			complementarity = simd::sum(sum);
+		}
+#endif
+		for(; row < rows; ++row)
+		{
+			const double rp = slack[row] - contact[row] - compliance[row] * lambda[row];
+			const double d = lambda[row] / (slack[row] + compliance[row] * lambda[row]);
+			complementarity += lambda[row] * slack[row];
+			primalResidual[row] = rp;
+			weight[row] = d;
+			diagonal[row] = d * compliance[row] > drop ? d : 0.0;
+			inverseLambda[row] = 1.0 / lambda[row];
+			inverseSlack[row] = 1.0 / slack[row];
+			target[row] = -lambda[row] * slack[row];
+			scaled[row] = d * (rp - slack[row]);
+		}
+		const double mu = complementarity / rows;
+		const bool factored = factor.factorFresh(problem, weights, result);
+		if(!factored)
+		{
+			failed = true;
+			return steps;
+		}
+		// The factor retains `weights`; its former storage is now this scratch diagonal.
+		diagonal = weights.diagonal.data();
+		const Clock::time_point solveStart = profileStart(settings.profile);
+		double affineProduct;
+		const double affineRatio = interiorPointDirection(problem, factor, data, settings.parallelExecutor, data.affineLambda.data(), data.affineSlack.data(), affineProduct);
+		const double affineAlpha = affineRatio > 1.0 ? 1.0 / affineRatio : 1.0;
+		// The predictor satisfies lambda dw + w dl = -lambda w exactly.
+		const double affineMu = std::max(0.0, ((1.0 - affineAlpha) * complementarity + affineAlpha * affineAlpha * affineProduct) / rows);
+		const double centeringRatio = affineMu / mu;
+		const double centering = centeringRatio * centeringRatio * centeringRatio;
+		// Corrector with Mehrotra's second-order term.
+		const double* NEWTON_RESTRICT affineLambda = data.affineLambda.data();
+		const double* NEWTON_RESTRICT affineSlack = data.affineSlack.data();
+		const double centeredTarget = centering * mu;
+		for(row = 0; row < rows; ++row)
+		{
+			const double value = centeredTarget + target[row] - affineLambda[row] * affineSlack[row];
+			target[row] = value;
+			scaled[row] = weight[row] * (value * inverseLambda[row] + primalResidual[row]);
+		}
+		double product;
+		const double ratio = interiorPointDirection(problem, factor, data, settings.parallelExecutor, data.stepLambda.data(), data.stepSlack.data(), product);
+		result.backsolveMs += profileElapsed(settings.profile, solveStart);
+		const double alpha = ratio > 0.99 ? 0.99 / ratio : 1.0;
+		for(int i = 0; i < bodies; ++i)
+		{
+			velocity[i] += alpha * data.stepVelocity[i];
+		}
+		const double* NEWTON_RESTRICT stepLambda = data.stepLambda.data();
+		const double* NEWTON_RESTRICT stepSlack = data.stepSlack.data();
+		const double* NEWTON_RESTRICT stepContact = data.stepContact.data();
+		double* NEWTON_RESTRICT penalty = impulse.data();
+		row = 0;
+#if defined(NEWTON_AVX2_FMA)
+		{
+			const __m256d step = _mm256_set1_pd(alpha), zero = _mm256_setzero_pd();
+			for(; row + 4 <= rows; row += 4)
+			{
+				_mm256_storeu_pd(lambda + row, _mm256_fmadd_pd(step, _mm256_loadu_pd(stepLambda + row), _mm256_loadu_pd(lambda + row)));
+				_mm256_storeu_pd(slack + row, _mm256_fmadd_pd(step, _mm256_loadu_pd(stepSlack + row), _mm256_loadu_pd(slack + row)));
+				const __m256d s = _mm256_fmadd_pd(step, _mm256_loadu_pd(stepContact + row), _mm256_loadu_pd(contact + row));
+				_mm256_storeu_pd(contact + row, s);
+				// Projected impulses of the stiff objective at the new velocity.
+				const __m256d root = _mm256_loadu_pd(inverseRoot.data() + row);
+				_mm256_storeu_pd(penalty + row, _mm256_mul_pd(root, _mm256_max_pd(zero, _mm256_mul_pd(_mm256_sub_pd(zero, root), s))));
+			}
+		}
+#elif defined(NEWTON_SIMD128)
+		{
+			const simd::Double2 step = simd::splat(alpha), zero = simd::zero();
+			for(; row + 2 <= rows; row += 2)
+			{
+				simd::store(lambda + row, simd::multiplyAdd(step, simd::load(stepLambda + row), simd::load(lambda + row)));
+				simd::store(slack + row, simd::multiplyAdd(step, simd::load(stepSlack + row), simd::load(slack + row)));
+				const simd::Double2 s = simd::multiplyAdd(step, simd::load(stepContact + row), simd::load(contact + row));
+				simd::store(contact + row, s);
+				// Projected impulses of the stiff objective at the new velocity.
+				const simd::Double2 root = simd::load(inverseRoot.data() + row);
+				simd::store(penalty + row, simd::multiply(root, simd::maximum(zero, simd::multiply(simd::subtract(zero, root), s))));
+			}
+		}
+#endif
+		for(; row < rows; ++row)
+		{
+			lambda[row] += alpha * stepLambda[row];
+			slack[row] += alpha * stepSlack[row];
+			contact[row] += alpha * stepContact[row];
+			penalty[row] = inverseRoot[row] * std::max(0.0, -inverseRoot[row] * contact[row]);
+		}
+		++steps;
+		evaluatePrimalGradientCsc(problem, velocity, impulse, gradient, settings.parallelExecutor);
+		result.scaledGradient = stopping.gradientNorm(problem, gradient);
+		if(result.scaledGradient < exitGradient)
+		{
+			break;
+		}
+	}
+	return steps;
+}
+
 struct WorkspaceData
 {
 	VectorStorage velocity, impulse, gradient, contactVelocity, inverseRoot, coldImpulse, nextVelocity, direction, contactDirection;
 	Curvature weights;
 	PatchScratch patchScratch;
 	IncrementalCholesky factor;
+	std::vector<int> changedRows;
+	InteriorPointData interiorPoint;
 	const Problem* continuationProblem = NULL;
 	std::uint64_t continuationGeneration = 0;
 };
@@ -2079,6 +2869,13 @@ static SolveStatus::Enum solveNewtonInternal(const Problem& problem, const Setti
 		inverseRoot[row] = 1.0 / std::sqrt(compliance[row]);
 	}
 	factor.beginSolve(settings.profile, continuation, settings.parallelExecutor);
+	// Continuations of an interior-point solve restart the interior point from its
+	// previous multipliers instead of repeating the Newton phase.
+	const bool warmInteriorPoint = continuation && workspace.interiorPoint.warm && settings.interiorPointWarmShift >= 0.0;
+	if(!continuation)
+	{
+		workspace.interiorPoint.warm = false;
+	}
 	Clock::time_point evaluationStart = profileStart(settings.profile);
 	if(!evaluatePrimal(problem, velocity, inverseRoot, contactVelocity, impulse, gradient, &weights, workspace.patchScratch, settings.parallelExecutor))
 	{
@@ -2116,6 +2913,18 @@ static SolveStatus::Enum solveNewtonInternal(const Problem& problem, const Setti
 	}
 	result.evaluationMs += profileElapsed(settings.profile, evaluationStart);
 	double cost = primalCost(problem, velocity, contactVelocity, impulse);
+	const bool unilateral = problem.isUnilateral();
+	std::vector<int>& changedRows = workspace.changedRows;
+	if(unilateral)
+	{
+		reserveStorage(changedRows, std::uint32_t(rows));
+		changedRows.resize(rows);
+	}
+	// Fused unilateral evaluations list the curvature rows that differ from the factor.
+	int changedCount = -1;
+	bool interiorPointUsed = false;
+	// Consecutive short line-search steps indicate Newton crossing kinks slowly.
+	int shortSteps = 0;
 	for(int iteration = 0; iteration < settings.iterations; ++iteration)
 	{
 		result.scaledGradient = stopping.gradientNorm(problem, gradient);
@@ -2124,7 +2933,32 @@ static SolveStatus::Enum solveNewtonInternal(const Problem& problem, const Setti
 			result.stopReason = 1;
 			break;
 		}
-		if(!factor.factor(problem, weights, result))
+		if(unilateral && !interiorPointUsed && settings.interiorPointSwitch >= 0 && rows > 0 && (warmInteriorPoint ||
+			(iteration >= settings.interiorPointSwitch && (shortSteps >= 3 || iteration >= 4 * settings.interiorPointSwitch))))
+		{
+			interiorPointUsed = true;
+			const Clock::time_point interiorStart = profileStart(settings.profile);
+			bool failed;
+			const int steps = solveInteriorPoint(problem, settings, stopping, factor, weights, workspace.interiorPoint, velocity, contactVelocity, inverseRoot, impulse, gradient,
+				settings.iterations - iteration, std::max(stopping.tolerance, settings.interiorPointExit), warmInteriorPoint ? settings.interiorPointWarmShift : -1.0, result, failed);
+			result.interiorPointSteps += steps;
+			result.evaluationMs += profileElapsed(settings.profile, interiorStart);
+			if(failed)
+			{
+				return SolveStatus::eFACTORIZATION_FAILED;
+			}
+			// Resume Newton from the interior-point velocity with exact curvature.
+			if(!evaluatePrimal(problem, velocity, inverseRoot, contactVelocity, impulse, gradient, &weights, workspace.patchScratch, settings.parallelExecutor))
+			{
+				return SolveStatus::eNUMERICAL_FAILURE;
+			}
+			cost = primalCost(problem, velocity, contactVelocity, impulse);
+			changedCount = -1;
+			iteration += steps - 1;
+			result.iterations = iteration + 1;
+			continue;
+		}
+		if(!factor.factor(problem, weights, result, changedCount >= 0 ? changedRows.data() : NULL, changedCount))
 		{
 			return SolveStatus::eFACTORIZATION_FAILED;
 		}
@@ -2178,6 +3012,7 @@ static SolveStatus::Enum solveNewtonInternal(const Problem& problem, const Setti
 			return SolveStatus::eNUMERICAL_FAILURE;
 		}
 		result.lineSearchMs += profileElapsed(settings.profile, lineStart);
+		shortSteps = alpha < 0.5 ? shortSteps + 1 : 0;
 		bool unchanged = true;
 		for(int row = 0; row < bodies; ++row)
 		{
@@ -2196,6 +3031,27 @@ static SolveStatus::Enum solveNewtonInternal(const Problem& problem, const Setti
 		// J * (velocity + alpha * direction), periodically rebuilding from
 		// velocity to bound accumulated floating-point error.
 		const bool refreshContactVelocity = (iteration & 7) == 7;
+		if(unilateral)
+		{
+			if(refreshContactVelocity)
+			{
+				multiplyJacobianCsc(problem, velocity, contactVelocity, settings.parallelExecutor);
+				contactVelocity += problem.freeVelocity;
+			}
+			const double quadratic = evaluateUnilateralStep(rows, alpha, !refreshContactVelocity, contactVelocity.data(), workspace.contactDirection.data(), inverseRoot.data(),
+				impulse.data(), weights.diagonal.data(), factor.currentWeights().diagonal.data(), changedRows.data(), changedCount);
+			evaluatePrimalGradientCsc(problem, velocity, impulse, gradient, settings.parallelExecutor);
+			result.evaluationMs += profileElapsed(settings.profile, evaluationStart);
+			const double nextCost = 0.5 * (velocity.squaredNorm() + quadratic);
+			result.scaledImprovement = stopping.costScale * (cost - nextCost);
+			cost = nextCost;
+			if(result.scaledImprovement > 0.0 && result.scaledImprovement < stopping.tolerance)
+			{
+				result.stopReason = 2;
+				break;
+			}
+			continue;
+		}
 		if(!refreshContactVelocity)
 		{
 			for(int row = 0; row < rows; ++row)
@@ -2242,7 +3098,7 @@ Workspace& Workspace::operator=(Workspace&& other) noexcept
 
 static SolveStatus::Enum solveNewtonWorkspace(const Problem& problem, const Settings& settings, Result& result, WorkspaceData& data, const Result* previous, bool continuation) noexcept
 {
-	const Clock::time_point start = Clock::now();
+	const Clock::time_point start = profileStart(settings.timing);
 	const bool reuse = continuation && data.continuationProblem == &problem && data.continuationGeneration == problem.preparationGeneration;
 	data.continuationProblem = NULL;
 	data.continuationGeneration = 0;
@@ -2252,7 +3108,7 @@ static SolveStatus::Enum solveNewtonWorkspace(const Problem& problem, const Sett
 		data.continuationProblem = &problem;
 		data.continuationGeneration = problem.preparationGeneration;
 	}
-	result.elapsedMs = elapsed(start);
+	result.elapsedMs = profileElapsed(settings.timing, start);
 	return result.status;
 }
 

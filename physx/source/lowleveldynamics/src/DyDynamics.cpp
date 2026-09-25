@@ -27,6 +27,10 @@
 #define DY_BATCH_CONSTRAINTS 1
 //KS - used to specifically turn on/off batches 1D SIMD constraints.
 #define DY_BATCH_1D 1
+// Islands with fewer bodies share a Newton task chain, avoiding per-island dispatch.
+#ifndef NEWTON_ISLAND_BATCH_BODIES
+#define NEWTON_ISLAND_BATCH_BODIES 16
+#endif
 
 static const bool gMergePartitionAndFinalizeConstraintsTasks = true;
 
@@ -1191,23 +1195,32 @@ class PxsNewtonSolverTask : public Cm::Task
 {
 	PxsNewtonSolverTask& operator=(const PxsNewtonSolverTask&);
 public:
-	PxsNewtonSolverTask(DynamicsContext& context, IslandContext& islandContext, PxU32 solverBodyOffset) :
-		Cm::Task(context.getContextId()), mContext(context), mIslandContext(islandContext), mSolverBodyOffset(solverBodyOffset)
+	PxsNewtonSolverTask(DynamicsContext& context, IslandContext& islandContext, const SolverIslandObjects& objects, PxU32 solverBodyOffset) :
+		Cm::Task(context.getContextId()), mContext(context), mIslandContext(islandContext), mIslandIds(objects.islandIds), mIslandCount(objects.numIslands), mSolverBodyOffset(solverBodyOffset)
 	{
 	}
 
 	virtual void runInternal() PX_OVERRIDE
 	{
 		ThreadContext& threadContext = *mIslandContext.mThreadContext;
-		PxSolverBody* bodies = mContext.mSolverBodyPool.begin() + mSolverBodyOffset;
-		const PxU32 bodyCount = mIslandContext.mCounts.bodies;
 		NewtonSolver& solver = *mContext.getNewtonSolver();
+		const IG::IslandSim& islandSim = mContext.mIslandManager.getAccurateIslandSim();
 		const PxU32 workerCount = getTaskManager()->getCpuDispatcher()->getWorkerCount();
-		if(solveNewtonIsland(solver, mContext, threadContext, bodies, mContext.mSolverBodyDataPool.begin(), mSolverBodyOffset, bodyCount, getContinuation(), workerCount))
+		// A batch lays out its bodies island by island. Each island keeps its own factorization.
+		PxU32 firstBody = 0;
+		for(PxU32 i = 0; i < mIslandCount; ++i)
 		{
-			integrate(mContext.mIslandManager.getAccurateIslandSim(), mContext.mSolverBodyDataPool.begin() + mSolverBodyOffset + 1, threadContext.mRigidBodyArray, threadContext.motionVelocityArray, bodies, bodyCount, mContext.mDt, mContext.mEnableStabilization, mContext.mIsSleepingDisabled);
-			saveNewtonPoses(solver, threadContext.mBodyCoreArray, threadContext.mNodeIndexArray, bodyCount);
+			const PxU32 bodyCount = mIslandCount == 1 ? mIslandContext.mCounts.bodies : islandSim.getIsland(mIslandIds[i]).mNodeCount[IG::Node::eRIGID_BODY_TYPE];
+			const PxU32 bodyOffset = mSolverBodyOffset + firstBody;
+			PxSolverBody* bodies = mContext.mSolverBodyPool.begin() + bodyOffset;
+			if(solveNewtonIsland(solver, mContext, threadContext, bodies, mContext.mSolverBodyDataPool.begin(), bodyOffset, firstBody, bodyCount, getContinuation(), workerCount))
+			{
+				integrate(islandSim, mContext.mSolverBodyDataPool.begin() + bodyOffset + 1, threadContext.mRigidBodyArray + firstBody, threadContext.motionVelocityArray + firstBody, bodies, bodyCount, mContext.mDt, mContext.mEnableStabilization, mContext.mIsSleepingDisabled);
+				saveNewtonPoses(solver, threadContext.mBodyCoreArray + firstBody, threadContext.mNodeIndexArray + firstBody, bodyCount);
+			}
+			firstBody += bodyCount;
 		}
+		PX_ASSERT(firstBody == mIslandContext.mCounts.bodies);
 	}
 
 	virtual const char* getName() const PX_OVERRIDE { return "PxsDynamics.newtonSolve"; }
@@ -1215,6 +1228,8 @@ public:
 private:
 	DynamicsContext& mContext;
 	IslandContext& mIslandContext;
+	const IG::IslandId* mIslandIds;
+	PxU32 mIslandCount;
 	PxU32 mSolverBodyOffset;
 };
 
@@ -1615,7 +1630,7 @@ static void createSolverTaskChain(	DynamicsContext& dynamicContext,
 		// Start's continuation waits for free velocities and contact modification postprocessing.
 		// Newton consumes the raw descriptors, so PGS partitioning and packed rows are unnecessary.
 		PxsSolverStartTask* startTask = PX_PLACEMENT_NEW(taskPool.allocateNotThreadSafe(sizeof(PxsSolverStartTask)), PxsSolverStartTask)(dynamicContext, *islandContext, objects, solverBodyOffset, dynamicContext.getKinematicCount(), islandManager, bodyRemapTable, materialManager, iterator, useEnhancedDeterminism);
-		PxsNewtonSolverTask* solveTask = PX_PLACEMENT_NEW(taskPool.allocateNotThreadSafe(sizeof(PxsNewtonSolverTask)), PxsNewtonSolverTask)(dynamicContext, *islandContext, solverBodyOffset);
+		PxsNewtonSolverTask* solveTask = PX_PLACEMENT_NEW(taskPool.allocateNotThreadSafe(sizeof(PxsNewtonSolverTask)), PxsNewtonSolverTask)(dynamicContext, *islandContext, objects, solverBodyOffset);
 		PxsSolverEndTask* endTask = PX_PLACEMENT_NEW(taskPool.allocateNotThreadSafe(sizeof(PxsSolverEndTask)), PxsSolverEndTask)(dynamicContext, *islandContext, objects, solverBodyOffset, iterator);
 		taskPool.unlock();
 		endTask->setContinuation(continuation);
@@ -1896,8 +1911,9 @@ void DynamicsContext::updatePostKinematic(IG::SimpleIslandManager& simpleIslandM
 
 	PxU32 constraintIndex = 0;
 
-	// A Newton factorization belongs to one connected island. PGS retains its existing batching.
-	const PxU32 solverBatchMax = mNewtonSolver ? 1 : mSolverBatchSize;
+	// Newton tasks batch only small islands, each still solved with its own factorization,
+	// so larger islands remain parallel. PGS retains its existing batching.
+	const PxU32 solverBatchMax = mNewtonSolver ? NEWTON_ISLAND_BATCH_BODIES : mSolverBatchSize;
 	const PxU32 articulationBatchMax = mSolverArticBatchSize;
 	const PxU32 minimumConstraintCount = mNewtonSolver ? 0 : 1;
 
@@ -1943,6 +1959,8 @@ void DynamicsContext::updatePostKinematic(IG::SimpleIslandManager& simpleIslandM
 		while((currentIsland < islandCount && (nbBodies < solverBatchMax || constraintCount < minimumConstraintCount)) && nbArticulations < articulationBatchMax)
 		{
 			const IG::Island& island = islandSim.getIsland(islandIds[currentIsland]);
+			if(mNewtonSolver && nbBodies && nbBodies + island.mNodeCount[IG::Node::eRIGID_BODY_TYPE] > solverBatchMax)
+				break;
 			nbBodies += island.mNodeCount[IG::Node::eRIGID_BODY_TYPE];
 			nbArticulations += island.mNodeCount[IG::Node::eARTICULATION_TYPE];
 			nbConstraints += island.mEdges.getCount(IG::Edge::eCONSTRAINT);

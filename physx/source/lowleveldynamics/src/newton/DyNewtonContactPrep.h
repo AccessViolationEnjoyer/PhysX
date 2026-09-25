@@ -63,6 +63,13 @@ struct NewtonContactSettings
 	PxReal ccdMaxSeparation;
 	PxReal dilatancyTolerance;
 	bool correctDilatancy;
+	// Reference-acceleration coefficients shared by every contact of a step.
+	double impedance;
+	double damping;
+	double stiffness;
+	// Impedance at zero penetration, reaching impedance at stiffeningDepth (0 disables).
+	double surfaceImpedance;
+	double stiffeningDepth;
 	const PxU8* bodyLockFlags = NULL;
 	const Cm::SpatialVector* initialVelocities = NULL;
 };

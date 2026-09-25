@@ -12,6 +12,7 @@
 
 #include "foundation/PxUserAllocated.h"
 #include "foundation/PxSync.h"
+#include "foundation/PxAtomic.h"
 #include "ExtSharedQueueEntryPool.h"
 #include "ExtTaskQueueHelper.h"
 #include "ExtCpuWorkerThread.h"
@@ -74,8 +75,11 @@ namespace Ext
 																				task.run();
 																		}
 
-    					void											waitForWork()						{ PX_ASSERT(PxDefaultCpuDispatcherWaitForWorkMode::eWAIT_FOR_WORK == mWaitForWorkMode); mWorkReady.wait(); }
-						void											resetWakeSignal();
+						// A worker that found no job announces itself before sleeping. It must then look
+						// for jobs again: a job submitted before the announcement did not wake it.
+						void											prepareToWait(CpuWorkerThread& worker);
+						void											cancelWait(CpuWorkerThread& worker);
+						void											wakeSleepingThread();
 
 		static			void											getAffinityMasks(PxU32* affinityMasks, PxU32 threadCount);
 
@@ -85,7 +89,10 @@ namespace Ext
 	protected:
 						CpuWorkerThread*								mWorkerThreads;
 						TaskQueueHelper									mHelper;
-						PxSync											mWorkReady;
+						// Workers that announced sleep and have not been claimed. Submissions look for
+						// a sleeping worker to wake only while this is positive.
+						volatile PxI32									mSleepingThreads;
+						volatile PxI32									mSleepOrder;
 						PxU8*											mThreadNames;
 						PxU32											mNumThreads;
 						bool											mShuttingDown;

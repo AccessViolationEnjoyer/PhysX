@@ -80,7 +80,7 @@ int main(int argc, const char* const* argv)
 {
 	if(argc < 2)
 	{
-		printf("SnippetPalletConveyor output-prefix [steps=2000] [dt=.01] [position=16] [velocity=2] [threads=8] [pgs|newton] [regularization=1e-4] [Newton-iterations=100]\n");
+		printf("SnippetPalletConveyor output-prefix [steps=2000] [dt=.01] [position=16] [velocity=2] [threads=8] [pgs|newton] [regularization=1e-4] [Newton-iterations=100] [dilatancy-corrections=4] [surface-regularization=1e-2] [stiffening-depth=2e-5]\n");
 		return 1;
 	}
 	const int steps = argc > 2 ? atoi(argv[2]) : 2000;
@@ -103,6 +103,9 @@ int main(int argc, const char* const* argv)
 	description.solverType = argc > 7 && std::strcmp(argv[7], "newton") == 0 ? PxSolverType::eNEWTON : PxSolverType::ePGS;
 	description.newtonRegularization = argc > 8 ? PxReal(atof(argv[8])) : description.newtonRegularization;
 	description.newtonMaxIterations = argc > 9 ? PxU32(atoi(argv[9])) : description.newtonMaxIterations;
+	description.newtonDilatancyCorrections = argc > 10 ? PxU32(atoi(argv[10])) : description.newtonDilatancyCorrections;
+	description.newtonSurfaceRegularization = argc > 11 ? PxReal(atof(argv[11])) : description.newtonSurfaceRegularization;
+	description.newtonStiffeningDepth = argc > 12 ? PxReal(atof(argv[12])) : description.newtonStiffeningDepth;
 	description.flags |= PxSceneFlag::eENABLE_FRICTION_EVERY_ITERATION;
 	NativeNewtonProfiler profiler;
 	if(description.solverType == PxSolverType::eNEWTON)

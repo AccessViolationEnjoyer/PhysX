@@ -36,6 +36,8 @@ Ext::DefaultCpuDispatcher::DefaultCpuDispatcher(PxU32 numThreads, PxU32* affinit
 {
 	PX_CHECK_MSG((((PxDefaultCpuDispatcherWaitForWorkMode::eYIELD_PROCESSOR == mWaitForWorkMode) && (mYieldProcessorCount > 0)) ||
 					(((PxDefaultCpuDispatcherWaitForWorkMode::eYIELD_THREAD == mWaitForWorkMode) || (PxDefaultCpuDispatcherWaitForWorkMode::eWAIT_FOR_WORK == mWaitForWorkMode)) && (0 == mYieldProcessorCount))), "Illegal yield processor count for chosen execute mode");
+	mSleepingThreads = 0;
+	mSleepOrder = 0;
 
 	PxU32* defaultAffinityMasks = NULL;
 
@@ -88,7 +90,10 @@ Ext::DefaultCpuDispatcher::~DefaultCpuDispatcher()
 
 	mShuttingDown = true;
 	if(PxDefaultCpuDispatcherWaitForWorkMode::eWAIT_FOR_WORK == mWaitForWorkMode)
-		mWorkReady.set();
+	{
+		for(PxU32 i = 0; i < mNumThreads; ++i)
+			mWorkerThreads[i].wake();
+	}
 	for(PxU32 i = 0; i < mNumThreads; ++i)
 		mWorkerThreads[i].waitForQuit();
 
@@ -122,7 +127,7 @@ void Ext::DefaultCpuDispatcher::submitTask(PxBaseTask& task)
 		if(mWorkerThreads[i].tryAcceptJobToLocalQueue(task, currentThread))
 		{
 			if(PxDefaultCpuDispatcherWaitForWorkMode::eWAIT_FOR_WORK == mWaitForWorkMode)
-				mWorkReady.set();
+				wakeSleepingThread();
 			else
 				PX_ASSERT(PxDefaultCpuDispatcherWaitForWorkMode::eYIELD_PROCESSOR == mWaitForWorkMode || PxDefaultCpuDispatcherWaitForWorkMode::eYIELD_THREAD == mWaitForWorkMode);
 			return;
@@ -132,29 +137,65 @@ void Ext::DefaultCpuDispatcher::submitTask(PxBaseTask& task)
 	if(mHelper.tryAcceptJobToQueue(task))
 	{
 		if(PxDefaultCpuDispatcherWaitForWorkMode::eWAIT_FOR_WORK == mWaitForWorkMode)
-			mWorkReady.set();
+			wakeSleepingThread();
 	}
 }
 
-void Ext::DefaultCpuDispatcher::resetWakeSignal()
+void Ext::DefaultCpuDispatcher::wakeSleepingThread()
+{
+	// The locked read orders it after the job's enqueue. A worker that announced itself
+	// later re-checks the queues, so no wake is needed when none had announced. One job
+	// wakes one claimed worker; the others keep sleeping.
+	if(PxAtomicAdd(&mSleepingThreads, 0) <= 0)
+		return;
+	// Prefer the most recent sleeper: its core is least likely to be in a deep idle state.
+	const PxU32 nbThreads = mNumThreads;
+	for(;;)
+	{
+		CpuWorkerThread* newest = NULL;
+		PxI32 newestOrder = PX_MIN_I32;
+		for(PxU32 i = 0; i < nbThreads; ++i)
+		{
+			const PxI32 order = mWorkerThreads[i].sleepOrder();
+			if(order > newestOrder)
+			{
+				newest = mWorkerThreads + i;
+				newestOrder = order;
+			}
+		}
+		if(!newest)
+			return;
+		if(newest->claimSleeping())
+		{
+			PxAtomicDecrement(&mSleepingThreads);
+			newest->wake();
+			return;
+		}
+	}
+}
+
+void Ext::DefaultCpuDispatcher::prepareToWait(CpuWorkerThread& worker)
 {
 	PX_ASSERT(PxDefaultCpuDispatcherWaitForWorkMode::eWAIT_FOR_WORK == mWaitForWorkMode);
-	mWorkReady.reset();
-	
-	// The code below is necessary to avoid deadlocks on shut down.
-	// A thread usually loops as follows:
-	// while quit is not signaled
-	// 1)  reset wake signal
-	// 2)  fetch work
-	// 3)  if work -> process
-	// 4)  else -> wait for wake signal
+	// The worker resets its own signal before announcing, so a claim after the
+	// announcement always wakes it.
+	worker.announceSleep(PxAtomicIncrement(&mSleepOrder));
+	PxAtomicIncrement(&mSleepingThreads);
+
+	// A thread loops as follows while quit is not signaled:
+	// 1) fetch work; if there is work, process it
+	// 2) otherwise reset its wake signal, announce itself and fetch work again
+	// 3) if there is still no work, wait for its wake signal
 	//
-	// If a thread reaches 1) after the thread pool signaled wake up,
-	// the wake up sync gets reset and all other threads which have not
-	// passed 4) already will wait forever.
-	// The code below makes sure that on shutdown, the wake up signal gets
-	// sent again after it was reset
-	//
+	// A reset after shutdown signaled the wake up would leave the thread waiting
+	// forever, so the signal is sent again during shutdown.
 	if (mShuttingDown)
-		mWorkReady.set();
+		worker.wake();
+}
+
+void Ext::DefaultCpuDispatcher::cancelWait(CpuWorkerThread& worker)
+{
+	// A submitter that already claimed the worker has removed it from the count.
+	if(worker.claimSleeping())
+		PxAtomicDecrement(&mSleepingThreads);
 }
