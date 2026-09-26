@@ -1,5 +1,6 @@
 #include "PalletScene.h"
 #include "MujocoAdapter.h"
+#include "MujocoConveyor.h"
 #include <cstdint>
 
 static void writeScene(const char* path, const std::vector<pallet::Body>& bodies)
@@ -30,85 +31,6 @@ static void writeScene(const char* path, const std::vector<pallet::Body>& bodies
 	}
 	fprintf(file, "\t</worldbody>\n</mujoco>\n");
 	fclose(file);
-}
-
-// MuJoCo's solimp impedance (a smooth step from dmin to dmax over width) at a violation.
-static double mujocoImpedance(const mjtNum* solimp, double violation)
-{
-	const double dmin = mju_clip(solimp[0], mjMINIMP, mjMAXIMP), dmax = mju_clip(solimp[1], mjMINIMP, mjMAXIMP);
-	const double width = solimp[2], midpoint = solimp[3], power = solimp[4];
-	if(dmin == dmax || width <= mjMINVAL)
-		return 0.5 * (dmin + dmax);
-	const double x = mju_min(1.0, mju_abs(violation) / width);
-	const double y = x <= midpoint ? mju_pow(x, power) / mju_pow(midpoint, power - 1.0) :
-		1.0 - mju_pow(1.0 - x, power) / mju_pow(1.0 - midpoint, power - 1.0);
-	return dmin + y * (dmax - dmin);
-}
-
-// Keep MuJoCo's positive contact-detection margin separate from rest distance.
-// As in PhysX, the intended resting surfaces touch; the collision envelope
-// must not create a visible gap between each sheet and its adjacent boxes.
-// MuJoCo measures both the spring and the impedance from the margin. Measure both
-// from contact instead, so solimp stiffens with penetration as PhysX Newton's
-// surface regularization does. Constant solimp only removes the margin offset.
-// The benchmark scene has contact rows only.
-static void applyRestDistance(mjData* data)
-{
-	for(int i = 0; i < data->ncon; ++i)
-	{
-		const mjContact& contact = data->contact[i];
-		if(contact.efc_address < 0)
-			continue;
-		const int rows = contact.dim == 1 ? 1 : 2 * (contact.dim - 1);
-		for(int row = contact.efc_address; row < contact.efc_address + rows; ++row)
-		{
-			mjtNum* kbip = data->efc_KBIP + 4 * row;
-			const double position = data->efc_pos[row];
-			const double previous = kbip[2];
-			const double impedance = mujocoImpedance(contact.solimp, mju_min(0.0, position));
-			data->efc_aref[row] += kbip[0] * (previous * (position - data->efc_margin[row]) - impedance * position);
-			data->efc_R[row] *= (1.0 - impedance) * previous / ((1.0 - previous) * impedance);
-			data->efc_D[row] = 1.0 / data->efc_R[row];
-			kbip[2] = impedance;
-		}
-	}
-	// mj_step1 already copied R and D into the island arrays; aref is copied later.
-	if(data->nisland)
-	{
-		for(int islandRow = 0; islandRow < data->nefc; ++islandRow)
-		{
-			const int row = data->map_iefc2efc[islandRow];
-			data->iefc_R[islandRow] = data->efc_R[row];
-			data->iefc_D[islandRow] = data->efc_D[row];
-		}
-	}
-}
-
-// MuJoCo has no contact target-velocity setter. Supply the belt's prescribed
-// surface velocity in its acceleration reference, before either Newton solve.
-// Pyramidal rows are normal +/- mu*tangent, in geom[1]-geom[0] order.
-static void applyConveyorVelocity(mjData* data)
-{
-	for(int i = 0; i < data->ncon; ++i)
-	{
-		const mjContact& contact = data->contact[i];
-		const bool beltFirst = contact.geom[0] < pallet::conveyorCount;
-		const bool beltSecond = contact.geom[1] < pallet::conveyorCount;
-		if(contact.efc_address < 0 || (!beltFirst && !beltSecond))
-			continue;
-		const double speed = beltFirst ? pallet::beltSpeed : -pallet::beltSpeed;
-		for(int tangent = 0; tangent < 2; ++tangent)
-		{
-			for(int sign = 0; sign < 2; ++sign)
-			{
-				const int row = contact.efc_address + tangent * 2 + sign;
-				const double target = speed * (contact.frame[0] + (sign ? -1.0 : 1.0) *
-					contact.friction[tangent] * contact.frame[(tangent + 1) * 3]);
-				data->efc_vel[row] -= target;
-				data->efc_aref[row] += data->efc_KBIP[4 * row + 1] * target;
-			}
-		}
-	}
 }
 
 static int countContactPairs(const mjData* data)
@@ -180,8 +102,8 @@ int main(int argc, const char* const* argv)
 	{
 		const pallet::Clock::time_point start = pallet::Clock::now();
 		mj_step1(model, data);
-		applyRestDistance(data);
-		applyConveyorVelocity(data);
+		mujocoConveyor::applyRestDistance(data);
+		mujocoConveyor::applyConveyorVelocity(data, pallet::conveyorCount, pallet::beltSpeed);
 		mj_fwdActuation(model, data);
 		mj_fwdAcceleration(model, data);
 		const pallet::Clock::time_point solveStart = pallet::Clock::now();

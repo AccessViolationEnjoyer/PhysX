@@ -197,12 +197,13 @@ struct Curvature
 };
 
 // Distinguish every successful preparation, including a new Problem constructed
-// at a previously used address. One relaxed increment per preparation avoids
+// at a previously used address. Each Problem takes a unique base once and then
+// counts its own preparations, so concurrent islands share no counter; this avoids
 // scanning immutable coefficients during same-problem continuation.
-static std::uint64_t nextPreparationGeneration()
+std::uint64_t Problem::uniquePreparationBase() noexcept
 {
-	static std::atomic<std::uint64_t> generation(0);
-	return generation.fetch_add(1, std::memory_order_relaxed) + 1;
+	static std::atomic<std::uint64_t> base(0);
+	return (base.fetch_add(1, std::memory_order_relaxed) + 1) << 32;
 }
 
 void Problem::setScalarBounds(int contactIndex, double lowerImpulse, double upperImpulse) noexcept
@@ -229,7 +230,7 @@ void Problem::setScalarBounds(int contactIndex, double lowerImpulse, double uppe
 	if(prepared)
 	{
 		equalityRows += int(isEquality) - int(wasEquality);
-		preparationGeneration = nextPreparationGeneration();
+		++preparationGeneration;
 	}
 	if(!isEquality)
 	{
@@ -618,7 +619,7 @@ static void prepareProblemInternal(Problem& problem)
 	}
 	problem.prepared = true;
 	prepareHessianTopology(problem);
-	problem.preparationGeneration = nextPreparationGeneration();
+	++problem.preparationGeneration;
 }
 
 void prepareProblem(Problem& problem) noexcept
@@ -2864,9 +2865,22 @@ static SolveStatus::Enum solveNewtonInternal(const Problem& problem, const Setti
 	impulse.resize(problem.rowCount());
 	weights.resize(problem);
 	workspace.patchScratch.resize(problem);
-	for(int row = 0; row < rows; ++row)
+	// Correctly rounded square roots and divisions match the scalar loop exactly.
+	int rootRow = 0;
+#if defined(NEWTON_AVX2_FMA)
+	for(; rootRow + 4 <= rows; rootRow += 4)
 	{
-		inverseRoot[row] = 1.0 / std::sqrt(compliance[row]);
+		_mm256_storeu_pd(inverseRoot.data() + rootRow, _mm256_div_pd(_mm256_set1_pd(1.0), _mm256_sqrt_pd(_mm256_loadu_pd(compliance.data() + rootRow))));
+	}
+#elif defined(NEWTON_SIMD128)
+	for(; rootRow + 2 <= rows; rootRow += 2)
+	{
+		simd::store(inverseRoot.data() + rootRow, simd::divide(simd::splat(1.0), simd::squareRoot(simd::load(compliance.data() + rootRow))));
+	}
+#endif
+	for(; rootRow < rows; ++rootRow)
+	{
+		inverseRoot[rootRow] = 1.0 / std::sqrt(compliance[rootRow]);
 	}
 	factor.beginSolve(settings.profile, continuation, settings.parallelExecutor);
 	// Continuations of an interior-point solve restart the interior point from its
@@ -2887,7 +2901,11 @@ static SolveStatus::Enum solveNewtonInternal(const Problem& problem, const Setti
 		VectorStorage& coldImpulse = workspace.coldImpulse;
 		coldImpulse.resize(problem.rowCount());
 		// Comparing warm and free motion needs only the cold impulses and cost.
-		if(!evaluateImpulses(problem, problem.freeVelocity, inverseRoot, coldImpulse, NULL, workspace.patchScratch))
+		if(problem.isUnilateral())
+		{
+			evaluateUnilateralImpulses(problem.freeVelocity, inverseRoot, coldImpulse, NULL);
+		}
+		else if(!evaluateImpulses(problem, problem.freeVelocity, inverseRoot, coldImpulse, NULL, workspace.patchScratch))
 		{
 			return SolveStatus::eNUMERICAL_FAILURE;
 		}
@@ -3075,8 +3093,9 @@ static SolveStatus::Enum solveNewtonInternal(const Problem& problem, const Setti
 			break;
 		}
 	}
-	result.impulse = impulse;
-	result.primal = velocity;
+	// The workspace recomputes both vectors on its next solve, so exchange buffers.
+	result.impulse.swap(impulse);
+	result.primal.swap(velocity);
 	result.gradientResidual = gradient.infinityNorm();
 	result.scaledGradient = stopping.gradientNorm(problem, gradient);
 	return result.stopReason == 0 ? SolveStatus::eITERATION_LIMIT : SolveStatus::eSUCCESS;

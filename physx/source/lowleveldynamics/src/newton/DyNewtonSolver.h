@@ -42,13 +42,22 @@ namespace Dy
 class DynamicsContext;
 class NewtonSolver;
 class ThreadContext;
+struct NewtonIslandWorkspace;
 
 NewtonSolver* createNewtonSolver(const PxSceneDesc& desc);
 void destroyNewtonSolver(NewtonSolver* solver);
 
 // Advance even on empty updates: recycled island node indices must not inherit an old warm start.
 void beginNewtonUpdate(NewtonSolver& solver, PxU32 nodeCount);
-bool solveNewtonIsland(NewtonSolver& solver, DynamicsContext& context, ThreadContext& threadContext, PxSolverBody* bodies, PxSolverBodyData* bodyData, PxU32 firstBodyIndex, PxU32 threadBodyOffset, PxU32 bodyCount, PxBaseTask* continuation, PxU32 workerCount);
+// A task holds one workspace while it solves the islands of its batch in turn.
+NewtonIslandWorkspace* acquireNewtonWorkspace(NewtonSolver& solver);
+void releaseNewtonWorkspace(NewtonSolver& solver, NewtonIslandWorkspace* workspace);
+// Groups the constraint descriptors of a batch of islands by island. islandFirstBodies holds
+// islandCount + 1 increasing body offsets within the batch; islandStarts receives islandCount + 1
+// offsets into the returned order, which remains valid until the workspace is next used.
+const PxU32* groupNewtonDescriptors(NewtonIslandWorkspace& workspace, const ThreadContext& threadContext, PxU32 firstBodyIndex, const PxU32* islandFirstBodies, PxU32 islandCount, PxU32* islandStarts);
+// descriptors lists the island's constraint descriptors; NULL means all of the thread context's.
+bool solveNewtonIsland(NewtonSolver& solver, NewtonIslandWorkspace& workspace, DynamicsContext& context, ThreadContext& threadContext, PxSolverBody* bodies, PxSolverBodyData* bodyData, PxU32 firstBodyIndex, PxU32 threadBodyOffset, PxU32 bodyCount, const PxU32* descriptors, PxU32 descriptorCount, PxBaseTask* continuation, PxU32 workerCount);
 void saveNewtonPoses(NewtonSolver& solver, PxsBodyCore* const* bodies, const PxU32* nodeIndices, PxU32 bodyCount);
 }
 }

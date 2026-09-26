@@ -19,8 +19,8 @@ int main(int argc, char** argv)
 	for(int step = 0; step < 600; ++step)
 	{
 		mj_step1(model, data);
-		applyRestDistance(data);
-		applyConveyorVelocity(data);
+		mujocoConveyor::applyRestDistance(data);
+		mujocoConveyor::applyConveyorVelocity(data, pallet::conveyorCount, pallet::beltSpeed);
 		mj_fwdActuation(model, data);
 		mj_fwdAcceleration(model, data);
 		newton::MujocoSolverProfile profile;

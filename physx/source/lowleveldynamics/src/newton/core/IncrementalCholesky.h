@@ -25,7 +25,7 @@ class IncrementalCholesky
 	};
 
 public:
-	IncrementalCholesky() : m_size(0), m_profile(false), m_updateInverseCurrent(false) {}
+	IncrementalCholesky() : m_size(0), m_profile(false), m_updateInverseCurrent(false), m_dense(false) {}
 	const Curvature& currentWeights() const { return m_weights; }
 
 	void beginSolve(bool profile, bool continuation, ParallelExecutor* parallelExecutor)
@@ -48,6 +48,19 @@ public:
 		reserveStorage(m_updates, std::uint32_t(problem.rowCount()));
 		if(m_size == 0)
 		{
+			return refactor(problem, weights, result);
+		}
+		// A one-body Hessian is a single dense block; refactoring it costs no more than
+		// updating it, so the factor is reused only for unchanged curvature.
+		if(m_dense)
+		{
+			if(problem.isUnilateral() && weights.diagonal.size() == m_weights.diagonal.size() &&
+				std::equal(weights.diagonal.data(), weights.diagonal.data() + weights.diagonal.size(), m_weights.diagonal.data()))
+			{
+				++result.reusedFactors;
+				m_weights.swap(weights);
+				return true;
+			}
 			return refactor(problem, weights, result);
 		}
 		// Bilateral curvature is constant within a solve. Its existing factor
@@ -268,6 +281,30 @@ public:
 
 	void solveDirection(ConstVector gradient, MutableVector direction)
 	{
+		if(m_dense)
+		{
+			// Solve L L^T direction = -gradient with the dense one-body factor.
+			double value[6];
+			for(int row = 0; row < 6; ++row)
+			{
+				double sum = -gradient[row];
+				for(int inner = 0; inner < row; ++inner)
+				{
+					sum -= m_denseLower[row * 6 + inner] * value[inner];
+				}
+				value[row] = sum * m_denseInverse[row];
+			}
+			for(int row = 5; row >= 0; --row)
+			{
+				double sum = value[row];
+				for(int inner = row + 1; inner < 6; ++inner)
+				{
+					sum -= m_denseLower[inner * 6 + row] * value[inner];
+				}
+				direction[row] = value[row] = sum * m_denseInverse[row];
+			}
+			return;
+		}
 		// Solve H * direction = -gradient directly into the caller's buffer.
 		std::vector<double>& solution = m_solution;
 		for(int row = 0; row < m_size; ++row)
@@ -467,6 +504,30 @@ private:
 		const double assemblyMs = profileElapsed(m_profile, assemblyStart);
 		result.matrixMs += assemblyMs;
 		const Clock::time_point factorStart = profileStart(m_profile);
+		// One body's Hessian is its lower 6x6 diagonal block. A failed dense pivot
+		// falls through to the block factor and its scalar fallback.
+		Mat6 denseLower;
+		m_dense = problem.bodyCount() == 1 && cholesky6(m_hessian.blocks[problem.hessianDiagonalBlocks[0]], denseLower, m_denseInverse);
+		if(m_dense)
+		{
+			for(int row = 0; row < 6; ++row)
+			{
+				for(int column = 0; column < row; ++column)
+				{
+					m_denseLower[row * 6 + column] = denseLower(row, column);
+				}
+			}
+			m_size = 6;
+			m_updateInverseCurrent = false;
+			++result.factorizations;
+			result.factorMs += profileElapsed(m_profile, factorStart);
+			if(m_weights.diagonal.size() != weights.diagonal.size() || m_weights.coupled.size() != weights.coupled.size() || m_weights.patches.size() != weights.patches.size())
+			{
+				m_weights.resize(problem);
+			}
+			m_weights.swap(weights);
+			return true;
+		}
 		if(m_size == 0)
 		{
 			const Clock::time_point symbolicStart = profileStart(m_profile);
@@ -858,6 +919,12 @@ private:
 	std::vector<std::uint64_t> m_pairs;
 	std::vector<double> m_vector, m_solution, m_reachWork, m_updateInverseDiagonal;
 	double m_factorWork = 0.0;
+	// One-body problems keep a dense factor instead of the block factor: its strictly
+	// lower entries, row-major, and reciprocal pivots. Plain arrays keep the class free
+	// of over-aligned members, which C++14 heap allocation does not honour.
+	bool m_dense;
+	double m_denseLower[36];
+	double m_denseInverse[6];
 	bool m_updateInverseCurrent;
 	Curvature m_weights;
 	std::vector<RankUpdate> m_updates;

@@ -118,7 +118,8 @@ struct Problem
 	bool prepared = false;
 	bool compactJacobian = false;
 	// Core-assigned identity of prepared equations; bounds edits also invalidate continuation.
-	std::uint64_t preparationGeneration = 0;
+	static std::uint64_t uniquePreparationBase() noexcept;
+	std::uint64_t preparationGeneration = uniquePreparationBase();
 	SparseStorage jacobian;
 	std::vector<int> columnCursors;
 	std::vector<int> rowContact;

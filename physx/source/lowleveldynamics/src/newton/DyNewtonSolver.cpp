@@ -265,6 +265,9 @@ struct NewtonIslandWorkspace : public PxUserAllocated
 	NewtonJointRows joints;
 	NewtonContactRows contacts;
 	PxArray<PxU8> lockFlags;
+	// A batch's constraint descriptors grouped by island, and each descriptor's island.
+	PxArray<PxU32> descriptorOrder;
+	PxArray<PxU32> descriptorIslands;
 };
 
 class NewtonSolver : public PxUserAllocated
@@ -491,7 +494,7 @@ static PxI32 newtonBodyIndex(PxU32 dataIndex, PxU32 firstBodyIndex, PxU32 bodyCo
 	return dataIndex > firstBodyIndex && dataIndex <= firstBodyIndex + bodyCount ? PxI32(dataIndex - firstBodyIndex - 1) : -1;
 }
 
-static void prepareNewtonRows(NewtonSolver& solver, NewtonIslandWorkspace& workspace, DynamicsContext& context, ThreadContext& threadContext, const Cm::SpatialVector* motionVelocities, PxSolverBodyData* bodyData, PxU32 firstBodyIndex, PxU32 bodyCount)
+static void prepareNewtonRows(NewtonSolver& solver, NewtonIslandWorkspace& workspace, DynamicsContext& context, ThreadContext& threadContext, const Cm::SpatialVector* motionVelocities, PxSolverBodyData* bodyData, PxU32 firstBodyIndex, PxU32 bodyCount, const PxU32* descriptors, PxU32 descriptorCount)
 {
 	newton::Problem& problem = workspace.problem;
 	problem.clearContacts();
@@ -519,19 +522,15 @@ static void prepareNewtonRows(NewtonSolver& solver, NewtonIslandWorkspace& works
 	contactSettings.stiffeningDepth = solver.stiffeningDepth;
 	contactSettings.bodyLockFlags = workspace.lockFlags.begin();
 	contactSettings.initialVelocities = motionVelocities;
-	const PxU32 contactDescriptionCount = threadContext.contactDescArraySize;
-	for(PxU32 i = 0; i < contactDescriptionCount; ++i)
+	// Without a grouped list, the island owns all of its thread context's descriptors.
+	const PxU32 contactDescriptionCount = descriptors ? descriptorCount : threadContext.contactDescArraySize;
+	for(PxU32 k = 0; k < contactDescriptionCount; ++k)
 	{
-		const PxSolverConstraintDesc& desc = threadContext.contactConstraintDescArray[i];
+		const PxSolverConstraintDesc& desc = threadContext.contactConstraintDescArray[descriptors ? descriptors[k] : k];
 		const PxSolverBodyData& body0 = bodyData[desc.bodyADataIndex];
 		const PxSolverBodyData& body1 = bodyData[desc.bodyBDataIndex];
 		const PxI32 index0 = newtonBodyIndex(desc.bodyADataIndex, firstBodyIndex, bodyCount);
 		const PxI32 index1 = newtonBodyIndex(desc.bodyBDataIndex, firstBodyIndex, bodyCount);
-		// A task batch may hold several small islands; each is solved separately.
-		if(index0 < 0 && index1 < 0)
-		{
-			continue;
-		}
 		if(desc.constraintType == DY_SC_TYPE_RB_1D)
 		{
 			const Constraint& constraint = *reinterpret_cast<const Constraint*>(desc.constraint);
@@ -613,7 +612,7 @@ static void profileNewtonSolve(const NewtonIslandWorkspace& workspace, PxU64 con
 	PX_PROFILE_VALUE(PxReal(workspace.result.scaledGradient), "Dynamics.newtonScaledGradient", contextId);
 }
 
-static bool solveNewtonRows(NewtonSolver& solver, NewtonIslandWorkspace& workspace, DynamicsContext& context, ThreadContext& threadContext, PxSolverBody* bodies, PxSolverBodyData* allBodyData, PxU32 firstBodyIndex, PxU32 threadBodyOffset, PxU32 bodyCount, newton::ParallelExecutor* parallelExecutor)
+static bool solveNewtonRows(NewtonSolver& solver, NewtonIslandWorkspace& workspace, DynamicsContext& context, ThreadContext& threadContext, PxSolverBody* bodies, PxSolverBodyData* allBodyData, PxU32 firstBodyIndex, PxU32 threadBodyOffset, PxU32 bodyCount, const PxU32* descriptors, PxU32 descriptorCount, newton::ParallelExecutor* parallelExecutor)
 {
 	PxsBodyCore* const* bodyCores = threadContext.mBodyCoreArray + threadBodyOffset;
 	const PxU32* nodeIndices = threadContext.mNodeIndexArray + threadBodyOffset;
@@ -624,7 +623,7 @@ static bool solveNewtonRows(NewtonSolver& solver, NewtonIslandWorkspace& workspa
 	{
 		PX_PROFILE_ZONE("Dynamics.newtonPrepare", context.getContextId());
 		prepareNewtonBodies(solver, workspace, bodyCores, nodeIndices, bodyData, bodyCount, timestep);
-		prepareNewtonRows(solver, workspace, context, threadContext, motionVelocities, allBodyData, firstBodyIndex, bodyCount);
+		prepareNewtonRows(solver, workspace, context, threadContext, motionVelocities, allBodyData, firstBodyIndex, bodyCount, descriptors, descriptorCount);
 		newton::prepareCompactProblemFromColumnCounts(workspace.problem);
 	}
 	threadContext.mAxisConstraintCount += PxU32(workspace.problem.rowCount());
@@ -682,18 +681,63 @@ static bool solveNewtonRows(NewtonSolver& solver, NewtonIslandWorkspace& workspa
 	return true;
 }
 
-static bool solveNewtonIslandInternal(NewtonSolver& solver, DynamicsContext& context, ThreadContext& threadContext, PxSolverBody* bodies, PxSolverBodyData* bodyData, PxU32 firstBodyIndex, PxU32 threadBodyOffset, PxU32 bodyCount, newton::ParallelExecutor* parallelExecutor)
+NewtonIslandWorkspace* acquireNewtonWorkspace(NewtonSolver& solver)
 {
-	NewtonIslandWorkspace* workspace = solver.acquire();
-	const bool success = solveNewtonRows(solver, *workspace, context, threadContext, bodies, bodyData, firstBodyIndex, threadBodyOffset, bodyCount, parallelExecutor);
-	solver.release(workspace);
-	return success;
+	return solver.acquire();
 }
 
-bool solveNewtonIsland(NewtonSolver& solver, DynamicsContext& context, ThreadContext& threadContext, PxSolverBody* bodies, PxSolverBodyData* bodyData, PxU32 firstBodyIndex, PxU32 threadBodyOffset, PxU32 bodyCount, PxBaseTask* continuation, PxU32 workerCount)
+void releaseNewtonWorkspace(NewtonSolver& solver, NewtonIslandWorkspace* workspace)
+{
+	solver.release(workspace);
+}
+
+const PxU32* groupNewtonDescriptors(NewtonIslandWorkspace& workspace, const ThreadContext& threadContext, PxU32 firstBodyIndex, const PxU32* islandFirstBodies, PxU32 islandCount, PxU32* islandStarts)
+{
+	// Counting sort by island, keyed on each descriptor's first dynamic batch body.
+	const PxU32 descriptorCount = threadContext.contactDescArraySize;
+	const PxU32 bodyCount = islandFirstBodies[islandCount];
+	// A batch without descriptors still returns storage, not NULL, which means ungrouped.
+	workspace.descriptorOrder.resize(PxMax(descriptorCount, 1u));
+	workspace.descriptorIslands.resize(descriptorCount);
+	for(PxU32 island = 0; island <= islandCount; ++island)
+	{
+		islandStarts[island] = 0;
+	}
+	for(PxU32 i = 0; i < descriptorCount; ++i)
+	{
+		const PxSolverConstraintDesc& desc = threadContext.contactConstraintDescArray[i];
+		const PxI32 index0 = newtonBodyIndex(desc.bodyADataIndex, firstBodyIndex, bodyCount);
+		const PxU32 body = PxU32(index0 >= 0 ? index0 : newtonBodyIndex(desc.bodyBDataIndex, firstBodyIndex, bodyCount));
+		PX_ASSERT(body < bodyCount);
+		PxU32 island = 0;
+		while(island + 1 < islandCount && islandFirstBodies[island + 1] <= body)
+		{
+			++island;
+		}
+		workspace.descriptorIslands[i] = island;
+		++islandStarts[island + 1];
+	}
+	for(PxU32 island = 0; island < islandCount; ++island)
+	{
+		islandStarts[island + 1] += islandStarts[island];
+	}
+	// Place each island's descriptors from its start, keeping their original order.
+	for(PxU32 i = 0; i < descriptorCount; ++i)
+	{
+		workspace.descriptorOrder[islandStarts[workspace.descriptorIslands[i]]++] = i;
+	}
+	for(PxU32 island = islandCount; island > 0; --island)
+	{
+		islandStarts[island] = islandStarts[island - 1];
+	}
+	islandStarts[0] = 0;
+	return workspace.descriptorOrder.begin();
+}
+
+bool solveNewtonIsland(NewtonSolver& solver, NewtonIslandWorkspace& workspace, DynamicsContext& context, ThreadContext& threadContext, PxSolverBody* bodies, PxSolverBodyData* bodyData, PxU32 firstBodyIndex, PxU32 threadBodyOffset, PxU32 bodyCount, const PxU32* descriptors, PxU32 descriptorCount, PxBaseTask* continuation, PxU32 workerCount)
 {
 	NewtonParallelExecutor parallelExecutor(context, continuation, workerCount);
-	const bool success = solveNewtonIslandInternal(solver, context, threadContext, bodies, bodyData, firstBodyIndex, threadBodyOffset, bodyCount, &parallelExecutor);
+	const bool success = solveNewtonRows(solver, workspace, context, threadContext, bodies, bodyData, firstBodyIndex, threadBodyOffset, bodyCount, descriptors, descriptorCount, &parallelExecutor);
 	parallelExecutor.finish();
 	return success;
 }

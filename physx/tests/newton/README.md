@@ -14,7 +14,8 @@ criteria and safeguarded line search. `IncrementalCholesky.h` orders small body 
 retained minimum-degree implementation and larger graphs with METIS,
 constructs the permuted sparse matrix in linear time, and chooses incremental updates or a
 fresh factorization using structural work estimates. `BlockCholesky.h` supplies small rigid-body
-block kernels for every factor, retaining scalar LLT only for failed block pivots. The serial block
+block kernels for every factor, retaining scalar LLT only for failed block pivots. A one-body
+problem factors its 6x6 Hessian directly and refactors instead of updating it. The serial block
 factor reads the Hessian's 6x6 body-pair blocks directly; the scalar CSC Hessian is exported only
 for symbolic analysis and the scalar or parallel paths. Positive updates
 precede downdates. A numerical loss of rank triggers a complete current-Hessian rebuild.
@@ -206,6 +207,11 @@ including native MuJoCo comparisons, identical settled snapshots and one/eight-w
 Unlike the older four-island 500-box fixture, every box is part of one connected island. Factors
 above the measured symbolic-work crossover use the parallel Cholesky path; smaller factors retain
 the original serial path.
+
+## Case conveyor scene
+
+[cases/README.md](cases/README.md) documents 2,000 separate cases carried by ten long conveyors,
+each case an independent island on its belt, run with PhysX PGS, PhysX Newton and MuJoCo.
 
 ## Full pallet conveyor scene
 

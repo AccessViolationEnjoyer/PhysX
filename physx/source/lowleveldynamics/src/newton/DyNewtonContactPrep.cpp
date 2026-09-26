@@ -210,17 +210,23 @@ static PX_FORCE_INLINE void appendEdgeRow(const newton::Vec6* normal, const newt
 	newton::CompactContact& row = problem.beginScalarContact();
 	row.body[0] = bodyIndex0;
 	row.body[1] = bodyIndex1;
-	double response = 0.0;
+	// Only an all-zero row is degenerate. Testing each entry avoids a serial sum of squares.
+	bool nonzero = false;
 	for(PxU32 end = 0; end < 2; ++end)
 	{
+		if((end ? bodyIndex1 : bodyIndex0) < 0)
+		{
+			row.jacobian[end].setZero();
+			continue;
+		}
 		for(PxU32 column = 0; column < 6; ++column)
 		{
 			const double value = normal[end][column] + scale * tangent[end][column];
 			row.jacobian[end][column] = value;
-			response += value * value;
+			nonzero = nonzero | (value != 0.0);
 		}
 	}
-	if(response == 0.0)
+	if(!nonzero)
 	{
 		problem.cancelScalarContact();
 		return;

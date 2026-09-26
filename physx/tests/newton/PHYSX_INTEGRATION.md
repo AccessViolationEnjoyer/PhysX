@@ -63,7 +63,9 @@ The shared task pipeline selects
 Independent islands run through PhysX's CPU dispatcher. A connected Newton island remains one
 PhysX task. Islands smaller than 16 bodies share one task chain, up to 16 bodies in total, so
 scattered resting objects do not each dispatch three tasks; every island in a batch is still
-prepared, factored and solved separately, with results identical to unbatched tasks. Large Cholesky factors parallelize independent trailing block updates with up to eight
+prepared, factored and solved separately, with results identical to unbatched tasks. A batch
+task holds one solver workspace for all of its islands and groups the batch's constraint
+descriptors by island once, so small islands share no lock or counter between workers. Large Cholesky factors parallelize independent trailing block updates with up to eight
 workers from PhysX's CPU dispatcher. The Newton island task participates in the work and waits at
 the same cooperative barriers used by PhysX's parallel PGS solver. Helpers are launched lazily on
 the first sufficiently large factorization and finish when that factorization ends. The established

@@ -1207,19 +1207,38 @@ public:
 		const IG::IslandSim& islandSim = mContext.mIslandManager.getAccurateIslandSim();
 		const PxU32 workerCount = getTaskManager()->getCpuDispatcher()->getWorkerCount();
 		// A batch lays out its bodies island by island. Each island keeps its own factorization.
+		NewtonIslandWorkspace* workspace = acquireNewtonWorkspace(solver);
+		// Batches of several islands hold at most NEWTON_ISLAND_BATCH_BODIES bodies. Their
+		// descriptors are grouped by island once, so each island reads only its own.
+		PxU32 islandFirstBodies[NEWTON_ISLAND_BATCH_BODIES + 1];
+		PxU32 descriptorStarts[NEWTON_ISLAND_BATCH_BODIES + 1];
+		const bool grouped = mIslandCount > 1;
+		const PxU32* descriptors = NULL;
+		if(grouped)
+		{
+			PX_ASSERT(mIslandCount <= NEWTON_ISLAND_BATCH_BODIES);
+			islandFirstBodies[0] = 0;
+			for(PxU32 i = 0; i < mIslandCount; ++i)
+			{
+				islandFirstBodies[i + 1] = islandFirstBodies[i] + islandSim.getIsland(mIslandIds[i]).mNodeCount[IG::Node::eRIGID_BODY_TYPE];
+			}
+			descriptors = groupNewtonDescriptors(*workspace, threadContext, mSolverBodyOffset, islandFirstBodies, mIslandCount, descriptorStarts);
+		}
 		PxU32 firstBody = 0;
 		for(PxU32 i = 0; i < mIslandCount; ++i)
 		{
-			const PxU32 bodyCount = mIslandCount == 1 ? mIslandContext.mCounts.bodies : islandSim.getIsland(mIslandIds[i]).mNodeCount[IG::Node::eRIGID_BODY_TYPE];
+			const PxU32 bodyCount = grouped ? islandFirstBodies[i + 1] - islandFirstBodies[i] : mIslandContext.mCounts.bodies;
 			const PxU32 bodyOffset = mSolverBodyOffset + firstBody;
 			PxSolverBody* bodies = mContext.mSolverBodyPool.begin() + bodyOffset;
-			if(solveNewtonIsland(solver, mContext, threadContext, bodies, mContext.mSolverBodyDataPool.begin(), bodyOffset, firstBody, bodyCount, getContinuation(), workerCount))
+			if(solveNewtonIsland(solver, *workspace, mContext, threadContext, bodies, mContext.mSolverBodyDataPool.begin(), bodyOffset, firstBody, bodyCount,
+				grouped ? descriptors + descriptorStarts[i] : NULL, grouped ? descriptorStarts[i + 1] - descriptorStarts[i] : 0, getContinuation(), workerCount))
 			{
 				integrate(islandSim, mContext.mSolverBodyDataPool.begin() + bodyOffset + 1, threadContext.mRigidBodyArray + firstBody, threadContext.motionVelocityArray + firstBody, bodies, bodyCount, mContext.mDt, mContext.mEnableStabilization, mContext.mIsSleepingDisabled);
 				saveNewtonPoses(solver, threadContext.mBodyCoreArray + firstBody, threadContext.mNodeIndexArray + firstBody, bodyCount);
 			}
 			firstBody += bodyCount;
 		}
+		releaseNewtonWorkspace(solver, workspace);
 		PX_ASSERT(firstBody == mIslandContext.mCounts.bodies);
 	}
 
@@ -1959,7 +1978,8 @@ void DynamicsContext::updatePostKinematic(IG::SimpleIslandManager& simpleIslandM
 		while((currentIsland < islandCount && (nbBodies < solverBatchMax || constraintCount < minimumConstraintCount)) && nbArticulations < articulationBatchMax)
 		{
 			const IG::Island& island = islandSim.getIsland(islandIds[currentIsland]);
-			if(mNewtonSolver && nbBodies && nbBodies + island.mNodeCount[IG::Node::eRIGID_BODY_TYPE] > solverBatchMax)
+			// Islands without rigid bodies add none, so the island count needs its own limit.
+			if(mNewtonSolver && nbBodies && (nbBodies + island.mNodeCount[IG::Node::eRIGID_BODY_TYPE] > solverBatchMax || currentIsland - startIsland >= NEWTON_ISLAND_BATCH_BODIES))
 				break;
 			nbBodies += island.mNodeCount[IG::Node::eRIGID_BODY_TYPE];
 			nbArticulations += island.mNodeCount[IG::Node::eARTICULATION_TYPE];

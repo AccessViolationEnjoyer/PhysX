@@ -56,6 +56,7 @@ NEWTON_FORCE_INLINE Double2 add(Double2 left, Double2 right) { return wasm_f64x2
 NEWTON_FORCE_INLINE Double2 subtract(Double2 left, Double2 right) { return wasm_f64x2_sub(left, right); }
 NEWTON_FORCE_INLINE Double2 multiply(Double2 left, Double2 right) { return wasm_f64x2_mul(left, right); }
 NEWTON_FORCE_INLINE Double2 divide(Double2 left, Double2 right) { return wasm_f64x2_div(left, right); }
+NEWTON_FORCE_INLINE Double2 squareRoot(Double2 value) { return wasm_f64x2_sqrt(value); }
 // Pseudo-maximum: left < right ? right : left, which matches SSE2 for ordered values.
 NEWTON_FORCE_INLINE Double2 maximum(Double2 left, Double2 right) { return wasm_f64x2_pmax(left, right); }
 NEWTON_FORCE_INLINE Double2 greater(Double2 left, Double2 right) { return wasm_f64x2_gt(left, right); }
@@ -87,6 +88,7 @@ NEWTON_FORCE_INLINE Double2 add(Double2 left, Double2 right) { return _mm_add_pd
 NEWTON_FORCE_INLINE Double2 subtract(Double2 left, Double2 right) { return _mm_sub_pd(left, right); }
 NEWTON_FORCE_INLINE Double2 multiply(Double2 left, Double2 right) { return _mm_mul_pd(left, right); }
 NEWTON_FORCE_INLINE Double2 divide(Double2 left, Double2 right) { return _mm_div_pd(left, right); }
+NEWTON_FORCE_INLINE Double2 squareRoot(Double2 value) { return _mm_sqrt_pd(value); }
 NEWTON_FORCE_INLINE Double2 maximum(Double2 left, Double2 right) { return _mm_max_pd(left, right); }
 NEWTON_FORCE_INLINE Double2 greater(Double2 left, Double2 right) { return _mm_cmpgt_pd(left, right); }
 NEWTON_FORCE_INLINE Double2 greaterEqual(Double2 left, Double2 right) { return _mm_cmpge_pd(left, right); }
@@ -1169,7 +1171,8 @@ private:
 	std::vector<double> m_values;
 };
 
-inline bool cholesky6(const Matrix<6, 6>& input, Matrix<6, 6>& lower)
+// Also returns each pivot's reciprocal for solves that multiply instead of divide.
+inline bool cholesky6(const Matrix<6, 6>& input, Matrix<6, 6>& lower, double* inverseDiagonal)
 {
 	lower.setZero();
 	for(int column = 0; column < 6; ++column)
@@ -1185,6 +1188,10 @@ inline bool cholesky6(const Matrix<6, 6>& input, Matrix<6, 6>& lower)
 		}
 		lower(column, column) = std::sqrt(diagonal);
 		const double inverse = 1.0 / lower(column, column);
+		if(inverseDiagonal)
+		{
+			inverseDiagonal[column] = inverse;
+		}
 		for(int row = column + 1; row < 6; ++row)
 		{
 			double value = input(row, column);
@@ -1196,6 +1203,11 @@ inline bool cholesky6(const Matrix<6, 6>& input, Matrix<6, 6>& lower)
 		}
 	}
 	return true;
+}
+
+inline bool cholesky6(const Matrix<6, 6>& input, Matrix<6, 6>& lower)
+{
+	return cholesky6(input, lower, NULL);
 }
 
 // Jacobi diagonalization of a small symmetric matrix. Eigenvalues are sorted
