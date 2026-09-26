@@ -377,11 +377,11 @@ PxScene* NpPhysics::createScene(const PxSceneDesc& desc)
 		return NULL;
 	}
 
-	// A missing Newton state must fail scene creation rather than select PGS.
-	if(mutableDesc.solverType == PxSolverType::eNEWTON && npScene->getScScene().getSolverType() != PxSolverType::eNEWTON)
+	// A missing Anvil state must fail scene creation rather than select PGS.
+	if(mutableDesc.solverType == PxSolverType::eANVIL && npScene->getScScene().getSolverType() != PxSolverType::eANVIL)
 	{
 		PX_DELETE(npScene);
-		mFoundation.error(PxErrorCode::eOUT_OF_MEMORY, PX_FL, "Unable to create Newton scene. Solver state allocation failed.");
+		mFoundation.error(PxErrorCode::eOUT_OF_MEMORY, PX_FL, "Unable to create Anvil scene. Solver state allocation failed.");
 		return NULL;
 	}
 

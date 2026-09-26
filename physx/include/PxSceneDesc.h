@@ -58,6 +58,8 @@ struct PX_DEPRECATED PxFrictionType
 #PxSolverType::ePGS selects the iterative sequential impulse solver. This is the same kind of solver used in PhysX 3.4 and earlier releases.
 
 #PxSolverType::eTGS selects a non linear iterative solver. This kind of solver can lead to improved convergence and handle large mass ratios, long chains and jointed systems better. It is slightly more expensive than the default solver and can introduce more energy to correct joint and contact errors.
+
+#PxSolverType::eANVIL selects the Anvil solver, which resolves each island's contacts and joints together rather than one at a time. Stacks, heavy loads on light bodies and large mass ratios stay at rest without sinking or drifting, at a cost comparable to the default solver for most scenes. It runs on the CPU and does not support articulations.
 */
 struct PxSolverType
 {
@@ -65,7 +67,7 @@ struct PxSolverType
 	{
 		ePGS,	//!< Projected Gauss-Seidel iterative solver
 		eTGS,	//!< Temporal Gauss-Seidel solver
-		eNEWTON	//!< CPU regularized Newton solver for rigid bodies; articulations are not supported
+		eANVIL	//!< Anvil CPU rigid-body solver; articulations are not supported
 	};
 };
 
@@ -720,79 +722,87 @@ public:
 	PxSolverType::Enum	solverType;
 
 	/**
-	\brief Maximum Newton iterations for each constraint solve phase.
+	\brief Maximum iterations of each Anvil solve.
 
-	Only used by PxSolverType::eNEWTON. Position correction and final physical velocity
-	may require separate solves. Friction corrections and material transitions share
-	this budget within each phase. Rigid-body PGS position/velocity iteration counts do not
-	control this solver. Must be in [1, 2147483647].
+	Only used by PxSolverType::eANVIL. Most steps need very few iterations; the limit bounds the
+	cost of difficult ones. Rigid-body PGS position/velocity iteration counts do not control this
+	solver. Must be in [1, 2147483647].
 
 	<b>Default:</b> 100
 	*/
-	PxU32 newtonMaxIterations;
+	PxU32 anvilMaxIterations;
 
 	/**
-	\brief Newton convergence tolerance for the normalized gradient and cost improvement.
+	\brief Anvil convergence tolerance.
 
-	Only used by PxSolverType::eNEWTON. Must be greater than zero.
-	Lower values request a more accurate solve, subject to newtonMaxIterations.
-	Native friction corrections also test a row-normalized compliant velocity residual
-	divided by the timestep against this value.
+	Only used by PxSolverType::eANVIL. Lower values request a more accurate solve, subject to
+	anvilMaxIterations. Must be greater than zero.
 
 	<b>Default:</b> 1e-8
 	*/
-	PxReal newtonTolerance;
+	PxReal anvilTolerance;
 
 	/**
-	\brief Dimensionless response-scaled compliance for otherwise hard Newton constraint rows.
+	\brief Anvil also stops once another iteration would move no body further than this in a
+	timestep (rotations count at PxTolerancesScale::length from the rotation axis).
 
-	Only used by PxSolverType::eNEWTON. For a row with response r = J M^-1 J^T,
-	the solver uses positive regularization R = newtonRegularization * r. This adds
-	physical softness: it is not an exact zero-compliance constraint or just a
-	factorization tolerance. Smaller values reduce softness but can worsen conditioning.
-	Rows with physical spring compliance retain their specified spring law.
-	Must be greater than zero.
+	Only used by PxSolverType::eANVIL. Poses are stored in single precision, so smaller
+	corrections are rounding. Contacts that barely touch, such as the sides of neighbouring
+	boxes, would otherwise cost extra iterations to resolve below that resolution. 0 disables
+	this test. Must not be negative.
+
+	<b>Default:</b> 1e-7 * PxTolerancesScale::length
+	*/
+	PxReal anvilDisplacementTolerance;
+
+	/**
+	\brief Compliance of otherwise rigid contacts and joints, relative to their effective mass.
+
+	Only used by PxSolverType::eANVIL. This dimensionless value makes rigid constraints very
+	slightly soft, which keeps the solve well conditioned; smaller values are stiffer but can
+	need more iterations. Constraints with a spring keep their spring law. Must be greater than
+	zero.
 
 	<b>Default:</b> 1e-4
 	*/
-	PxReal newtonRegularization;
+	PxReal anvilRegularization;
 
 	/**
-	\brief Maximum dilatancy corrections after each Newton contact solve.
+	\brief Maximum friction corrections after each Anvil solve while contacts slide.
 
-	Only used by PxSolverType::eNEWTON. Sliding contacts under pyramidal friction gain a small
-	separating velocity (dilatancy) unless their friction edges are biased by the solved slip
-	speed. Each correction re-solves with biases from the previous solution. 0 disables the
-	corrections, which is cheaper when contacts slide but lets sliding contacts separate slightly.
+	Only used by PxSolverType::eANVIL. The corrections keep sliding contacts from separating
+	slightly. 0 disables them, which is cheaper when contacts slide but lets sliding bodies lift
+	by a small amount.
 
 	<b>Default:</b> 4
 	*/
-	PxU32 newtonDilatancyCorrections;
+	PxU32 anvilFrictionCorrections;
 
 	/**
-	\brief Newton contact regularization at zero penetration.
+	\brief Contact compliance at zero penetration, as for anvilRegularization.
 
-	Only used by PxSolverType::eNEWTON when newtonStiffeningDepth is greater than zero. Contacts
-	start at this regularization and stiffen smoothly to newtonRegularization as penetration
-	reaches newtonStiffeningDepth, like MuJoCo's position-dependent impedance. Softer first
-	contact converges in fewer iterations; the stiffening limits how far loaded contacts sink.
-	Must be greater than zero.
+	Only used by PxSolverType::eANVIL when anvilStiffeningDepth is greater than zero. Contacts
+	start at this compliance and stiffen smoothly to anvilRegularization as penetration reaches
+	anvilStiffeningDepth. Softer first contact is cheaper to solve; the stiffening limits how far
+	loaded contacts sink. Keep the ratio to anvilRegularization below about 1000: steeper
+	stiffening makes a light body under a heavy load bounce between steps. Must be greater than
+	zero.
 
 	<b>Default:</b> 1e-2
 	*/
-	PxReal newtonSurfaceRegularization;
+	PxReal anvilSurfaceRegularization;
 
 	/**
-	\brief Penetration depth over which Newton contacts stiffen from newtonSurfaceRegularization
-	to newtonRegularization.
+	\brief Penetration depth over which Anvil contacts stiffen from anvilSurfaceRegularization
+	to anvilRegularization.
 
-	Only used by PxSolverType::eNEWTON. 0 disables stiffening, so every contact uses
-	newtonRegularization. A depth that is short for the contact loads makes the stiffness change
+	Only used by PxSolverType::eANVIL. 0 disables stiffening, so every contact uses
+	anvilRegularization. A depth that is short for the contact loads makes the stiffness change
 	sharply between steps, so contacts can oscillate. Must not be negative.
 
 	<b>Default:</b> 2e-5 * PxTolerancesScale::length
 	*/
-	PxReal newtonStiffeningDepth;
+	PxReal anvilStiffeningDepth;
 
 	/**
 	\brief A contact with a relative velocity below this will not bounce. A typical value for simulation.
@@ -1155,12 +1165,13 @@ PX_INLINE PxSceneDesc::PxSceneDesc(const PxTolerancesScale& scale):
 
 	frictionType					(PxFrictionType::ePATCH),
 	solverType						(PxSolverType::ePGS),
-	newtonMaxIterations				(100),
-	newtonTolerance					(1e-8f),
-	newtonRegularization				(1e-4f),
-	newtonDilatancyCorrections			(4),
-	newtonSurfaceRegularization			(1e-2f),
-	newtonStiffeningDepth				(2e-5f * scale.length),
+	anvilMaxIterations				(100),
+	anvilTolerance					(1e-8f),
+	anvilDisplacementTolerance			(1e-7f * scale.length),
+	anvilRegularization				(1e-4f),
+	anvilFrictionCorrections			(4),
+	anvilSurfaceRegularization			(1e-2f),
+	anvilStiffeningDepth				(2e-5f * scale.length),
 	bounceThresholdVelocity			(0.2f * scale.speed),
 	frictionOffsetThreshold			(0.04f * scale.length),
 	frictionCorrelationDistance		(0.025f * scale.length),
@@ -1245,7 +1256,7 @@ PX_INLINE bool PxSceneDesc::isValid() const
 	if(!sanityBounds.isValid())
 		return false;
 
-	if(solverType != PxSolverType::ePGS && solverType != PxSolverType::eTGS && solverType != PxSolverType::eNEWTON)
+	if(solverType != PxSolverType::ePGS && solverType != PxSolverType::eTGS && solverType != PxSolverType::eANVIL)
 	{
 		return false;
 	}
@@ -1256,21 +1267,21 @@ PX_INLINE bool PxSceneDesc::isValid() const
 	}
 
 #if PX_CHECKED
-	if(solverType == PxSolverType::eNEWTON)
+	if(solverType == PxSolverType::eANVIL)
 	{
-		if(newtonMaxIterations == 0 || newtonMaxIterations > 0x7fffffffu)
+		if(anvilMaxIterations == 0 || anvilMaxIterations > 0x7fffffffu)
 		{
 			return false;
 		}
-		if(newtonTolerance <= 0.0f)
+		if(anvilTolerance <= 0.0f || anvilDisplacementTolerance < 0.0f)
 		{
 			return false;
 		}
-		if(newtonRegularization <= 0.0f)
+		if(anvilRegularization <= 0.0f)
 		{
 			return false;
 		}
-		if(newtonSurfaceRegularization <= 0.0f || newtonStiffeningDepth < 0.0f)
+		if(anvilSurfaceRegularization <= 0.0f || anvilStiffeningDepth < 0.0f)
 		{
 			return false;
 		}

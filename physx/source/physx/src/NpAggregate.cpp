@@ -361,7 +361,7 @@ bool NpAggregate::addArticulation(PxArticulationReducedCoordinate& art)
 
 	PX_CHECK_SCENE_API_WRITE_FORBIDDEN_AND_RETURN_VAL(npScene, "PxAggregate::addArticulation() not allowed while simulation is running. Call will be ignored.", false);
 
-	PX_ASSERT(!npScene || npScene->getScScene().getSolverType() != PxSolverType::eNEWTON);
+	PX_ASSERT(!npScene || npScene->getScScene().getSolverType() != PxSolverType::eANVIL);
 
 	PX_SIMD_GUARD
 

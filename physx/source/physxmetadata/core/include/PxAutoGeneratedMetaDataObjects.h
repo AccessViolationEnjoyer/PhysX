@@ -2487,7 +2487,7 @@ template<> struct PxEnumTraits< physx::PxFrictionType::Enum > { PxEnumTraits() :
 	static PxU32ToName g_physx__PxSolverType__EnumConversion[] = {
 		{ "ePGS", static_cast<PxU32>( physx::PxSolverType::ePGS ) },
 		{ "eTGS", static_cast<PxU32>( physx::PxSolverType::eTGS ) },
-		{ "eNEWTON", static_cast<PxU32>( physx::PxSolverType::eNEWTON ) },
+		{ "eANVIL", static_cast<PxU32>( physx::PxSolverType::eANVIL ) },
 		{ NULL, 0 }
 	};
 
@@ -3318,9 +3318,9 @@ template<> struct PxEnumTraits< physx::PxBVHBuildStrategy::Enum > { PxEnumTraits
 		PxU32 GpuMaxNumStaticPartitions;
 		PxU32 GpuComputeVersion;
 		PxU32 ContactPairSlabSize;
-		PxU32 NewtonMaxIterations;
-		PxReal NewtonTolerance;
-		PxReal NewtonRegularization;
+		PxU32 AnvilMaxIterations;
+		PxReal AnvilTolerance;
+		PxReal AnvilRegularization;
 		 PX_PHYSX_CORE_API PxSceneDescGeneratedValues( const PxSceneDesc* inSource );
 	};
 	DEFINE_PROPERTY_TO_VALUE_STRUCT_MAP( PxSceneDesc, Gravity, PxSceneDescGeneratedValues)
@@ -3361,9 +3361,9 @@ template<> struct PxEnumTraits< physx::PxBVHBuildStrategy::Enum > { PxEnumTraits
 	DEFINE_PROPERTY_TO_VALUE_STRUCT_MAP( PxSceneDesc, GpuMaxNumStaticPartitions, PxSceneDescGeneratedValues)
 	DEFINE_PROPERTY_TO_VALUE_STRUCT_MAP( PxSceneDesc, GpuComputeVersion, PxSceneDescGeneratedValues)
 	DEFINE_PROPERTY_TO_VALUE_STRUCT_MAP( PxSceneDesc, ContactPairSlabSize, PxSceneDescGeneratedValues)
-	DEFINE_PROPERTY_TO_VALUE_STRUCT_MAP( PxSceneDesc, NewtonMaxIterations, PxSceneDescGeneratedValues)
-	DEFINE_PROPERTY_TO_VALUE_STRUCT_MAP( PxSceneDesc, NewtonTolerance, PxSceneDescGeneratedValues)
-	DEFINE_PROPERTY_TO_VALUE_STRUCT_MAP( PxSceneDesc, NewtonRegularization, PxSceneDescGeneratedValues)
+	DEFINE_PROPERTY_TO_VALUE_STRUCT_MAP( PxSceneDesc, AnvilMaxIterations, PxSceneDescGeneratedValues)
+	DEFINE_PROPERTY_TO_VALUE_STRUCT_MAP( PxSceneDesc, AnvilTolerance, PxSceneDescGeneratedValues)
+	DEFINE_PROPERTY_TO_VALUE_STRUCT_MAP( PxSceneDesc, AnvilRegularization, PxSceneDescGeneratedValues)
 	struct PxSceneDescGeneratedInfo
 		: PxSceneQueryDescGeneratedInfo
 	{
@@ -3407,9 +3407,9 @@ template<> struct PxEnumTraits< physx::PxBVHBuildStrategy::Enum > { PxEnumTraits
 		PxPropertyInfo<PX_PROPERTY_INFO_NAME::PxSceneDesc_GpuMaxNumStaticPartitions, PxSceneDesc, PxU32, PxU32 > GpuMaxNumStaticPartitions;
 		PxPropertyInfo<PX_PROPERTY_INFO_NAME::PxSceneDesc_GpuComputeVersion, PxSceneDesc, PxU32, PxU32 > GpuComputeVersion;
 		PxPropertyInfo<PX_PROPERTY_INFO_NAME::PxSceneDesc_ContactPairSlabSize, PxSceneDesc, PxU32, PxU32 > ContactPairSlabSize;
-		PxPropertyInfo<PX_PROPERTY_INFO_NAME::PxSceneDesc_NewtonMaxIterations, PxSceneDesc, PxU32, PxU32 > NewtonMaxIterations;
-		PxPropertyInfo<PX_PROPERTY_INFO_NAME::PxSceneDesc_NewtonTolerance, PxSceneDesc, PxReal, PxReal > NewtonTolerance;
-		PxPropertyInfo<PX_PROPERTY_INFO_NAME::PxSceneDesc_NewtonRegularization, PxSceneDesc, PxReal, PxReal > NewtonRegularization;
+		PxPropertyInfo<PX_PROPERTY_INFO_NAME::PxSceneDesc_AnvilMaxIterations, PxSceneDesc, PxU32, PxU32 > AnvilMaxIterations;
+		PxPropertyInfo<PX_PROPERTY_INFO_NAME::PxSceneDesc_AnvilTolerance, PxSceneDesc, PxReal, PxReal > AnvilTolerance;
+		PxPropertyInfo<PX_PROPERTY_INFO_NAME::PxSceneDesc_AnvilRegularization, PxSceneDesc, PxReal, PxReal > AnvilRegularization;
 
 		PX_PHYSX_CORE_API PxSceneDescGeneratedInfo();
 		template<typename TReturnType, typename TOperator>
@@ -3479,9 +3479,9 @@ template<> struct PxEnumTraits< physx::PxBVHBuildStrategy::Enum > { PxEnumTraits
 			inOperator( GpuMaxNumStaticPartitions, inStartIndex + 36 );; 
 			inOperator( GpuComputeVersion, inStartIndex + 37 );; 
 			inOperator( ContactPairSlabSize, inStartIndex + 38 );; 
-			inOperator( NewtonMaxIterations, inStartIndex + 39 );;
-			inOperator( NewtonTolerance, inStartIndex + 40 );;
-			inOperator( NewtonRegularization, inStartIndex + 41 );;
+			inOperator( AnvilMaxIterations, inStartIndex + 39 );;
+			inOperator( AnvilTolerance, inStartIndex + 40 );;
+			inOperator( AnvilRegularization, inStartIndex + 41 );;
 			return 42 + inStartIndex;
 		}
 	};

@@ -93,7 +93,7 @@ void exitCallback()
 void renderLoop()
 {
 	sCamera = new Snippets::Camera(PxVec3(8.0f, 7.0f, 16.0f), PxVec3(-0.42f, -0.32f, -0.85f));
-	Snippets::setupDefault("PhysX Newton Pallet Conveyor", sCamera, keyPress, renderCallback, exitCallback);
+	Snippets::setupDefault("PhysX Anvil Pallet Conveyor", sCamera, keyPress, renderCallback, exitCallback);
 	initPhysics(true);
 	glutMainLoop();
 }

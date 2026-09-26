@@ -756,7 +756,7 @@ Sc::Scene::Scene(const PxSceneDesc& desc, PxU64 contextID) :
 
 	mUseGpuDynamics = useGpuDynamics;
 	mUseGpuBp = useGpuBroadphase;
-	PX_ASSERT(desc.solverType != PxSolverType::eNEWTON || !(desc.flags & (PxSceneFlag::eENABLE_GPU_DYNAMICS | PxSceneFlag::eENABLE_DIRECT_GPU_API)));
+	PX_ASSERT(desc.solverType != PxSolverType::eANVIL || !(desc.flags & (PxSceneFlag::eENABLE_GPU_DYNAMICS | PxSceneFlag::eENABLE_DIRECT_GPU_API)));
 
 	mLLContext = PX_NEW(PxsContext)(desc, mTaskManager, mTaskPool, mCudaContextManager, desc.contactPairSlabSize, contextID);
 	
@@ -855,11 +855,11 @@ Sc::Scene::Scene(const PxSceneDesc& desc, PxU64 contextID) :
 	{
 		// PT: we must pass mPublicFlags to the contexts in case it has been tweaked by the above code
 
-		if (desc.solverType == PxSolverType::ePGS || desc.solverType == PxSolverType::eNEWTON)
+		if (desc.solverType == PxSolverType::ePGS || desc.solverType == PxSolverType::eANVIL)
 		{
 			mDynamicsContext = createDynamicsContext(&mLLContext->getNpMemBlockPool(), mLLContext->getTaskPool(), mLLContext->getSimStats(),
 													*allocator, &getMaterialManager(), *mSimpleIslandManager, contextID,
-													desc.maxBiasCoefficient, desc.getTolerancesScale().length, mPublicFlags, desc.solverType == PxSolverType::eNEWTON ? &desc : NULL);
+													desc.maxBiasCoefficient, desc.getTolerancesScale().length, mPublicFlags, desc.solverType == PxSolverType::eANVIL ? &desc : NULL);
 		}
 		else
 		{

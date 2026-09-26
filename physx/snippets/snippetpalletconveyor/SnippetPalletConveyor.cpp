@@ -1,9 +1,9 @@
 #include "PxPhysicsAPI.h"
-#include "../../tests/newton/pallet/PalletScene.h"
+#include "../../tests/anvil/pallet/PalletScene.h"
 #include <ctype.h>
 
 #ifdef PALLET_CONVEYOR_BENCHMARK
-#include "../../tests/newton/native/NativeProfiler.h"
+#include "../../tests/anvil/native/NativeProfiler.h"
 #include <cstring>
 #endif
 
@@ -80,7 +80,7 @@ int main(int argc, const char* const* argv)
 {
 	if(argc < 2)
 	{
-		printf("SnippetPalletConveyor output-prefix [steps=2000] [dt=.01] [position=16] [velocity=2] [threads=8] [pgs|newton] [regularization=1e-4] [Newton-iterations=100] [dilatancy-corrections=4] [surface-regularization=1e-2] [stiffening-depth=2e-5]\n");
+		printf("SnippetPalletConveyor output-prefix [steps=2000] [dt=.01] [position=16] [velocity=2] [threads=8] [pgs|anvil] [regularization=1e-4] [iterations=100] [friction-corrections=4] [surface-regularization=1e-2] [stiffening-depth=2e-5]\n");
 		return 1;
 	}
 	const int steps = argc > 2 ? atoi(argv[2]) : 2000;
@@ -100,15 +100,15 @@ int main(int argc, const char* const* argv)
 	description.cpuDispatcher = dispatcher;
 	description.filterShader = filterShader;
 	description.contactModifyCallback = &contactCallback;
-	description.solverType = argc > 7 && std::strcmp(argv[7], "newton") == 0 ? PxSolverType::eNEWTON : PxSolverType::ePGS;
-	description.newtonRegularization = argc > 8 ? PxReal(atof(argv[8])) : description.newtonRegularization;
-	description.newtonMaxIterations = argc > 9 ? PxU32(atoi(argv[9])) : description.newtonMaxIterations;
-	description.newtonDilatancyCorrections = argc > 10 ? PxU32(atoi(argv[10])) : description.newtonDilatancyCorrections;
-	description.newtonSurfaceRegularization = argc > 11 ? PxReal(atof(argv[11])) : description.newtonSurfaceRegularization;
-	description.newtonStiffeningDepth = argc > 12 ? PxReal(atof(argv[12])) : description.newtonStiffeningDepth;
+	description.solverType = argc > 7 && std::strcmp(argv[7], "anvil") == 0 ? PxSolverType::eANVIL : PxSolverType::ePGS;
+	description.anvilRegularization = argc > 8 ? PxReal(atof(argv[8])) : description.anvilRegularization;
+	description.anvilMaxIterations = argc > 9 ? PxU32(atoi(argv[9])) : description.anvilMaxIterations;
+	description.anvilFrictionCorrections = argc > 10 ? PxU32(atoi(argv[10])) : description.anvilFrictionCorrections;
+	description.anvilSurfaceRegularization = argc > 11 ? PxReal(atof(argv[11])) : description.anvilSurfaceRegularization;
+	description.anvilStiffeningDepth = argc > 12 ? PxReal(atof(argv[12])) : description.anvilStiffeningDepth;
 	description.flags |= PxSceneFlag::eENABLE_FRICTION_EVERY_ITERATION;
-	NativeNewtonProfiler profiler;
-	if(description.solverType == PxSolverType::eNEWTON)
+	NativeSolverProfiler profiler;
+	if(description.solverType == PxSolverType::eANVIL)
 	{
 		PxSetProfilerCallback(&profiler);
 	}
@@ -120,8 +120,8 @@ int main(int argc, const char* const* argv)
 	pallet::Recorder recorder(argv[1], bodies);
 	std::vector<pallet::Pose> poses(bodies.size());
 	printf("%s: %zu bodies, %u+%u iterations, %.6g s, %u workers; default contact/rest offsets, CCD off\n",
-		description.solverType == PxSolverType::eNEWTON ? "Newton" : "PGS", bodies.size(), positionIterations, velocityIterations, double(timestep), threads);
-	FILE* profile = description.solverType == PxSolverType::eNEWTON ? pallet::openOutput(std::string(argv[1]) + "-profile.csv") : NULL;
+		description.solverType == PxSolverType::eANVIL ? "Anvil" : "PGS", bodies.size(), positionIterations, velocityIterations, double(timestep), threads);
+	FILE* profile = description.solverType == PxSolverType::eANVIL ? pallet::openOutput(std::string(argv[1]) + "-profile.csv") : NULL;
 	if(profile)
 	{
 		fprintf(profile, "step,island_wall_ms,solve_wall_ms,prepare_cpu_ms,solve_cpu_ms,islands,rows,iterations,iteration_limits,scaled_gradient,factorizations,rank_updates,line_evaluations\n");
@@ -161,7 +161,7 @@ int main(int argc, const char* const* argv)
 		}
 		recorder.record(step + 1, (step + 1) * double(timestep), stepMs, profiler.wallMilliseconds(),
 			int(statistics.nbDiscreteContactPairsWithContacts), -1, -1,
-			description.solverType == PxSolverType::eNEWTON ? profiler.iterations.load() : int(positionIterations + velocityIterations), bodies, poses);
+			description.solverType == PxSolverType::eANVIL ? profiler.iterations.load() : int(positionIterations + velocityIterations), bodies, poses);
 	}
 	if(profile)
 	{
@@ -200,9 +200,9 @@ void initPhysics(bool /*interactive*/)
 	description.cpuDispatcher = gDispatcher;
 	description.filterShader = filterShader;
 	description.contactModifyCallback = &gContactCallback;
-	description.solverType = PxSolverType::eNEWTON;
-	description.newtonRegularization = 1e-4f;
-	description.newtonMaxIterations = 100;
+	description.solverType = PxSolverType::eANVIL;
+	description.anvilRegularization = 1e-4f;
+	description.anvilMaxIterations = 100;
 	description.flags |= PxSceneFlag::eENABLE_FRICTION_EVERY_ITERATION;
 	gScene = gPhysics->createScene(description);
 	gMaterial = gPhysics->createMaterial(0.5f, 0.5f, 0.0f);

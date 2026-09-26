@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "DyDynamics.h"
-#include "newton/DyNewtonSolver.h"
+#include "anvil/DyAnvilSolver.h"
 
 #include "common/PxProfileZone.h"
 #include "DyBodyCoreIntegrator.h"
@@ -27,9 +27,9 @@
 #define DY_BATCH_CONSTRAINTS 1
 //KS - used to specifically turn on/off batches 1D SIMD constraints.
 #define DY_BATCH_1D 1
-// Islands with fewer bodies share a Newton task chain, avoiding per-island dispatch.
-#ifndef NEWTON_ISLAND_BATCH_BODIES
-#define NEWTON_ISLAND_BATCH_BODIES 16
+// Islands with fewer bodies share a Anvil task chain, avoiding per-island dispatch.
+#ifndef ANVIL_ISLAND_BATCH_BODIES
+#define ANVIL_ISLAND_BATCH_BODIES 16
 #endif
 
 static const bool gMergePartitionAndFinalizeConstraintsTasks = true;
@@ -64,9 +64,9 @@ struct SolverIslandObjects
 	}
 };
 
-Context* createDynamicsContext(PxcNpMemBlockPool* memBlockPool, Cm::FlushPool& taskPool, PxvSimStats& simStats, Cm::VirtualAllocatorCallback& allocator, PxsMaterialManager* materialManager, IG::SimpleIslandManager& islandManager, PxU64 contextID, PxReal maxBiasCoefficient, PxReal lengthScale, PxSceneFlags sceneFlags, const PxSceneDesc* newtonSceneDescription)
+Context* createDynamicsContext(PxcNpMemBlockPool* memBlockPool, Cm::FlushPool& taskPool, PxvSimStats& simStats, Cm::VirtualAllocatorCallback& allocator, PxsMaterialManager* materialManager, IG::SimpleIslandManager& islandManager, PxU64 contextID, PxReal maxBiasCoefficient, PxReal lengthScale, PxSceneFlags sceneFlags, const PxSceneDesc* anvilSceneDescription)
 {
-	return PX_NEW(DynamicsContext)(memBlockPool, taskPool, simStats, allocator, materialManager, islandManager, contextID, maxBiasCoefficient, lengthScale, sceneFlags, newtonSceneDescription);
+	return PX_NEW(DynamicsContext)(memBlockPool, taskPool, simStats, allocator, materialManager, islandManager, contextID, maxBiasCoefficient, lengthScale, sceneFlags, anvilSceneDescription);
 }
 
 void DynamicsContext::destroy()
@@ -75,10 +75,10 @@ void DynamicsContext::destroy()
 	PX_FREE_THIS;
 }
 
-DynamicsContext::DynamicsContext(PxcNpMemBlockPool* memBlockPool, Cm::FlushPool& taskPool, PxvSimStats& simStats, Cm::VirtualAllocatorCallback& allocator, PxsMaterialManager* materialManager, IG::SimpleIslandManager& islandManager, PxU64 contextID, PxReal maxBiasCoefficient, PxReal lengthScale, PxSceneFlags sceneFlags, const PxSceneDesc* newtonSceneDescription) :
+DynamicsContext::DynamicsContext(PxcNpMemBlockPool* memBlockPool, Cm::FlushPool& taskPool, PxvSimStats& simStats, Cm::VirtualAllocatorCallback& allocator, PxsMaterialManager* materialManager, IG::SimpleIslandManager& islandManager, PxU64 contextID, PxReal maxBiasCoefficient, PxReal lengthScale, PxSceneFlags sceneFlags, const PxSceneDesc* anvilSceneDescription) :
 	DynamicsContextBase				(memBlockPool, taskPool, simStats, allocator, materialManager, islandManager, contextID, maxBiasCoefficient, lengthScale, sceneFlags),
 	mSolveFrictionEveryIteration	(sceneFlags & PxSceneFlag::eENABLE_FRICTION_EVERY_ITERATION),
-	mNewtonSolver					(newtonSceneDescription ? createNewtonSolver(*newtonSceneDescription) : NULL)
+	mAnvilSolver					(anvilSceneDescription ? createAnvilSolver(*anvilSceneDescription) : NULL)
 {
 	mWorldSolverBody.linearVelocity = PxVec3(0.0f);
 	mWorldSolverBody.angularState = PxVec3(0.0f);
@@ -99,7 +99,7 @@ DynamicsContext::DynamicsContext(PxcNpMemBlockPool* memBlockPool, Cm::FlushPool&
 
 DynamicsContext::~DynamicsContext()
 {
-	destroyNewtonSolver(mNewtonSolver);
+	destroyAnvilSolver(mAnvilSolver);
 }
 
 #if PX_ENABLE_SIM_STATS
@@ -1191,11 +1191,11 @@ static void integrate(	const IG::IslandSim& islandSim, PxSolverBodyData* PX_REST
 	}
 }
 
-class PxsNewtonSolverTask : public Cm::Task
+class PxsAnvilSolverTask : public Cm::Task
 {
-	PxsNewtonSolverTask& operator=(const PxsNewtonSolverTask&);
+	PxsAnvilSolverTask& operator=(const PxsAnvilSolverTask&);
 public:
-	PxsNewtonSolverTask(DynamicsContext& context, IslandContext& islandContext, const SolverIslandObjects& objects, PxU32 solverBodyOffset) :
+	PxsAnvilSolverTask(DynamicsContext& context, IslandContext& islandContext, const SolverIslandObjects& objects, PxU32 solverBodyOffset) :
 		Cm::Task(context.getContextId()), mContext(context), mIslandContext(islandContext), mIslandIds(objects.islandIds), mIslandCount(objects.numIslands), mSolverBodyOffset(solverBodyOffset)
 	{
 	}
@@ -1203,26 +1203,26 @@ public:
 	virtual void runInternal() PX_OVERRIDE
 	{
 		ThreadContext& threadContext = *mIslandContext.mThreadContext;
-		NewtonSolver& solver = *mContext.getNewtonSolver();
+		AnvilSolver& solver = *mContext.getAnvilSolver();
 		const IG::IslandSim& islandSim = mContext.mIslandManager.getAccurateIslandSim();
 		const PxU32 workerCount = getTaskManager()->getCpuDispatcher()->getWorkerCount();
 		// A batch lays out its bodies island by island. Each island keeps its own factorization.
-		NewtonIslandWorkspace* workspace = acquireNewtonWorkspace(solver);
-		// Batches of several islands hold at most NEWTON_ISLAND_BATCH_BODIES bodies. Their
+		AnvilIslandWorkspace* workspace = acquireAnvilWorkspace(solver);
+		// Batches of several islands hold at most ANVIL_ISLAND_BATCH_BODIES bodies. Their
 		// descriptors are grouped by island once, so each island reads only its own.
-		PxU32 islandFirstBodies[NEWTON_ISLAND_BATCH_BODIES + 1];
-		PxU32 descriptorStarts[NEWTON_ISLAND_BATCH_BODIES + 1];
+		PxU32 islandFirstBodies[ANVIL_ISLAND_BATCH_BODIES + 1];
+		PxU32 descriptorStarts[ANVIL_ISLAND_BATCH_BODIES + 1];
 		const bool grouped = mIslandCount > 1;
 		const PxU32* descriptors = NULL;
 		if(grouped)
 		{
-			PX_ASSERT(mIslandCount <= NEWTON_ISLAND_BATCH_BODIES);
+			PX_ASSERT(mIslandCount <= ANVIL_ISLAND_BATCH_BODIES);
 			islandFirstBodies[0] = 0;
 			for(PxU32 i = 0; i < mIslandCount; ++i)
 			{
 				islandFirstBodies[i + 1] = islandFirstBodies[i] + islandSim.getIsland(mIslandIds[i]).mNodeCount[IG::Node::eRIGID_BODY_TYPE];
 			}
-			descriptors = groupNewtonDescriptors(*workspace, threadContext, mSolverBodyOffset, islandFirstBodies, mIslandCount, descriptorStarts);
+			descriptors = groupAnvilDescriptors(*workspace, threadContext, mSolverBodyOffset, islandFirstBodies, mIslandCount, descriptorStarts);
 		}
 		PxU32 firstBody = 0;
 		for(PxU32 i = 0; i < mIslandCount; ++i)
@@ -1230,19 +1230,19 @@ public:
 			const PxU32 bodyCount = grouped ? islandFirstBodies[i + 1] - islandFirstBodies[i] : mIslandContext.mCounts.bodies;
 			const PxU32 bodyOffset = mSolverBodyOffset + firstBody;
 			PxSolverBody* bodies = mContext.mSolverBodyPool.begin() + bodyOffset;
-			if(solveNewtonIsland(solver, *workspace, mContext, threadContext, bodies, mContext.mSolverBodyDataPool.begin(), bodyOffset, firstBody, bodyCount,
+			if(solveAnvilIsland(solver, *workspace, mContext, threadContext, bodies, mContext.mSolverBodyDataPool.begin(), bodyOffset, firstBody, bodyCount,
 				grouped ? descriptors + descriptorStarts[i] : NULL, grouped ? descriptorStarts[i + 1] - descriptorStarts[i] : 0, getContinuation(), workerCount))
 			{
 				integrate(islandSim, mContext.mSolverBodyDataPool.begin() + bodyOffset + 1, threadContext.mRigidBodyArray + firstBody, threadContext.motionVelocityArray + firstBody, bodies, bodyCount, mContext.mDt, mContext.mEnableStabilization, mContext.mIsSleepingDisabled);
-				saveNewtonPoses(solver, threadContext.mBodyCoreArray + firstBody, threadContext.mNodeIndexArray + firstBody, bodyCount);
+				saveAnvilPoses(solver, threadContext.mBodyCoreArray + firstBody, threadContext.mNodeIndexArray + firstBody, bodyCount);
 			}
 			firstBody += bodyCount;
 		}
-		releaseNewtonWorkspace(solver, workspace);
+		releaseAnvilWorkspace(solver, workspace);
 		PX_ASSERT(firstBody == mIslandContext.mCounts.bodies);
 	}
 
-	virtual const char* getName() const PX_OVERRIDE { return "PxsDynamics.newtonSolve"; }
+	virtual const char* getName() const PX_OVERRIDE { return "PxsDynamics.anvilSolve"; }
 
 private:
 	DynamicsContext& mContext;
@@ -1644,12 +1644,12 @@ static void createSolverTaskChain(	DynamicsContext& dynamicContext,
 	islandContext->mThreadContext = NULL;
 	islandContext->mCounts = counts;
 
-	if(dynamicContext.getNewtonSolver())
+	if(dynamicContext.getAnvilSolver())
 	{
 		// Start's continuation waits for free velocities and contact modification postprocessing.
-		// Newton consumes the raw descriptors, so PGS partitioning and packed rows are unnecessary.
+		// Anvil consumes the raw descriptors, so PGS partitioning and packed rows are unnecessary.
 		PxsSolverStartTask* startTask = PX_PLACEMENT_NEW(taskPool.allocateNotThreadSafe(sizeof(PxsSolverStartTask)), PxsSolverStartTask)(dynamicContext, *islandContext, objects, solverBodyOffset, dynamicContext.getKinematicCount(), islandManager, bodyRemapTable, materialManager, iterator, useEnhancedDeterminism);
-		PxsNewtonSolverTask* solveTask = PX_PLACEMENT_NEW(taskPool.allocateNotThreadSafe(sizeof(PxsNewtonSolverTask)), PxsNewtonSolverTask)(dynamicContext, *islandContext, objects, solverBodyOffset);
+		PxsAnvilSolverTask* solveTask = PX_PLACEMENT_NEW(taskPool.allocateNotThreadSafe(sizeof(PxsAnvilSolverTask)), PxsAnvilSolverTask)(dynamicContext, *islandContext, objects, solverBodyOffset);
 		PxsSolverEndTask* endTask = PX_PLACEMENT_NEW(taskPool.allocateNotThreadSafe(sizeof(PxsSolverEndTask)), PxsSolverEndTask)(dynamicContext, *islandContext, objects, solverBodyOffset, iterator);
 		taskPool.unlock();
 		endTask->setContinuation(continuation);
@@ -1819,9 +1819,9 @@ void DynamicsContext::update(Cm::FlushPool& /*flushPool*/, PxBaseTask* continuat
 	PxvNphaseImplementationContext* nphase, PxU32 /*maxPatches*/, PxU32 maxArticulationLinks,
 	PxReal dt, const PxVec3& gravity, Cm::PinnableBitMap& /*changedHandleMap*/)
 {
-	if(mNewtonSolver)
+	if(mAnvilSolver)
 	{
-		beginNewtonUpdate(*mNewtonSolver, mIslandManager.getAccurateIslandSim().getNbNodes());
+		beginAnvilUpdate(*mAnvilSolver, mIslandManager.getAccurateIslandSim().getNbNodes());
 	}
 	const bool hasWork = updateShared(nphase, dt, gravity);
 	if(!hasWork)
@@ -1930,11 +1930,11 @@ void DynamicsContext::updatePostKinematic(IG::SimpleIslandManager& simpleIslandM
 
 	PxU32 constraintIndex = 0;
 
-	// Newton tasks batch only small islands, each still solved with its own factorization,
+	// Anvil tasks batch only small islands, each still solved with its own factorization,
 	// so larger islands remain parallel. PGS retains its existing batching.
-	const PxU32 solverBatchMax = mNewtonSolver ? NEWTON_ISLAND_BATCH_BODIES : mSolverBatchSize;
+	const PxU32 solverBatchMax = mAnvilSolver ? ANVIL_ISLAND_BATCH_BODIES : mSolverBatchSize;
 	const PxU32 articulationBatchMax = mSolverArticBatchSize;
-	const PxU32 minimumConstraintCount = mNewtonSolver ? 0 : 1;
+	const PxU32 minimumConstraintCount = mAnvilSolver ? 0 : 1;
 
 	//create force threshold tasks to produce force change events
 	PxsForceThresholdTask* forceThresholdTask = PX_PLACEMENT_NEW(getTaskPool().allocate(sizeof(PxsForceThresholdTask)), PxsForceThresholdTask)(*this);
@@ -1979,7 +1979,7 @@ void DynamicsContext::updatePostKinematic(IG::SimpleIslandManager& simpleIslandM
 		{
 			const IG::Island& island = islandSim.getIsland(islandIds[currentIsland]);
 			// Islands without rigid bodies add none, so the island count needs its own limit.
-			if(mNewtonSolver && nbBodies && (nbBodies + island.mNodeCount[IG::Node::eRIGID_BODY_TYPE] > solverBatchMax || currentIsland - startIsland >= NEWTON_ISLAND_BATCH_BODIES))
+			if(mAnvilSolver && nbBodies && (nbBodies + island.mNodeCount[IG::Node::eRIGID_BODY_TYPE] > solverBatchMax || currentIsland - startIsland >= ANVIL_ISLAND_BATCH_BODIES))
 				break;
 			nbBodies += island.mNodeCount[IG::Node::eRIGID_BODY_TYPE];
 			nbArticulations += island.mNodeCount[IG::Node::eARTICULATION_TYPE];
@@ -2111,7 +2111,7 @@ void DynamicsContext::preIntegrationParallel(PxF32 dt, PxsBodyCore*const* bodyAr
 			PxU32 nbToIntegrate = PxMin((bodyCount-startIndex), IntegrationPerThread);
 			PxsPreIntegrateTask* pTask = PX_PLACEMENT_NEW(&tasks[a], PxsPreIntegrateTask)(*this, bodyArray,
 							originalBodyArray, nodeIndexArray, solverBodyDataPool,
-							mNewtonSolver ? motionVelocityArray : NULL, dt, bodyCount,
+							mAnvilSolver ? motionVelocityArray : NULL, dt, bodyCount,
 							&maxSolverPositionIterations, &maxSolverVelocityIterations, startIndex, 
 							nbToIntegrate, mGravity);
 

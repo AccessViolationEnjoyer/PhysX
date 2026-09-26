@@ -1006,7 +1006,7 @@ bool NpScene::addArticulation(PxArticulationReducedCoordinate& articulation)
 {
 	PX_PROFILE_ZONE("API.addArticulation", getContextId());
 	NP_WRITE_CHECK(this);
-	PX_ASSERT(mScene.getSolverType() != PxSolverType::eNEWTON);
+	PX_ASSERT(mScene.getSolverType() != PxSolverType::eANVIL);
 	PX_CHECK_AND_RETURN_VAL(articulation.getNbLinks()>0, "PxScene::addArticulation: Empty articulations may not be added to a scene.", false);
 
 	NpArticulationReducedCoordinate& npa = static_cast<NpArticulationReducedCoordinate&>(articulation);
@@ -1253,7 +1253,7 @@ bool NpScene::addArticulationMimicJointInternal(NpArticulationReducedCoordinate*
 
 bool NpScene::addArticulationInternal(PxArticulationReducedCoordinate& npa)
 {
-	PX_ASSERT(mScene.getSolverType() != PxSolverType::eNEWTON);
+	PX_ASSERT(mScene.getSolverType() != PxSolverType::eANVIL);
 
 	// Add root link first
 	const PxU32 nbLinks = npa.getNbLinks();
@@ -1973,7 +1973,7 @@ bool NpScene::addAggregate(PxAggregate& aggregate)
 	NpAggregate& np = static_cast<NpAggregate&>(aggregate);
 
 #if PX_CHECKED
-	if(mScene.getSolverType() == PxSolverType::eNEWTON)
+	if(mScene.getSolverType() == PxSolverType::eANVIL)
 	{
 		const PxU32 actorCount = np.getCurrentSizeFast();
 		for(PxU32 i = 0; i < actorCount; ++i)

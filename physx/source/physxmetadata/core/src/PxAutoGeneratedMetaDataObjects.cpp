@@ -1335,12 +1335,12 @@ inline PxU32 getPxSceneDescGpuComputeVersion( const PxSceneDesc* inOwner ) { ret
 inline void setPxSceneDescGpuComputeVersion( PxSceneDesc* inOwner, PxU32 inData) { inOwner->gpuComputeVersion = inData; }
 inline PxU32 getPxSceneDescContactPairSlabSize( const PxSceneDesc* inOwner ) { return inOwner->contactPairSlabSize; }
 inline void setPxSceneDescContactPairSlabSize( PxSceneDesc* inOwner, PxU32 inData) { inOwner->contactPairSlabSize = inData; }
-inline PxU32 getPxSceneDescNewtonMaxIterations( const PxSceneDesc* inOwner ) { return inOwner->newtonMaxIterations; }
-inline void setPxSceneDescNewtonMaxIterations( PxSceneDesc* inOwner, PxU32 inData) { inOwner->newtonMaxIterations = inData; }
-inline PxReal getPxSceneDescNewtonTolerance( const PxSceneDesc* inOwner ) { return inOwner->newtonTolerance; }
-inline void setPxSceneDescNewtonTolerance( PxSceneDesc* inOwner, PxReal inData) { inOwner->newtonTolerance = inData; }
-inline PxReal getPxSceneDescNewtonRegularization( const PxSceneDesc* inOwner ) { return inOwner->newtonRegularization; }
-inline void setPxSceneDescNewtonRegularization( PxSceneDesc* inOwner, PxReal inData) { inOwner->newtonRegularization = inData; }
+inline PxU32 getPxSceneDescAnvilMaxIterations( const PxSceneDesc* inOwner ) { return inOwner->anvilMaxIterations; }
+inline void setPxSceneDescAnvilMaxIterations( PxSceneDesc* inOwner, PxU32 inData) { inOwner->anvilMaxIterations = inData; }
+inline PxReal getPxSceneDescAnvilTolerance( const PxSceneDesc* inOwner ) { return inOwner->anvilTolerance; }
+inline void setPxSceneDescAnvilTolerance( PxSceneDesc* inOwner, PxReal inData) { inOwner->anvilTolerance = inData; }
+inline PxReal getPxSceneDescAnvilRegularization( const PxSceneDesc* inOwner ) { return inOwner->anvilRegularization; }
+inline void setPxSceneDescAnvilRegularization( PxSceneDesc* inOwner, PxReal inData) { inOwner->anvilRegularization = inData; }
 PX_PHYSX_CORE_API PxSceneDescGeneratedInfo::PxSceneDescGeneratedInfo()
 	: ToDefault( "ToDefault", setPxSceneDesc_ToDefault)
 	, Gravity( "Gravity", setPxSceneDescGravity, getPxSceneDescGravity )
@@ -1381,9 +1381,9 @@ PX_PHYSX_CORE_API PxSceneDescGeneratedInfo::PxSceneDescGeneratedInfo()
 	, GpuMaxNumStaticPartitions( "GpuMaxNumStaticPartitions", setPxSceneDescGpuMaxNumStaticPartitions, getPxSceneDescGpuMaxNumStaticPartitions )
 	, GpuComputeVersion( "GpuComputeVersion", setPxSceneDescGpuComputeVersion, getPxSceneDescGpuComputeVersion )
 	, ContactPairSlabSize( "ContactPairSlabSize", setPxSceneDescContactPairSlabSize, getPxSceneDescContactPairSlabSize )
-	, NewtonMaxIterations( "NewtonMaxIterations", setPxSceneDescNewtonMaxIterations, getPxSceneDescNewtonMaxIterations )
-	, NewtonTolerance( "NewtonTolerance", setPxSceneDescNewtonTolerance, getPxSceneDescNewtonTolerance )
-	, NewtonRegularization( "NewtonRegularization", setPxSceneDescNewtonRegularization, getPxSceneDescNewtonRegularization )
+	, AnvilMaxIterations( "AnvilMaxIterations", setPxSceneDescAnvilMaxIterations, getPxSceneDescAnvilMaxIterations )
+	, AnvilTolerance( "AnvilTolerance", setPxSceneDescAnvilTolerance, getPxSceneDescAnvilTolerance )
+	, AnvilRegularization( "AnvilRegularization", setPxSceneDescAnvilRegularization, getPxSceneDescAnvilRegularization )
 {}
 PX_PHYSX_CORE_API PxSceneDescGeneratedValues::PxSceneDescGeneratedValues( const PxSceneDesc* inSource )
 		:PxSceneQueryDescGeneratedValues( inSource )
@@ -1425,9 +1425,9 @@ PX_PHYSX_CORE_API PxSceneDescGeneratedValues::PxSceneDescGeneratedValues( const 
 		,GpuMaxNumStaticPartitions( inSource->gpuMaxNumStaticPartitions )
 		,GpuComputeVersion( inSource->gpuComputeVersion )
 		,ContactPairSlabSize( inSource->contactPairSlabSize )
-		,NewtonMaxIterations( inSource->newtonMaxIterations )
-		,NewtonTolerance( inSource->newtonTolerance )
-		,NewtonRegularization( inSource->newtonRegularization )
+		,AnvilMaxIterations( inSource->anvilMaxIterations )
+		,AnvilTolerance( inSource->anvilTolerance )
+		,AnvilRegularization( inSource->anvilRegularization )
 {
 	PX_UNUSED(inSource);
 }
