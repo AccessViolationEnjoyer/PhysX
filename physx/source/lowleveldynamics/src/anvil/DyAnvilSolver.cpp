@@ -274,7 +274,7 @@ class AnvilSolver : public PxUserAllocated
 {
 	PX_NOCOPY(AnvilSolver)
 public:
-	explicit AnvilSolver(const PxSceneDesc& desc) : regularization(desc.anvilRegularization), dilatancyCorrections(desc.anvilFrictionCorrections),
+	explicit AnvilSolver(const PxSceneDesc& desc) : regularization(desc.anvilRegularization), jointRegularization(desc.anvilJointRegularization), dilatancyCorrections(desc.anvilFrictionCorrections),
 		surfaceRegularization(desc.anvilSurfaceRegularization), stiffeningDepth(desc.anvilStiffeningDepth), displacementTolerance(desc.anvilDisplacementTolerance), update(0), errorReported(0)
 	{
 		settings.iterations = int(desc.anvilMaxIterations);
@@ -328,6 +328,7 @@ public:
 
 	anvil::Settings settings;
 	PxReal regularization;
+	PxReal jointRegularization;
 	PxU32 dilatancyCorrections;
 	PxReal surfaceRegularization;
 	PxReal stiffeningDepth;
@@ -505,7 +506,7 @@ static void prepareAnvilRows(AnvilSolver& solver, AnvilIslandWorkspace& workspac
 	const PxReal timestep = context.getDt();
 	AnvilJointSettings jointSettings;
 	jointSettings.timestep = timestep;
-	jointSettings.regularization = solver.regularization;
+	jointSettings.regularization = solver.jointRegularization;
 	jointSettings.bodyLockFlags = workspace.lockFlags.begin();
 	jointSettings.initialVelocities = motionVelocities;
 	AnvilContactSettings contactSettings;

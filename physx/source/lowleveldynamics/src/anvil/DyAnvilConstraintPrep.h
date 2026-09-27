@@ -55,7 +55,8 @@ struct ConstraintWriteback;
 struct AnvilJointSettings
 {
 	PxReal timestep;
-	// Hard rows use R = regularization * J M^-1 J'. Spring compliance comes from k and d.
+	// Hard rows use R = regularization * J M^-1 J' (the scene's joint regularization). Spring
+	// compliance comes from k and d.
 	PxReal regularization;
 	const PxU8* bodyLockFlags = NULL;
 	const Cm::SpatialVector* initialVelocities = NULL;

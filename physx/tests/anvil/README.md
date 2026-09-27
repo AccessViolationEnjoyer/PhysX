@@ -220,6 +220,64 @@ Unlike the older four-island 500-box fixture, every box is part of one connected
 above the measured symbolic-work crossover use the parallel Cholesky path; smaller factors retain
 the original serial path.
 
+## Fixed-joint rods
+
+`native/FixedJointTests.cpp` (`AnvilFixedJointTests`, ctest `AnvilNativeFixedJoints`) cantilevers
+rods of 0.1 m cubes joined by fixed joints from a kinematic cube 0. Cube i weighs 0.1 * 2^i kg, so
+every joint carries a heavier rod through a lighter cube: the 20-cube rod holds about 105 t
+through a 0.2 kg cube. Rods of 10 and 20 cubes settle for 3 s, and a 100 kg cube falls 0.5 m onto
+the tip of a settled 10-cube rod. `AnvilFixedJointTests pgs` reports PGS without checks, and a
+second argument overrides the joint regularization. `native/MujocoFixedJointTests.cpp` runs the
+same rods in MuJoCo 3.14 with weld equality constraints between free bodies and a static cube 0.
+
+Hard joint rows once used the contacts' regularization, 1e-4 of their response. A row's response
+is dominated by its lighter body, so a joint yields by that regularization times the load it
+carries over that body's mass: the 10-cube rod sagged 215 mm and the 20-cube rod collapsed.
+`PxSceneDesc::anvilJointRegularization` (default 1e-10) now sets joints apart; deflection scales
+linearly with it (1e-6: 2.2 mm and 506 mm; 1e-8: 0.02 and 134 mm; 1e-12: 0 and 0.014 mm), and
+conditioning depends only on it, not on the mass ratios. MuJoCo caps weld impedance at 0.9999,
+the same 1e-4 relative softness, so it cannot hold these rods either.
+
+Three seconds at 10 ms steps with one worker; mean step time excludes the first step:
+
+| Scene | Anvil | PGS 16+2 | MuJoCo 3.14 (stiffest weld) |
+| --- | --- | --- | --- |
+| 10-cube rod, tip sag | 0.0001 mm | 537 mm, joints 136 mm apart | 545 mm, joints 18 mm apart |
+| 20-cube rod, tip sag | 1.36 mm | collapses | unstable |
+| 100 kg drop, peak / settled deflection | 0.0018 / 0.0007 mm | 1,052 / 484 mm, weight falls off | 680 / 586 mm, weight falls off |
+| Step time, 10 / 20 cubes (native) | 28 / 37 us | 24 / 33 us | 16 / 35 us |
+| Step time, 10 / 20 cubes (WebAssembly) | 51 / 57 us | 50 / 56 us | - |
+
+MuJoCo's default weld impedance (solimp 0.9 0.95) diverges: it reports NaN accelerations and
+resets. Anvil's step time here is mostly PhysX's fixed per-step cost; the joints add little.
+
+## Gripper
+
+`native/GripperTests.cpp` (`AnvilGripperTests`, ctest `AnvilNativeGripper`) closes two 0.5 kg
+fingers on a row of four 1 kg, 0.1 m boxes (friction 0.5) and lifts them 0.3 m over 1.5 s. Each
+finger is on a D6 joint with only X free, driven past the boxes by a force-limited linear drive,
+so the drive's force limit is the grip. The outer faces carry two boxes each, so the row needs
+2 m (g + a) / mu = 42.4 N at the lift's peak acceleration of 0.8 m/s^2. The default run checks
+Anvil at 150 N, and at 10% below and above that requirement: below, the row must drop; above,
+it must lift. `AnvilGripperTests anvil|pgs grip-force hold-seconds` reports a single run. Shapes
+use a 0.5 mm contact offset, so pairs make contacts within 1 mm (the 2 cm default gave the same
+Anvil results).
+
+Anvil drops the row at 41 N and lifts it from 42 N. PGS (16+2) drops it up to 42 N and lifts it
+at 45 N with 19 mm of slip and 2.6 degrees of tilt; at 150 N it still tilts the boxes 0.8 degrees
+and squeezes them 0.5 mm into each other, against 0.01 mm for Anvil. A step takes about 35 us
+natively for either solver (70 and 55 us in WebAssembly).
+
+`native/MujocoGripperTests.cpp` builds the same gripper in MuJoCo 3.14: slide-joint fingers with
+force-limited position actuators on a heavy arm whose position and velocity follow the lift.
+MuJoCo drops the row in every variant tried (contact models matched to Anvil or MuJoCo's
+defaults, pyramidal or elliptic friction, grips up to 1,000 N), and even a single box: the
+fingers carry it about 0.11 m and then pass through it.
+
+Anvil's friction is regularized, so a sustained friction load creeps: at 150 N the lifted boxes
+slide down through the fingers at 0.36 mm/s (22 mm over 60 s), and faster with a lighter grip,
+whose shallower contacts are softer (3.3 mm/s at 42 N). PGS's friction anchors hold position.
+
 ## Case conveyor scene
 
 [cases/README.md](cases/README.md) documents 2,000 separate cases carried by ten long conveyors,

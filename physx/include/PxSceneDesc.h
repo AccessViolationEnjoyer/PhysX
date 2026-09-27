@@ -756,16 +756,33 @@ public:
 	PxReal anvilDisplacementTolerance;
 
 	/**
-	\brief Compliance of otherwise rigid contacts and joints, relative to their effective mass.
+	\brief Compliance of contacts, relative to their effective mass.
 
-	Only used by PxSolverType::eANVIL. This dimensionless value makes rigid constraints very
-	slightly soft, which keeps the solve well conditioned; smaller values are stiffer but can
-	need more iterations. Constraints with a spring keep their spring law. Must be greater than
+	Only used by PxSolverType::eANVIL. This dimensionless value makes contacts very slightly
+	soft, which keeps the solve well conditioned where several points support one body;
+	smaller values are stiffer but can need more iterations. Deep contacts reach this value;
+	see anvilSurfaceRegularization. Joints use anvilJointRegularization. Must be greater than
 	zero.
 
 	<b>Default:</b> 1e-4
 	*/
 	PxReal anvilRegularization;
+
+	/**
+	\brief Compliance of joints' rigid rows, relative to their effective mass.
+
+	Only used by PxSolverType::eANVIL. As anvilRegularization for contacts, but much smaller:
+	joints rarely over-constrain bodies the way several contact points do, so they can be
+	nearly rigid. A joint row's compliance is relative to the lighter body it connects, so
+	a joint yields in proportion to this value times the load it carries over that body's
+	mass: at the default, a 0.2 kg link carrying 100 t in a cantilevered rod bends it by about
+	1 mm. Smaller values are stiffer for extreme mass ratios; values below about 1e-12 leave
+	the solve too ill-conditioned. Joint springs keep their spring law. Must be greater than
+	zero.
+
+	<b>Default:</b> 1e-10
+	*/
+	PxReal anvilJointRegularization;
 
 	/**
 	\brief Maximum friction corrections after each Anvil solve while contacts slide.
@@ -1169,6 +1186,7 @@ PX_INLINE PxSceneDesc::PxSceneDesc(const PxTolerancesScale& scale):
 	anvilTolerance					(1e-8f),
 	anvilDisplacementTolerance			(1e-7f * scale.length),
 	anvilRegularization				(1e-4f),
+	anvilJointRegularization			(1e-10f),
 	anvilFrictionCorrections			(4),
 	anvilSurfaceRegularization			(1e-2f),
 	anvilStiffeningDepth				(2e-5f * scale.length),
@@ -1277,7 +1295,7 @@ PX_INLINE bool PxSceneDesc::isValid() const
 		{
 			return false;
 		}
-		if(anvilRegularization <= 0.0f)
+		if(anvilRegularization <= 0.0f || anvilJointRegularization <= 0.0f)
 		{
 			return false;
 		}
