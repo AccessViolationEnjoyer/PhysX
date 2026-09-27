@@ -240,7 +240,7 @@ the same 1e-4 relative softness, so it cannot hold these rods either.
 
 Three seconds at 10 ms steps with one worker; mean step time excludes the first step:
 
-| Scene | Anvil | PGS 16+2 | MuJoCo 3.14 (stiffest weld) |
+| Scene | Anvil | PGS 16+2 | MuJoCo 3.14 (solimp 0.9999) |
 | --- | --- | --- | --- |
 | 10-cube rod, tip sag | 0.0001 mm | 537 mm, joints 136 mm apart | 545 mm, joints 18 mm apart |
 | 20-cube rod, tip sag | 1.36 mm | collapses | unstable |
@@ -248,8 +248,10 @@ Three seconds at 10 ms steps with one worker; mean step time excludes the first 
 | Step time, 10 / 20 cubes (native) | 28 / 37 us | 24 / 33 us | 16 / 35 us |
 | Step time, 10 / 20 cubes (WebAssembly) | 51 / 57 us | 50 / 56 us | - |
 
-MuJoCo's default weld impedance (solimp 0.9 0.95) diverges: it reports NaN accelerations and
-resets. Anvil's step time here is mostly PhysX's fixed per-step cost; the joints add little.
+Like every MuJoCo comparison, the rods use `solref="0.02 1"` and a constant `solimp="0.9999
+0.9999 0.001 0.5 2"` (regularization 1e-4) for welds and contacts; MuJoCo's default weld impedance
+(solimp 0.9 0.95) diverges, reporting NaN accelerations and resetting. Anvil's step time here is
+mostly PhysX's fixed per-step cost; the joints add little.
 
 ## Gripper
 
@@ -270,13 +272,23 @@ natively for either solver (70 and 55 us in WebAssembly).
 
 `native/MujocoGripperTests.cpp` builds the same gripper in MuJoCo 3.14: slide-joint fingers with
 force-limited position actuators on a heavy arm whose position and velocity follow the lift.
-MuJoCo drops the row in every variant tried (contact models matched to Anvil or MuJoCo's
-defaults, pyramidal or elliptic friction, grips up to 1,000 N), and even a single box: the
-fingers carry it about 0.11 m and then pass through it.
+Its contacts use the comparisons' shared `solref="0.02 1"` and constant `solimp` 0.9999, with a
+10 mm margin. MuJoCo drops the row in every variant tried (this constant impedance, a stiffening
+curve matched to Anvil's defaults or MuJoCo's own defaults, pyramidal or elliptic friction, grips
+up to 1,000 N), and even a single box: the fingers carry it about 0.11 m and then pass through it.
 
-Anvil's friction is regularized, so a sustained friction load creeps: at 150 N the lifted boxes
-slide down through the fingers at 0.36 mm/s (22 mm over 60 s), and faster with a lighter grip,
-whose shallower contacts are softer (3.3 mm/s at 42 N). PGS's friction anchors hold position.
+Anvil's friction is regularized, so a sustained friction load creeps unless it is corrected.
+Each sticking contact pair keeps the slip at its contact centre, accumulated from the solved
+velocities, and its friction rows correct it with twice the stiffness of penetration. The slip
+relaxes over 1 s: slip left by a transient would otherwise lock tangential forces into stacks,
+which then need extra solver iterations (5.3 to 7.8 per step on the pallet conveyor). Holding
+strength trades against that work: a stiffer correction or slower relaxation creeps less and
+costs more on stacks. Over a 60 s hold at 150 N the boxes slip 0.43 mm and creep at 0.005 mm/s,
+against 22 mm and 0.36 mm/s without the correction; at 46.7 N they slip 2.9 mm and creep at
+0.05 mm/s. PGS (16+2) slips 2.6 mm and creeps at 0.42 mm/s at 150 N; with 100 position
+iterations it slips 0.26 mm at twice Anvil's step time. Shaking the arm (`shake-amplitude` and
+`shake-frequency` arguments, 1-5 Hz) does not add slip. The correction costs about 6-8% of a step
+on the pallet and platform scenes and nothing measurable on the piles, cases and totes.
 
 ## Case conveyor scene
 

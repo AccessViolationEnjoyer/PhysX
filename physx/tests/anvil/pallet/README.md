@@ -73,11 +73,10 @@ MujocoPalletConveyor scene.xml output-prefix mujoco|prototype [steps=2000] [dt=.
 ```
 
 The optional impedance argument sets a constant contact impedance (both `solimp` ends); zero
-means use the XML. The XML uses `solref="0.02 1"` and `solimp="0.990099 0.9999 0.00002 0.5 2"`,
-with the endpoints of PhysX Anvil's defaults: regularization 1e-2 at first touch, stiffening to
-1e-4 over 20 um of penetration (impedance 0.9999, or regularization 1e-4, is the former constant
-setting). MuJoCo's smooth step is in impedance and PhysX's in log regularization, so at a given
-depth PhysX contacts are stiffer. Both Anvil modes use a maximum of 100 iterations and MuJoCo-style
+means use the XML. The XML uses `solref="0.02 1"` and `solimp="0.9999 0.9999 0.001 0.5 2"`, a
+constant regularization of 1e-4 (0.9999 is the largest impedance MuJoCo allows). Every MuJoCo
+comparison runner uses these values. PhysX Anvil's default instead stiffens from 1e-2 at first
+touch to 1e-4 over 20 um of penetration. Both Anvil modes use a maximum of 100 iterations and MuJoCo-style
 normalized stopping tolerance 1e-8. Warm starting is enabled. PhysX uses
 `eENABLE_FRICTION_EVERY_ITERATION` and the requested position/velocity iterations.
 

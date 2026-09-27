@@ -506,17 +506,9 @@ private:
 		const Clock::time_point factorStart = profileStart(m_profile);
 		// One body's Hessian is its lower 6x6 diagonal block. A failed dense pivot
 		// falls through to the block factor and its scalar fallback.
-		Mat6 denseLower;
-		m_dense = problem.bodyCount() == 1 && cholesky6(m_hessian.blocks[problem.hessianDiagonalBlocks[0]], denseLower, m_denseInverse);
+		m_dense = problem.bodyCount() == 1 && cholesky6Packed(m_hessian.blocks[problem.hessianDiagonalBlocks[0]], m_denseLower, m_denseInverse);
 		if(m_dense)
 		{
-			for(int row = 0; row < 6; ++row)
-			{
-				for(int column = 0; column < row; ++column)
-				{
-					m_denseLower[row * 6 + column] = denseLower(row, column);
-				}
-			}
 			m_size = 6;
 			m_updateInverseCurrent = false;
 			++result.factorizations;

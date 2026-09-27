@@ -57,15 +57,20 @@ struct Contact
 // Jacobians or duplicate solve representation.
 struct CompactContact
 {
-	int row = 0;
+	// Producers write every other field they use. A user-provided constructor keeps
+	// appending a record (value initialization) from first clearing all 128 bytes.
+	CompactContact() : row(0), block(0) {}
+	int row;
 	// Ordinary scalar rows need no sidecar. Small negative tags identify bilateral
 	// blocks; the reserved lower range identifies optional scalar impulse bounds.
 	enum { SCALAR_BOUNDS_TAG = -0x40000000 };
-	int block = 0; // 0: nonnegative scalar; >0: friction block; <0: bilateral or bounds.
+	int block; // 0: nonnegative scalar; >0: friction block; <0: bilateral or bounds.
 	int body[2];
-	Vec6 jacobian[2];
+	// Preparation reads these with the fields above, in one cache line of the aligned
+	// storage; the Jacobian fills the rest of the record's two lines.
 	double freeVelocity;
 	double regularization;
+	Vec6 jacobian[2];
 	bool hasScalarBounds() const { return block <= SCALAR_BOUNDS_TAG; }
 	int rowCount() const { return block && !hasScalarBounds() ? 3 : 1; }
 };
@@ -109,7 +114,8 @@ struct Problem
 	std::string name;
 	double timestep;
 	std::vector<double> inverseMass;
-	std::vector<CompactContact> contacts;
+	// Cache-line aligned, so each 128-byte record spans exactly two lines.
+	std::vector<CompactContact, AlignedAllocator<CompactContact, 64> > contacts;
 	// Exactly one uniquely owned block per three-row contact; no shared or orphan blocks.
 	std::vector<ContactBlock> contactBlocks;
 	std::vector<ScalarBounds> scalarBounds;
@@ -134,6 +140,11 @@ struct Problem
 	// potential entries of inactive rows too. It is computed when the update or refactor
 	// choice first needs it; solves that never update skip it.
 	mutable double contactRebuildWork = -1.0;
+	// Work that native producers reported for the scalar rows they finished. When every
+	// contact was reported, preparation adopts the total instead of reading each Jacobian again.
+	double reportedRebuildWork = 0.0;
+	std::uint32_t reportedRebuildRows = 0;
+	static double scalarRebuildWork(int nonzeroCount) { return double(nonzeroCount) * (nonzeroCount + 3); }
 	double rebuildWorkEstimate() const
 	{
 		if(contactRebuildWork < 0.0)
@@ -163,6 +174,8 @@ struct Problem
 		patches.clear();
 		prepared = false;
 		compactJacobian = false;
+		reportedRebuildWork = 0.0;
+		reportedRebuildRows = 0;
 	}
 	// Returns the new contact index; [0,MAX_IMPULSE] uses the ordinary scalar record.
 	ANVIL_FORCE_INLINE int addScalarContact(const CompactContact& input, double lowerImpulse, double upperImpulse)
@@ -188,7 +201,7 @@ struct Problem
 	// storage, avoiding a second 128-byte contact copy per emitted row.
 	ANVIL_FORCE_INLINE CompactContact& beginScalarContact()
 	{
-		reserveStorage(contacts, std::uint32_t(contacts.size()) + 1);
+		// Retained storage grows only in the first steps, so emplace_back's own growth suffices.
 		contacts.emplace_back();
 		CompactContact& contact = contacts.back();
 		contact.row = 0;
@@ -200,8 +213,15 @@ struct Problem
 	{
 		contacts.pop_back();
 	}
-	ANVIL_FORCE_INLINE void finishScalarContact(double lowerImpulse, double upperImpulse)
+	// nonzeroCount, when known (otherwise negative), is the number of nonzero Jacobian entries
+	// of the row's present bodies, as rebuildWork would count them.
+	ANVIL_FORCE_INLINE void finishScalarContact(double lowerImpulse, double upperImpulse, int nonzeroCount = -1)
 	{
+		if(nonzeroCount >= 0)
+		{
+			reportedRebuildWork += scalarRebuildWork(nonzeroCount);
+			++reportedRebuildRows;
+		}
 		if(lowerImpulse != 0.0 || upperImpulse != MAX_IMPULSE)
 		{
 			const ScalarBounds limits = { lowerImpulse, upperImpulse };
@@ -243,9 +263,8 @@ struct Problem
 	{
 		if(contact.rowCount() == 1)
 		{
-			const int count = (contact.body[0] >= 0 ? nonzeroCount6(contact.jacobian[0].data()) : 0) +
-				(contact.body[1] >= 0 ? nonzeroCount6(contact.jacobian[1].data()) : 0);
-			return double(count) * (count + 3);
+			return scalarRebuildWork((contact.body[0] >= 0 ? nonzeroCount6(contact.jacobian[0].data()) : 0) +
+				(contact.body[1] >= 0 ? nonzeroCount6(contact.jacobian[1].data()) : 0));
 		}
 		double work = 0.0;
 		for(int axis = 0; axis < 3; ++axis)

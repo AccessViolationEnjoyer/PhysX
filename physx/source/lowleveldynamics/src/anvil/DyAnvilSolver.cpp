@@ -334,6 +334,9 @@ public:
 	PxReal stiffeningDepth;
 	PxReal displacementTolerance;
 	PxU64 update;
+	// Settings every island of the current step shares; islands add their body arrays.
+	AnvilJointSettings jointSettings;
+	AnvilContactSettings contactSettings;
 	PxArray<AnvilBodySeed> seeds;
 	PxMutex mutex;
 	PxArray<AnvilIslandWorkspace*> workspaces;
@@ -352,13 +355,31 @@ void destroyAnvilSolver(AnvilSolver* solver)
 	PX_DELETE(solver);
 }
 
-void beginAnvilUpdate(AnvilSolver& solver, PxU32 nodeCount)
+void beginAnvilUpdate(AnvilSolver& solver, PxU32 nodeCount, const DynamicsContext& context, PxReal timestep)
 {
 	++solver.update;
 	if(nodeCount > solver.seeds.size())
 	{
 		solver.seeds.resize(nodeCount);
 	}
+	AnvilJointSettings& jointSettings = solver.jointSettings;
+	jointSettings.timestep = timestep;
+	jointSettings.regularization = solver.jointRegularization;
+	AnvilContactSettings& contactSettings = solver.contactSettings;
+	contactSettings.timestep = timestep;
+	contactSettings.regularization = solver.regularization;
+	contactSettings.bounceThreshold = context.getBounceThreshold();
+	contactSettings.ccdMaxSeparation = context.getCCDSeparationThreshold();
+	contactSettings.dilatancyTolerance = 1.0e-5f * context.getLengthScale();
+	contactSettings.correctDilatancy = solver.dilatancyCorrections > 0;
+	contactSettings.impedance = 1.0 / (1.0 + double(contactSettings.regularization));
+	const double timeConstant = std::max(0.02, 2.0 * double(timestep));
+	contactSettings.damping = 2.0 / (contactSettings.impedance * timeConstant);
+	contactSettings.stiffness = 1.0 / (contactSettings.impedance * contactSettings.impedance * timeConstant * timeConstant);
+	contactSettings.surfaceRegularization = solver.surfaceRegularization;
+	contactSettings.regularizationLogRange = std::log2(double(contactSettings.regularization) / contactSettings.surfaceRegularization);
+	contactSettings.stiffeningDepth = solver.stiffeningDepth;
+	contactSettings.slipLimit = 1.0e-3f * context.getLengthScale();
 }
 
 static bool matchesAnvilSeed(const AnvilBodySeed& seed, const PxsBodyCore& body, PxU64 update)
@@ -503,26 +524,10 @@ static void prepareAnvilRows(AnvilSolver& solver, AnvilIslandWorkspace& workspac
 	problem.columnCursors.clear();
 	workspace.joints.clear();
 	workspace.contacts.clear();
-	const PxReal timestep = context.getDt();
-	AnvilJointSettings jointSettings;
-	jointSettings.timestep = timestep;
-	jointSettings.regularization = solver.jointRegularization;
+	AnvilJointSettings jointSettings = solver.jointSettings;
 	jointSettings.bodyLockFlags = workspace.lockFlags.begin();
 	jointSettings.initialVelocities = motionVelocities;
-	AnvilContactSettings contactSettings;
-	contactSettings.timestep = timestep;
-	contactSettings.regularization = solver.regularization;
-	contactSettings.bounceThreshold = context.getBounceThreshold();
-	contactSettings.ccdMaxSeparation = context.getCCDSeparationThreshold();
-	contactSettings.dilatancyTolerance = 1.0e-5f * context.getLengthScale();
-	contactSettings.correctDilatancy = solver.dilatancyCorrections > 0;
-	contactSettings.impedance = 1.0 / (1.0 + double(contactSettings.regularization));
-	const double timeConstant = std::max(0.02, 2.0 * double(timestep));
-	contactSettings.damping = 2.0 / (contactSettings.impedance * timeConstant);
-	contactSettings.stiffness = 1.0 / (contactSettings.impedance * contactSettings.impedance * timeConstant * timeConstant);
-	contactSettings.surfaceRegularization = solver.surfaceRegularization;
-	contactSettings.regularizationLogRange = std::log2(double(contactSettings.regularization) / contactSettings.surfaceRegularization);
-	contactSettings.stiffeningDepth = solver.stiffeningDepth;
+	AnvilContactSettings contactSettings = solver.contactSettings;
 	contactSettings.bodyLockFlags = workspace.lockFlags.begin();
 	contactSettings.initialVelocities = motionVelocities;
 	// Without a grouped list, the island owns all of its thread context's descriptors.
@@ -562,16 +567,8 @@ static void storeAnvilCorrection(const anvil::Result& result, const PxSolverBody
 			linear[axis] = PxReal(result.primal[bodyOffset + axis] * rootInverseMass);
 			angular[axis] = PxReal(result.primal[bodyOffset + axis + 3]);
 		}
-		if(motion)
-		{
-			motion[i].linear = linear;
-			motion[i].angular = angular;
-		}
-		else
-		{
-			bodies[i].linearVelocity = linear;
-			bodies[i].angularState = angular;
-		}
+		motion[i].linear = bodies[i].linearVelocity = linear;
+		motion[i].angular = bodies[i].angularState = angular;
 	}
 }
 
@@ -670,10 +667,9 @@ static bool solveAnvilRows(AnvilSolver& solver, AnvilIslandWorkspace& workspace,
 		}
 		profileAnvilSolve(workspace, context.getContextId());
 	}
-	storeAnvilCorrection(workspace.result, bodyData, motionVelocities, NULL, bodyCount);
-	storeAnvilCorrection(workspace.result, bodyData, NULL, bodies, bodyCount);
+	storeAnvilCorrection(workspace.result, bodyData, motionVelocities, bodies, bodyCount);
 	writebackAnvilJoints(workspace.joints, workspace.problem, workspace.result);
-	writebackAnvilContacts(workspace.contacts, workspace.problem, workspace.result, context);
+	writebackAnvilContacts(workspace.contacts, workspace.problem, workspace.result, bodies, bodyData, context);
 	for(PxU32 i = 0; i < bodyCount; ++i)
 	{
 		AnvilBodySeed& seed = solver.seeds[nodeIndices[i]];

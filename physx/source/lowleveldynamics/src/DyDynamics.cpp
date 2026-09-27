@@ -1821,7 +1821,7 @@ void DynamicsContext::update(Cm::FlushPool& /*flushPool*/, PxBaseTask* continuat
 {
 	if(mAnvilSolver)
 	{
-		beginAnvilUpdate(*mAnvilSolver, mIslandManager.getAccurateIslandSim().getNbNodes());
+		beginAnvilUpdate(*mAnvilSolver, mIslandManager.getAccurateIslandSim().getNbNodes(), *this, dt);
 	}
 	const bool hasWork = updateShared(nphase, dt, gravity);
 	if(!hasWork)

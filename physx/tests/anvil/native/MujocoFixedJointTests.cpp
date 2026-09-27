@@ -4,32 +4,30 @@
 // neighbours do not collide, as PhysX joints default to. The 100 kg cube waits far below the
 // scene until it is dropped.
 //
-// usage: MujocoFixedJointTests scene-directory [default|stiff] [threads=1]
-//   default: MuJoCo's default weld impedance (solimp 0.9 0.95); stiff: the largest impedance
-//   MuJoCo allows (0.9999, regularization 1e-4).
+// usage: MujocoFixedJointTests scene-directory [threads=1]
+//   Welds and contacts use the comparisons' shared solref 0.02 1 and constant solimp 0.9999,
+//   the largest impedance MuJoCo allows (regularization 1e-4).
 #include <mujoco/mujoco.h>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <string>
 
 static const double cubeSize = 0.1;
 static const double rodHeight = 1.0;
 static const double dropHeight = 0.5;
 
-static bool writeScene(const std::string& path, int count, bool stiff)
+static bool writeScene(const std::string& path, int count)
 {
 	FILE* file = fopen(path.c_str(), "w");
 	if(!file)
 		return false;
-	const char* solimp = stiff ? " solimp=\"0.9999 0.9999 0.001 0.5 2\"" : "";
 	fprintf(file, "<mujoco model=\"Fixed joint rod\">\n\t<option timestep=\"0.01\" gravity=\"0 -9.81 0\" integrator=\"Euler\" solver=\"Newton\"\n"
 		"\t\tcone=\"pyramidal\" jacobian=\"sparse\" iterations=\"100\" tolerance=\"1e-8\" ls_tolerance=\"0.01\"/>\n"
-		"\t<default><geom type=\"box\" size=\"%g %g %g\" condim=\"3\" friction=\"0.5 0 0\" margin=\"0.001\" solref=\"0.02 1\"/>\n"
-		"\t\t<equality solref=\"0.02 1\"%s/></default>\n\t<worldbody>\n", 0.5 * cubeSize, 0.5 * cubeSize, 0.5 * cubeSize, solimp);
+		"\t<default><geom type=\"box\" size=\"%g %g %g\" condim=\"3\" friction=\"0.5 0 0\" margin=\"0.001\" solref=\"0.02 1\" solimp=\"0.9999 0.9999 0.001 0.5 2\"/>\n"
+		"\t\t<equality solref=\"0.02 1\" solimp=\"0.9999 0.9999 0.001 0.5 2\"/></default>\n\t<worldbody>\n", 0.5 * cubeSize, 0.5 * cubeSize, 0.5 * cubeSize);
 	fprintf(file, "\t\t<body name=\"cube0\" pos=\"0 %g 0\"><geom mass=\"0.1\"/></body>\n", rodHeight);
 	for(int i = 1; i < count; ++i)
 		fprintf(file, "\t\t<body name=\"cube%d\" pos=\"%g %g 0\"><freejoint/><geom mass=\"%.9g\"/></body>\n", i, i * cubeSize, rodHeight, 0.1 * std::pow(2.0, i));
@@ -100,10 +98,10 @@ static void timedStep(const mjModel* model, mjData* data)
 		totalMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 }
 
-static bool run(const std::string& directory, int count, bool stiff, bool drop, int threads)
+static bool run(const std::string& directory, int count, bool drop, int threads)
 {
-	const std::string path = directory + "/fixed_rod_" + std::to_string(count) + (stiff ? "_stiff" : "_default") + ".xml";
-	if(!writeScene(path, count, stiff))
+	const std::string path = directory + "/fixed_rod_" + std::to_string(count) + ".xml";
+	if(!writeScene(path, count))
 		return false;
 	char error[1024];
 	mjModel* model = mj_loadXML(path.c_str(), NULL, error, sizeof(error));
@@ -170,12 +168,11 @@ int main(int argc, const char* const* argv)
 {
 	if(argc < 2)
 	{
-		printf("MujocoFixedJointTests scene-directory [default|stiff] [threads=1]\n");
+		printf("MujocoFixedJointTests scene-directory [threads=1]\n");
 		return 1;
 	}
-	const bool stiff = argc > 2 && std::strcmp(argv[2], "stiff") == 0;
-	const int threads = argc > 3 ? std::atoi(argv[3]) : 1;
-	printf("MuJoCo %s Newton, %s weld impedance\n", mj_versionString(), stiff ? "stiffest" : "default");
-	const bool ok = run(argv[1], 10, stiff, false, threads) && run(argv[1], 20, stiff, false, threads) && run(argv[1], 10, stiff, true, threads);
+	const int threads = argc > 2 ? std::atoi(argv[2]) : 1;
+	printf("MuJoCo %s Newton, constant impedance 0.9999\n", mj_versionString());
+	const bool ok = run(argv[1], 10, false, threads) && run(argv[1], 20, false, threads) && run(argv[1], 10, true, threads);
 	return ok ? 0 : 1;
 }

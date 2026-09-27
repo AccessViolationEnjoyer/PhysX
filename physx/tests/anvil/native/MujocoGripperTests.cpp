@@ -6,11 +6,10 @@
 // damping is joint damping, which the Euler integrator treats implicitly as PhysX drives do;
 // the actuator's own damping would be explicit and unstable for these light fingers.
 //
-// usage: MujocoGripperTests scene-directory [grip-force=150] [hold-seconds=1] [matched|default] [pyramidal|elliptic] [boxes=4] [trace]
-//   matched: the conveyor comparisons' contact impedance (regularization 1e-2 at first touch,
-//   1e-4 beyond 20 um) with contact rest distance, as PhysX Anvil, and a 10 mm margin so fast
-//   fingers meet the boxes before penetrating, as PhysX's contact offset does; default: MuJoCo's
-//   default contact impedance (solimp 0.9 0.95 0.001) and margin (0).
+// usage: MujocoGripperTests scene-directory [grip-force=150] [hold-seconds=1] [pyramidal|elliptic] [boxes=4] [trace]
+//   Contacts use the comparisons' shared solref 0.02 1 and constant solimp 0.9999 (regularization
+//   1e-4), with contact rest distance and a 10 mm margin so fast fingers meet the boxes before
+//   penetrating, as PhysX's contact offset does.
 #include "MujocoConveyor.h"
 #include <algorithm>
 #include <chrono>
@@ -39,17 +38,16 @@ static double armLift(int step)
 	return lift * t * t * (3.0 - 2.0 * t);
 }
 
-static bool writeScene(const std::string& path, double grip, bool matched, bool elliptic)
+static bool writeScene(const std::string& path, double grip, bool elliptic)
 {
 	FILE* file = fopen(path.c_str(), "w");
 	if(!file)
 		return false;
-	const char* contact = matched ? " margin=\"0.01\" solimp=\"0.990099 0.9999 0.00002 0.5 2\"" : "";
 	fprintf(file, "<mujoco model=\"Gripper\">\n\t<option timestep=\"%g\" gravity=\"0 -9.81 0\" integrator=\"Euler\" solver=\"Newton\"\n"
 		"\t\tcone=\"%s\" jacobian=\"sparse\" iterations=\"100\" tolerance=\"1e-8\" ls_tolerance=\"0.01\"/>\n"
-		"\t<default><geom condim=\"3\" friction=\"%g 0 0\" solref=\"0.02 1\"%s/></default>\n\t<worldbody>\n"
+		"\t<default><geom condim=\"3\" friction=\"%g 0 0\" margin=\"0.01\" solref=\"0.02 1\" solimp=\"0.9999 0.9999 0.001 0.5 2\"/></default>\n\t<worldbody>\n"
 		"\t\t<geom name=\"ground\" type=\"plane\" size=\"5 5 0.1\" zaxis=\"0 1 0\"/>\n",
-		timestep, elliptic ? "elliptic" : "pyramidal", friction, contact);
+		timestep, elliptic ? "elliptic" : "pyramidal", friction);
 	for(int i = 0; i < boxCount; ++i)
 		fprintf(file, "\t\t<body name=\"box%d\" pos=\"%g %g 0\"><freejoint/><geom type=\"box\" size=\"%g %g %g\" mass=\"%g\"/></body>\n",
 			i, (i - 0.5 * (boxCount - 1)) * boxSize, 0.5 * boxSize, 0.5 * boxSize, 0.5 * boxSize, 0.5 * boxSize, boxMass);
@@ -72,16 +70,15 @@ int main(int argc, const char* const* argv)
 {
 	if(argc < 2)
 	{
-		printf("MujocoGripperTests scene-directory [grip-force=150] [hold-seconds=1] [matched|default] [pyramidal|elliptic]\n");
+		printf("MujocoGripperTests scene-directory [grip-force=150] [hold-seconds=1] [pyramidal|elliptic] [boxes=4] [trace]\n");
 		return 1;
 	}
 	const double grip = argc > 2 ? std::atof(argv[2]) : 150.0;
 	const double holdSeconds = argc > 3 ? std::atof(argv[3]) : 1.0;
-	const bool matched = !(argc > 4 && std::strcmp(argv[4], "default") == 0);
-	const bool elliptic = argc > 5 && std::strcmp(argv[5], "elliptic") == 0;
-	boxCount = argc > 6 ? std::atoi(argv[6]) : 4;
+	const bool elliptic = argc > 4 && std::strcmp(argv[4], "elliptic") == 0;
+	boxCount = argc > 5 ? std::atoi(argv[5]) : 4;
 	const std::string path = std::string(argv[1]) + "/gripper.xml";
-	if(!writeScene(path, grip, matched, elliptic))
+	if(!writeScene(path, grip, elliptic))
 		return 1;
 	char error[1024];
 	mjModel* model = mj_loadXML(path.c_str(), NULL, error, sizeof(error));
@@ -109,14 +106,13 @@ int main(int argc, const char* const* argv)
 		data->qvel[liftDof] = (armLift(step + 1) - armLift(step)) / timestep;
 		const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
 		mj_step1(model, data);
-		if(matched)
-			mujocoConveyor::applyRestDistance(data);
+		mujocoConveyor::applyRestDistance(data);
 		mj_step2(model, data);
 		if(step > 0)
 			totalMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 		mj_kinematics(model, data);
 		const double fingerY = 0.5 * (data->xpos[3 * (armBody + 1) + 1] + data->xpos[3 * (armBody + 2) + 1]);
-		if(argc > 7 && step % 10 == 9 && step >= closeStep)
+		if(argc > 6 && step % 10 == 9 && step >= closeStep)
 		{
 			printf("step %3d fingers x %+.4f %+.4f", step + 1, double(data->xpos[3 * (armBody + 1)]), double(data->xpos[3 * (armBody + 2)]));
 			for(int i = 0; i < boxCount; ++i)
@@ -151,8 +147,8 @@ int main(int argc, const char* const* argv)
 		creep = std::max(creep, std::abs(double(data->qvel[6 * i + 1]) - fingerSpeed));
 	}
 	const double fingerGap = data->xpos[3 * (armBody + 2)] - data->xpos[3 * (armBody + 1)] - 2.0 * fingerHalf[0];
-	printf("gripper MuJoCo-%s-%s %s boxes=%d grip_n=%.1f mean_step_us=%.2f hold_s=%.1f creep_mm_s=%.4f minimum_lift_mm=%.3f maximum_slip_mm=%.4f"
-		" maximum_tilt_deg=%.4f row_width_mm=%.4f maximum_box_overlap_mm=%.4f final_speed_mm_s=%.4f\n", matched ? "matched" : "default",
+	printf("gripper MuJoCo-%s %s boxes=%d grip_n=%.1f mean_step_us=%.2f hold_s=%.1f creep_mm_s=%.4f minimum_lift_mm=%.3f maximum_slip_mm=%.4f"
+		" maximum_tilt_deg=%.4f row_width_mm=%.4f maximum_box_overlap_mm=%.4f final_speed_mm_s=%.4f\n",
 		elliptic ? "elliptic" : "pyramidal", mj_versionString(), boxCount, grip, 1e3 * totalMs / (endStep - 1), holdSeconds, creep * 1e3,
 		minimumLift * 1e3, maximumSlip * 1e3, maximumTilt * 180.0 / mjPI, fingerGap * 1e3, maximumOverlap * 1e3, speed * 1e3);
 	for(int i = 0; i < mjNWARNING; ++i)

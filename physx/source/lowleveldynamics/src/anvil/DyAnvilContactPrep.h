@@ -43,6 +43,7 @@ namespace physx
 {
 class PxsContactManager;
 struct PxsContactManagerOutput;
+struct PxSolverBody;
 struct PxSolverBodyData;
 
 namespace Cm
@@ -72,6 +73,8 @@ struct AnvilContactSettings
 	double surfaceRegularization;
 	double regularizationLogRange;
 	double stiffeningDepth;
+	// Accumulated slip beyond this restarts a sticking pair's slip correction.
+	PxReal slipLimit;
 	const PxU8* bodyLockFlags = NULL;
 	const Cm::SpatialVector* initialVelocities = NULL;
 };
@@ -81,7 +84,30 @@ struct AnvilContactPoint
 	PxU32 firstContact;
 	PxU32 contactCount;
 	PxReal* destination;
+	// Friction coefficient of the point's friction rows; 0 for a point without them.
+	PxReal friction;
 };
+
+// A contact pair's friction state, kept from step to step in PhysX's friction stream. While the
+// pair sticks, slip and twist accumulate the tangential displacement of body 0 relative to body
+// 1 at the contact centre and its rotation about the normal; friction rows correct them like
+// penetration, with ANVIL_SLIP_STIFFNESS times its stiffness, so a sustained friction load holds
+// instead of creeping.
+// A sliding pair has no accumulated slip: its twist is ANVIL_SLIDING_TWIST, a value the slip
+// limit keeps accumulated twist from reaching.
+struct AnvilFrictionState
+{
+	PxReal slip[3];
+	PxReal twist;
+};
+
+static const PxReal ANVIL_SLIDING_TWIST = PX_MAX_F32;
+// Seconds over which accumulated slip relaxes, and the slip correction's stiffness relative to
+// penetration's. A held load keeps creeping at a rate that falls with both; slip left by a
+// transient locks tangential forces into stacks for about the relaxation time, and a stiffer
+// correction holds them harder, so both also raise the solver's work on stacks.
+static const PxReal ANVIL_SLIP_RELAXATION_TIME = 1.0f;
+static const double ANVIL_SLIP_STIFFNESS = 2.0;
 
 struct AnvilFrictionPoint
 {
@@ -92,7 +118,6 @@ struct AnvilFrictionPoint
 	PxReal freeTangentVelocity0;
 	PxReal freeTangentVelocity1;
 	PxReal dilatancyBias;
-	PxU8* state;
 	bool correctDilatancy;
 };
 
@@ -102,6 +127,15 @@ struct AnvilContactPair
 	PxU32 pointCount;
 	ThresholdStreamElement threshold;
 	bool reportThreshold;
+	// Writeback adds the step's slip to the state from the solved velocities, which move the
+	// bodies; the velocities at the start of the next step also hold the applied forces.
+	AnvilFrictionState* state;
+	PxI32 body[2];
+	PxVec3 arm[2];
+	PxVec3 normal;
+	// Relative velocity at the contact centre and about the normal before the solve.
+	PxVec3 freeSlipVelocity;
+	PxReal freeTwistVelocity;
 };
 
 struct AnvilContactRows
@@ -120,7 +154,7 @@ struct AnvilContactRows
 
 void prepareAnvilContacts(PxsContactManager& manager, PxsContactManagerOutput& contactOutput, const PxSolverBodyData& body0, const PxSolverBodyData& body1, PxI32 bodyIndex0, PxI32 bodyIndex1, const AnvilContactSettings& settings, ThreadContext& threadContext, anvil::Problem& problem, AnvilContactRows& output);
 
-void writebackAnvilContacts(const AnvilContactRows& rows, const anvil::Problem& problem, const anvil::Result& result, DynamicsContext& context);
+void writebackAnvilContacts(const AnvilContactRows& rows, const anvil::Problem& problem, const anvil::Result& result, const PxSolverBody* bodies, const PxSolverBodyData* bodyData, DynamicsContext& context);
 
 bool updateAnvilDilatancyBias(AnvilContactRows& rows, anvil::Problem& problem, const anvil::Result& result, PxReal velocityTolerance);
 }

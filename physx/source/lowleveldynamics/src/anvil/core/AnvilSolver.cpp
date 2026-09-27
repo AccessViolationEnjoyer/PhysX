@@ -183,7 +183,15 @@ struct Curvature
 	explicit Curvature(const Problem& problem) { resize(problem); }
 	void resize(const Problem& problem)
 	{
-		diagonal.setZero(problem.rowCount());
+		// Unilateral evaluation writes every row's curvature before anything reads it.
+		if(problem.isUnilateral())
+		{
+			diagonal.resize(problem.rowCount());
+		}
+		else
+		{
+			diagonal.setZero(problem.rowCount());
+		}
 		coupled.resize(problem.coupledContacts.size());
 		reserveStorage(patches, std::uint32_t(problem.patches.size()));
 		patches.resize(problem.patches.size());
@@ -323,7 +331,8 @@ static void prepareHessianTopology(Problem& problem)
 	std::vector<std::uint64_t>& pairs = problem.hessianPairs;
 	pairs.clear();
 	problem.hessianDiagonalBlocks.resize(bodyCount);
-	problem.hessianContactBlocks.assign(contactCount, -1);
+	// Every contact lies in exactly one group, which sets its block or -1 below.
+	problem.hessianContactBlocks.resize(contactCount);
 	// Unilateral problems group consecutive rows of one body pair into runs, so each run
 	// needs one lookup rather than one per row; other problems treat every row alone.
 	const std::vector<ScalarContactRun>& runs = problem.scalarContactRuns;
@@ -369,12 +378,14 @@ static void prepareHessianTopology(Problem& problem)
 		{
 			const std::uint32_t begin = topologyGroupFirst(runs, grouped, group), end = topologyGroupEnd(runs, grouped, group);
 			const CompactContact& contact = problem.contacts[begin];
+			int block = -1;
 			if(contact.body[0] >= 0 && contact.body[1] >= 0)
 			{
 				const std::uint32_t first = std::uint32_t(std::min(contact.body[0], contact.body[1]));
 				const std::uint32_t second = std::uint32_t(std::max(contact.body[0], contact.body[1]));
-				std::fill(problem.hessianContactBlocks.begin() + begin, problem.hessianContactBlocks.begin() + end, lookup[std::size_t(first) * bodyCount + second]);
+				block = lookup[std::size_t(first) * bodyCount + second];
 			}
+			std::fill(problem.hessianContactBlocks.begin() + begin, problem.hessianContactBlocks.begin() + end, block);
 		}
 		return;
 	}
@@ -407,12 +418,13 @@ static void prepareHessianTopology(Problem& problem)
 	{
 		const std::uint32_t begin = topologyGroupFirst(runs, grouped, group), end = topologyGroupEnd(runs, grouped, group);
 		const CompactContact& contact = problem.contacts[begin];
+		int block = -1;
 		if(contact.body[0] >= 0 && contact.body[1] >= 0)
 		{
 			const std::uint64_t key = bodyPairKey(contact.body[0], contact.body[1]);
-			const int block = int(std::lower_bound(pairs.begin(), pairs.end(), key) - pairs.begin());
-			std::fill(problem.hessianContactBlocks.begin() + begin, problem.hessianContactBlocks.begin() + end, block);
+			block = int(std::lower_bound(pairs.begin(), pairs.end(), key) - pairs.begin());
 		}
+		std::fill(problem.hessianContactBlocks.begin() + begin, problem.hessianContactBlocks.begin() + end, block);
 	}
 }
 
@@ -496,7 +508,7 @@ static void prepareProblemInternal(Problem& problem)
 	}
 	else
 	{
-		std::fill_n(problem.jacobian.outerIndexPtr(), columnCount + 1, 0);
+		// resize() has already cleared every column start.
 		problem.jacobian.resizeNonZeros(0);
 	}
 	int nextRow = 0;
@@ -510,16 +522,21 @@ static void prepareProblemInternal(Problem& problem)
 	{
 		reserveStorage(runs, std::uint32_t(contactCount));
 	}
-	for(int i = 0; i < contactCount; ++i)
+	if(!CountEntries && !BuildJacobian)
 	{
-		CompactContact& contact = problem.contacts[i];
-		if(!CountEntries)
+		// Compact problems hold only plain scalar rows, so each contact is its own row and every
+		// row joins its body pair's run; the general loop's block and bound cases cannot occur.
+		int* rowContact = problem.rowContact.data();
+		double* freeVelocity = problem.freeVelocity.data();
+		double* regularization = problem.regularization.data();
+		for(int i = 0; i < contactCount; ++i)
 		{
-			assert(validContact(problem, contact));
-		}
-		detectRuns = detectRuns && !contact.block;
-		if(detectRuns)
-		{
+			CompactContact& contact = problem.contacts[i];
+			assert(validContact(problem, contact) && contact.block == 0 && contact.regularization > 0.0);
+			contact.row = i;
+			rowContact[i] = i;
+			freeVelocity[i] = contact.freeVelocity;
+			regularization[i] = contact.regularization;
 			if(i && contact.body[0] == problem.contacts[i - 1].body[0] && contact.body[1] == problem.contacts[i - 1].body[1])
 			{
 				runs.back().end = i + 1;
@@ -530,80 +547,105 @@ static void prepareProblemInternal(Problem& problem)
 				runs.push_back(run);
 			}
 		}
-		while(nextPatch < patchCount && i >= problem.patches[nextPatch].firstContact + problem.patches[nextPatch].normalCount + problem.patches[nextPatch].tangentCount)
+		nextRow = contactCount;
+	}
+	else
+	{
+		for(int i = 0; i < contactCount; ++i)
 		{
-			++nextPatch;
-		}
-		const Patch* patch = nextPatch < patchCount && i >= problem.patches[nextPatch].firstContact ? &problem.patches[nextPatch] : NULL;
-		if(patch)
-		{
-#ifndef NDEBUG
-			const CompactContact& first = problem.contacts[patch->firstContact];
-			assert(contact.rowCount() == 1 && contact.body[0] == first.body[0] && contact.body[1] == first.body[1]);
-#endif
-			if(i < patch->firstContact + patch->normalCount)
+			CompactContact& contact = problem.contacts[i];
+			if(!CountEntries)
 			{
-				assert(!contact.hasScalarBounds() || (problem.bounds(contact).lower == 0.0 && problem.bounds(contact).upper >= 0.0));
+				assert(validContact(problem, contact));
 			}
-			else
+			detectRuns = detectRuns && !contact.block;
+			if(detectRuns)
 			{
-				assert(contact.hasScalarBounds() && problem.bounds(contact).lower == -MAX_IMPULSE && problem.bounds(contact).upper == MAX_IMPULSE);
-			}
-		}
-		contact.row = nextRow;
-		nextRow += contact.rowCount();
-		assert(nextRow <= rows);
-		if(contact.hasScalarBounds())
-		{
-			const ScalarBounds& limits = problem.bounds(contact);
-			if(!patch && limits.lower == -MAX_IMPULSE && limits.upper == MAX_IMPULSE)
-			{
-				++problem.equalityRows;
-			}
-			else if(limits.lower != -MAX_IMPULSE || limits.upper != MAX_IMPULSE)
-			{
-				problem.hasFiniteBounds = true;
-			}
-		}
-		else if(contact.block)
-		{
-			problem.block(contact).coupled = -1;
-			if(contact.block < 0)
-			{
-				problem.equalityRows += 3;
-			}
-			else if(problem.block(contact).maxNormalImpulse != MAX_IMPULSE)
-			{
-				problem.hasFiniteBounds = true;
-			}
-		}
-		if(contact.block > 0)
-		{
-			problem.block(contact).coupled = int(problem.coupledContacts.size());
-			problem.coupledContacts.push_back(i);
-		}
-		const int begin = contact.rowCount() == 1 ? 2 : 0;
-		for(int axis = begin; axis < 3; ++axis)
-		{
-			const int row = contact.row + axis - begin;
-			problem.rowContact[row] = i;
-			problem.freeVelocity[row] = axis == 2 ? contact.freeVelocity : problem.block(contact).freeVelocity[axis];
-			problem.regularization[row] = axis == 2 ? contact.regularization : problem.block(contact).regularization[axis];
-			assert(problem.regularization[row] > 0.0);
-			if(BuildJacobian)
-			{
-				for(int end = 0; end < 2; ++end)
+				if(i && contact.body[0] == problem.contacts[i - 1].body[0] && contact.body[1] == problem.contacts[i - 1].body[1])
 				{
-					if(contact.body[end] >= 0)
+					runs.back().end = i + 1;
+				}
+				else
+				{
+					const ScalarContactRun run = { i, i + 1 };
+					runs.push_back(run);
+				}
+			}
+			while(nextPatch < patchCount && i >= problem.patches[nextPatch].firstContact + problem.patches[nextPatch].normalCount + problem.patches[nextPatch].tangentCount)
+			{
+				++nextPatch;
+			}
+			const Patch* patch = nextPatch < patchCount && i >= problem.patches[nextPatch].firstContact ? &problem.patches[nextPatch] : NULL;
+			if(patch)
+			{
+	#ifndef NDEBUG
+				const CompactContact& first = problem.contacts[patch->firstContact];
+				assert(contact.rowCount() == 1 && contact.body[0] == first.body[0] && contact.body[1] == first.body[1]);
+	#endif
+				if(i < patch->firstContact + patch->normalCount)
+				{
+					assert(!contact.hasScalarBounds() || (problem.bounds(contact).lower == 0.0 && problem.bounds(contact).upper >= 0.0));
+				}
+				else
+				{
+					assert(contact.hasScalarBounds() && problem.bounds(contact).lower == -MAX_IMPULSE && problem.bounds(contact).upper == MAX_IMPULSE);
+				}
+			}
+			contact.row = nextRow;
+			nextRow += contact.rowCount();
+			assert(nextRow <= rows);
+			if(contact.hasScalarBounds())
+			{
+				const ScalarBounds& limits = problem.bounds(contact);
+				if(!patch && limits.lower == -MAX_IMPULSE && limits.upper == MAX_IMPULSE)
+				{
+					++problem.equalityRows;
+				}
+				else if(limits.lower != -MAX_IMPULSE || limits.upper != MAX_IMPULSE)
+				{
+					problem.hasFiniteBounds = true;
+				}
+			}
+			else if(contact.block)
+			{
+				problem.block(contact).coupled = -1;
+				if(contact.block < 0)
+				{
+					problem.equalityRows += 3;
+				}
+				else if(problem.block(contact).maxNormalImpulse != MAX_IMPULSE)
+				{
+					problem.hasFiniteBounds = true;
+				}
+			}
+			if(contact.block > 0)
+			{
+				problem.block(contact).coupled = int(problem.coupledContacts.size());
+				problem.coupledContacts.push_back(i);
+			}
+			const int begin = contact.rowCount() == 1 ? 2 : 0;
+			for(int axis = begin; axis < 3; ++axis)
+			{
+				const int row = contact.row + axis - begin;
+				problem.rowContact[row] = i;
+				problem.freeVelocity[row] = axis == 2 ? contact.freeVelocity : problem.block(contact).freeVelocity[axis];
+				problem.regularization[row] = axis == 2 ? contact.regularization : problem.block(contact).regularization[axis];
+				assert(problem.regularization[row] > 0.0);
+				if(BuildJacobian)
+				{
+					for(int end = 0; end < 2; ++end)
 					{
-						for(int column = 0; column < 6; ++column)
+						if(contact.body[end] >= 0)
 						{
-							const double value = problem.contactEntry(contact, end, axis, column);
-							if(value != 0.0)
+							for(int column = 0; column < 6; ++column)
 							{
-								const int entry = columnCounts[6 * contact.body[end] + column]++;
-								problem.jacobian.innerIndexPtr()[entry] = row;
-								problem.jacobian.valuePtr()[entry] = value;
+								const double value = problem.contactEntry(contact, end, axis, column);
+								if(value != 0.0)
+								{
+									const int entry = columnCounts[6 * contact.body[end] + column]++;
+									problem.jacobian.innerIndexPtr()[entry] = row;
+									problem.jacobian.valuePtr()[entry] = value;
+								}
 							}
 						}
 					}
@@ -612,7 +654,18 @@ static void prepareProblemInternal(Problem& problem)
 		}
 	}
 	assert(nextRow == rows);
-	problem.contactRebuildWork = -1.0;
+	problem.contactRebuildWork = problem.reportedRebuildRows == problem.contacts.size() ? problem.reportedRebuildWork : -1.0;
+#ifndef NDEBUG
+	if(problem.contactRebuildWork >= 0.0)
+	{
+		double work = 0.0;
+		for(const CompactContact& contact : problem.contacts)
+		{
+			work += problem.rebuildWork(contact);
+		}
+		assert(work == problem.contactRebuildWork);
+	}
+#endif
 	if(!problem.isUnilateral())
 	{
 		runs.clear();
@@ -634,12 +687,15 @@ void prepareProblemFromColumnCounts(Problem& problem) noexcept
 
 void prepareCompactProblemFromColumnCounts(Problem& problem) noexcept
 {
-	bool compact = problem.contactBlocks.empty() && problem.scalarBounds.empty() && problem.patches.empty();
-	const int contactCount = int(problem.contacts.size());
-	for(int i = 0; compact && i < contactCount; ++i)
+	// Every nonzero block tag owns a contact block or scalar bounds, so without either all
+	// contacts are plain scalar rows.
+	const bool compact = problem.contactBlocks.empty() && problem.scalarBounds.empty() && problem.patches.empty();
+#ifndef NDEBUG
+	for(std::uint32_t i = 0; compact && i < problem.contacts.size(); ++i)
 	{
-		compact = problem.contacts[i].block == 0;
+		assert(problem.contacts[i].block == 0);
 	}
+#endif
 	if(compact)
 	{
 		prepareProblemInternal<false, false>(problem);
@@ -2902,8 +2958,10 @@ static SolveStatus::Enum solveAnvilInternal(const Problem& problem, const Settin
 	impulse.resize(problem.rowCount());
 	weights.resize(problem);
 	workspace.patchScratch.resize(problem);
-	// Correctly rounded square roots and divisions match the scalar loop exactly.
-	int rootRow = 0;
+	// Correctly rounded square roots and divisions match the scalar loop exactly. A
+	// continuation of the same prepared problem keeps its compliance, so its inverse roots
+	// are still in the workspace.
+	int rootRow = continuation ? rows : 0;
 #if defined(ANVIL_AVX2_FMA)
 	for(; rootRow + 4 <= rows; rootRow += 4)
 	{
@@ -2932,6 +2990,8 @@ static SolveStatus::Enum solveAnvilInternal(const Problem& problem, const Settin
 	{
 		return SolveStatus::eNUMERICAL_FAILURE;
 	}
+	double cost = 0.0;
+	bool costKnown = false;
 	if(previous)
 	{
 		// A cached solution can be worse than free motion after contacts or loads change.
@@ -2946,12 +3006,16 @@ static SolveStatus::Enum solveAnvilInternal(const Problem& problem, const Settin
 		{
 			return SolveStatus::eNUMERICAL_FAILURE;
 		}
-		double warmCost = velocity.squaredNorm(), coldCost = 0.0;
+		// The warm quadratic sums rows in primalCost's order, so a kept warm start's cost is
+		// exactly primalCost's without another pass over the rows.
+		const double warmNorm = velocity.squaredNorm();
+		double warmQuadratic = 0.0, coldCost = 0.0;
 		for(int row = 0; row < rows; ++row)
 		{
-			warmCost += impulse[row] * compliance[row] * impulse[row];
+			warmQuadratic += impulse[row] * compliance[row] * impulse[row];
 			coldCost += coldImpulse[row] * compliance[row] * coldImpulse[row];
 		}
+		double warmCost = warmNorm + warmQuadratic;
 		if(problem.hasFiniteBounds)
 		{
 			warmCost = 2.0 * primalCost(problem, velocity, contactVelocity, impulse);
@@ -2965,9 +3029,17 @@ static SolveStatus::Enum solveAnvilInternal(const Problem& problem, const Settin
 				return SolveStatus::eNUMERICAL_FAILURE;
 			}
 		}
+		else if(!problem.hasFiniteBounds)
+		{
+			cost = 0.5 * (warmNorm + warmQuadratic);
+			costKnown = true;
+		}
 	}
 	result.evaluationMs += profileElapsed(settings.profile, evaluationStart);
-	double cost = primalCost(problem, velocity, contactVelocity, impulse);
+	if(!costKnown)
+	{
+		cost = primalCost(problem, velocity, contactVelocity, impulse);
+	}
 	const bool unilateral = problem.isUnilateral();
 	std::vector<int>& changedRows = workspace.changedRows;
 	if(unilateral)

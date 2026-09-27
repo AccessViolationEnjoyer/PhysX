@@ -158,6 +158,8 @@ struct ContactContext
 		desc.solverType = solver;
 		desc.anvilMaxIterations = 100;
 		desc.anvilTolerance = 1e-8f;
+		// Solve to the tolerance: these checks resolve speeds below the displacement tolerance.
+		desc.anvilDisplacementTolerance = 0.0f;
 		desc.anvilRegularization = 1e-4f;
 		desc.flags |= PxSceneFlag::eENABLE_FRICTION_EVERY_ITERATION;
 		PxScene* scene = physics.createScene(desc);
@@ -515,6 +517,10 @@ void frictionPrecision(ContactContext& context)
 			}
 			check(maximumDrift < 0.0005 * scale && maximumSpeed < 0.002 * scale,
 				"static friction holds across geometry scales and orientations");
+
+			// Without the load, friction first returns the body through the slip it held.
+			for(int frame = 0; frame < 30; ++frame)
+				step(*scene, recorder);
 
 			// This physical speed is below the anchor uncertainty divided by dt.
 			// It must still enter the velocity solve and be stopped by an actual friction impulse.

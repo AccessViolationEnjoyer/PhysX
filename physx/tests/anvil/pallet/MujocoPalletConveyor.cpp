@@ -11,7 +11,7 @@ static void writeScene(const char* path, const std::vector<pallet::Body>& bodies
 		"\t<option timestep=\"0.01\" gravity=\"0 -9.81 0\" integrator=\"Euler\" solver=\"Newton\"\n"
 		"\t\tcone=\"pyramidal\" jacobian=\"sparse\" iterations=\"100\" tolerance=\"1e-8\" ls_tolerance=\"0.01\"/>\n"
 		"\t<default><geom type=\"box\" condim=\"3\" friction=\"0.5 0 0\" margin=\"0.001\" gap=\"0\"\n"
-		"\t\tsolref=\"0.02 1\" solimp=\"0.990099 0.9999 0.00002 0.5 2\"/></default>\n"
+		"\t\tsolref=\"0.02 1\" solimp=\"0.9999 0.9999 0.001 0.5 2\"/></default>\n"
 		"\t<visual><global offwidth=\"1280\" offheight=\"720\"/><headlight ambient=\"0.4 0.4 0.4\"/></visual>\n"
 		"\t<worldbody>\n\t\t<light pos=\"0 10 0\" dir=\"0 -1 0\" directional=\"true\"/>\n");
 	for(int lane = 0; lane < pallet::conveyorCount; ++lane)

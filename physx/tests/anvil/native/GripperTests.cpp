@@ -5,9 +5,12 @@
 // Friction must carry every box: each outer face carries two boxes and the next faces in carry
 // one, so the grip must reach 2 m (g + a) / mu while the arm accelerates upwards at a.
 //
-// usage: AnvilGripperTests [anvil|pgs] [grip-force] [hold-seconds=1]
+// usage: AnvilGripperTests [anvil|pgs] [grip-force] [hold-seconds=1] [position-iterations=16]
+//                          [shake-amplitude=0] [shake-frequency=1]
 //   Without a grip force, Anvil is checked at a 150 N grip and just below and above the
-//   required grip; PGS only reports. With one, a single run is reported.
+//   required grip; PGS only reports. With one, a single run is reported. The iteration count
+//   applies to PGS; every body also takes two velocity iterations. A shake moves the arm up
+//   and down sinusoidally through the hold, starting from rest.
 #include "PxPhysicsAPI.h"
 #include <algorithm>
 #include <chrono>
@@ -31,6 +34,8 @@ static void check(bool value, const char* message)
 }
 
 static const PxReal timestep = 0.01f;
+static PxU32 positionIterations = 16;
+static PxReal shakeAmplitude = 0.0f, shakeFrequency = 1.0f;
 static const PxReal gravity = 9.81f;
 static const PxReal friction = 0.5f;
 static const PxReal boxSize = 0.1f;
@@ -60,7 +65,8 @@ static void setContactOffset(PxRigidActor& actor)
 static PxReal armLift(int step)
 {
 	const PxReal t = PxClamp(PxReal(step - liftStep) / liftSteps, 0.0f, 1.0f);
-	return lift * t * t * (3.0f - 2.0f * t);
+	const PxReal hold = PxMax(0.0f, PxReal(step - liftStep - liftSteps) * timestep);
+	return lift * t * t * (3.0f - 2.0f * t) + shakeAmplitude * (1.0f - PxCos(2.0f * PxPi * shakeFrequency * hold));
 }
 
 // The grip each finger needs to carry two boxes at the lift's peak acceleration, 6 h / T^2.
@@ -103,7 +109,7 @@ static GripResult simulate(PxPhysics& physics, PxCpuDispatcher& dispatcher, bool
 		PxRigidDynamic* box = PxCreateDynamic(physics, PxTransform(PxVec3(x, 0.5f * boxSize, 0.0f)), PxBoxGeometry(PxVec3(0.5f * boxSize)), *material, 1.0f);
 		PxRigidBodyExt::setMassAndUpdateInertia(*box, boxMass);
 		box->setSleepThreshold(0.0f);
-		box->setSolverIterationCounts(16, 2);
+		box->setSolverIterationCounts(positionIterations, 2);
 		setContactOffset(*box);
 		scene->addActor(*box);
 		boxes.push_back(box);
@@ -123,7 +129,7 @@ static GripResult simulate(PxPhysics& physics, PxCpuDispatcher& dispatcher, bool
 		fingers[side] = PxCreateDynamic(physics, PxTransform(position), PxBoxGeometry(PxVec3(fingerHalf[0], fingerHalf[1], fingerHalf[2])), *material, 1.0f);
 		PxRigidBodyExt::setMassAndUpdateInertia(*fingers[side], fingerMass);
 		fingers[side]->setSleepThreshold(0.0f);
-		fingers[side]->setSolverIterationCounts(16, 2);
+		fingers[side]->setSolverIterationCounts(positionIterations, 2);
 		setContactOffset(*fingers[side]);
 		scene->addActor(*fingers[side]);
 		joints[side] = PxD6JointCreate(physics, arm, PxTransform(position - arm->getGlobalPose().p), fingers[side], PxTransform(PxIdentity));
@@ -178,8 +184,8 @@ static GripResult simulate(PxPhysics& physics, PxCpuDispatcher& dispatcher, bool
 	}
 	result.fingerGap = fingers[1]->getGlobalPose().p.x - fingers[0]->getGlobalPose().p.x - 2.0f * fingerHalf[0];
 	result.meanStepUs = 1e3 * totalMs / (endStep - 1);
-	printf("gripper %s grip_n=%.1f mean_step_us=%.2f hold_s=%.1f creep_mm_s=%.4f minimum_lift_mm=%.3f maximum_slip_mm=%.4f maximum_tilt_deg=%.4f"
-		" row_width_mm=%.4f maximum_box_overlap_mm=%.4f final_speed_mm_s=%.4f\n", pgs ? "PGS" : "Anvil", double(gripForce), result.meanStepUs,
+	printf("gripper %s iterations=%u grip_n=%.1f mean_step_us=%.2f hold_s=%.1f creep_mm_s=%.4f minimum_lift_mm=%.3f maximum_slip_mm=%.4f maximum_tilt_deg=%.4f"
+		" row_width_mm=%.4f maximum_box_overlap_mm=%.4f final_speed_mm_s=%.4f\n", pgs ? "PGS" : "Anvil", positionIterations, double(gripForce), result.meanStepUs,
 		double(holdSeconds), result.creep * 1e3, result.minimumLift * 1e3, result.maximumSlip * 1e3, result.maximumTilt * 180.0 / PxPi,
 		result.fingerGap * 1e3, result.maximumOverlap * 1e3, result.speed * 1e3);
 	scene->release();
@@ -191,6 +197,9 @@ int main(int argc, char** argv)
 {
 	const bool pgs = argc > 1 && std::strcmp(argv[1], "pgs") == 0;
 	const PxReal holdSeconds = argc > 3 ? PxReal(std::atof(argv[3])) : 1.0f;
+	positionIterations = argc > 4 ? PxU32(std::atoi(argv[4])) : 16;
+	shakeAmplitude = argc > 5 ? PxReal(std::atof(argv[5])) : 0.0f;
+	shakeFrequency = argc > 6 ? PxReal(std::atof(argv[6])) : 1.0f;
 	PxDefaultAllocator allocator;
 	PxDefaultErrorCallback errors;
 	PxFoundation* foundation = PxCreateFoundation(PX_PHYSICS_VERSION, allocator, errors);

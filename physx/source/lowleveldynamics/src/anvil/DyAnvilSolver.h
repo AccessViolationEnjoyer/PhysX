@@ -48,7 +48,7 @@ AnvilSolver* createAnvilSolver(const PxSceneDesc& desc);
 void destroyAnvilSolver(AnvilSolver* solver);
 
 // Advance even on empty updates: recycled island node indices must not inherit an old warm start.
-void beginAnvilUpdate(AnvilSolver& solver, PxU32 nodeCount);
+void beginAnvilUpdate(AnvilSolver& solver, PxU32 nodeCount, const DynamicsContext& context, PxReal timestep);
 // A task holds one workspace while it solves the islands of its batch in turn.
 AnvilIslandWorkspace* acquireAnvilWorkspace(AnvilSolver& solver);
 void releaseAnvilWorkspace(AnvilSolver& solver, AnvilIslandWorkspace* workspace);

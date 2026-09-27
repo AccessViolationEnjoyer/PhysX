@@ -16,7 +16,7 @@ static bool writeScene(const char* path)
 		"\t<option timestep=\"0.01\" gravity=\"0 -9.81 0\" integrator=\"Euler\" solver=\"Newton\"\n"
 		"\t\tcone=\"pyramidal\" jacobian=\"sparse\" iterations=\"100\" tolerance=\"1e-8\" ls_tolerance=\"0.01\"/>\n"
 		"\t<default><geom type=\"box\" condim=\"3\" friction=\"%.9g 0 0\" margin=\"0.001\" gap=\"0\"\n"
-		"\t\tsolref=\"0.02 1\" solimp=\"0.990099 0.9999 0.00002 0.5 2\"/></default>\n"
+		"\t\tsolref=\"0.02 1\" solimp=\"0.9999 0.9999 0.001 0.5 2\"/></default>\n"
 		"\t<worldbody>\n\t\t<light pos=\"0 10 0\" dir=\"0 -1 0\" directional=\"true\"/>\n", cases::friction);
 	for(int lane = 0; lane < cases::conveyorCount; ++lane)
 		fprintf(file, "\t\t<geom name=\"belt%d\" pos=\"0 %.9g %.9g\" size=\"%.9g %.9g %.9g\" rgba=\"0.2 0.25 0.3 1\"/>\n",

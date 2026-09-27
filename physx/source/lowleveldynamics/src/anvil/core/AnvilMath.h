@@ -1210,6 +1210,36 @@ inline bool cholesky6(const Matrix<6, 6>& input, Matrix<6, 6>& lower)
 	return cholesky6(input, lower, NULL);
 }
 
+// The same factor as the strict lower triangle of a row-major 6x6 array (other entries are
+// untouched) and the inverse diagonal, which is all a triangular solve needs.
+inline bool cholesky6Packed(const Matrix<6, 6>& input, double* strictLower, double* inverseDiagonal)
+{
+	for(int column = 0; column < 6; ++column)
+	{
+		double diagonal = input(column, column);
+		for(int inner = 0; inner < column; ++inner)
+		{
+			diagonal -= strictLower[column * 6 + inner] * strictLower[column * 6 + inner];
+		}
+		if(!(diagonal > 0.0))
+		{
+			return false;
+		}
+		const double inverse = 1.0 / std::sqrt(diagonal);
+		inverseDiagonal[column] = inverse;
+		for(int row = column + 1; row < 6; ++row)
+		{
+			double value = input(row, column);
+			for(int inner = 0; inner < column; ++inner)
+			{
+				value -= strictLower[row * 6 + inner] * strictLower[column * 6 + inner];
+			}
+			strictLower[row * 6 + column] = value * inverse;
+		}
+	}
+	return true;
+}
+
 // Jacobi diagonalization of a small symmetric matrix. Eigenvalues are sorted
 // ascending so rank updates remain deterministic across implementations.
 template<int Size>

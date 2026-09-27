@@ -127,15 +127,18 @@ static PX_FORCE_INLINE void contactTangents(const PxVec3& normal, const PxVec3& 
 	tangent1 = normal.cross(tangent0);
 }
 
-// 2^x for moderate x, with relative error below 2e-6. It is portable and deterministic,
-// unlike the library's exp2 or pow, and cheaper.
+// 2^x for moderate x, with relative error below 1e-7. It is portable and deterministic,
+// unlike the library's exp2 or pow, and cheaper. The fraction's near-minimax quintic has
+// equal error at both ends, so the result stays continuous where the integer part steps,
+// and its split evaluation keeps the chain of dependent multiplies short.
 static PX_FORCE_INLINE double exp2Approximation(double x)
 {
 	int whole = int(x);
 	whole -= x < double(whole) ? 1 : 0;
 	const double f = x - whole;
-	const double power = 1.0 + f * (0.6931471805599453 + f * (0.2402265069591007 + f * (0.05550410866482158 +
-		f * (0.009618129107628477 + f * (0.001333355814642844 + f * (0.0001540353039338161 + f * 0.00001525273380405984))))));
+	const double f2 = f * f;
+	const double power = (0.9999999250645677 + f * 0.69315307314185293) +
+		f2 * ((0.24015361754827008 + f * 0.055826316561799594) + f2 * (0.0089893418677127468 + f * 0.0018775759408752035));
 	const PxU64 bits = PxU64(PxClamp(whole + 1023, 1, 2046)) << 52;
 	double scale;
 	PxMemCopy(&scale, &bits, sizeof(scale));
@@ -177,10 +180,9 @@ static PX_FORCE_INLINE PxVec3 initialPointVelocity(const PxSolverBodyData& body0
 	return linear0 + angular0.cross(arm0) - linear1 - angular1.cross(arm1);
 }
 
-static void extractAnvilContacts(PxsContactManagerOutput& contactOutput, PxContactBuffer& buffer, PxU16* originalIndices, PxReal defaultMaxImpulse, bool& separateFrictionCoefficients)
+static void extractAnvilContacts(PxsContactManagerOutput& contactOutput, PxContactBuffer& buffer, PxU16* originalIndices, PxReal defaultMaxImpulse)
 {
 	buffer.count = 0;
-	separateFrictionCoefficients = false;
 	if(!contactOutput.nbContacts)
 	{
 		return;
@@ -196,7 +198,6 @@ static void extractAnvilContacts(PxsContactManagerOutput& contactOutput, PxConta
 	while(iterator.hasNextPatch())
 	{
 		iterator.nextPatch();
-		separateFrictionCoefficients = separateFrictionCoefficients || iterator.getStaticFriction() != iterator.getDynamicFriction();
 		const bool hasMaxImpulse = (iterator.patch->internalFlags & PxContactPatch::eHAS_MAX_IMPULSE) != 0;
 		while(iterator.hasNextContact())
 		{
@@ -223,6 +224,12 @@ static void extractAnvilContacts(PxsContactManagerOutput& contactOutput, PxConta
 	}
 }
 
+// Nonzero Jacobian entries of a finished scalar row's present bodies.
+static PX_FORCE_INLINE int rowNonzeroCount(const anvil::CompactContact& row)
+{
+	return (row.body[0] >= 0 ? anvil::nonzeroCount6(row.jacobian[0].data()) : 0) + (row.body[1] >= 0 ? anvil::nonzeroCount6(row.jacobian[1].data()) : 0);
+}
+
 static PX_FORCE_INLINE void appendContactRow(const PxVec3& direction, const PxVec3& angular0, const PxVec3& angular1, double initialSpeed, double freeSpeed, double targetSpeed, double positionError, double stiffness, double damping, double impedance, double regularization, PxI32 bodyIndex0, PxI32 bodyIndex1, const AnvilJacobianBody* jacobianBodies, const AnvilContactSettings& settings, anvil::Problem& problem, double upperImpulse)
 {
 	anvil::CompactContact& row = problem.beginScalarContact();
@@ -234,7 +241,7 @@ static PX_FORCE_INLINE void appendContactRow(const PxVec3& direction, const PxVe
 	row.freeVelocity = freeSpeed - initialSpeed + settings.timestep *
 		(damping * (initialSpeed - targetSpeed) + stiffness * impedance * positionError);
 	row.regularization = regularization;
-	problem.finishScalarContact(0.0, upperImpulse);
+	problem.finishScalarContact(0.0, upperImpulse, rowNonzeroCount(row));
 }
 
 static PX_FORCE_INLINE void appendEdgeRow(const anvil::Vec6* normal, const anvil::Vec6* tangent, double scale, PxI32 bodyIndex0, PxI32 bodyIndex1, double freeVelocity, double regularization, anvil::Problem& problem)
@@ -242,8 +249,9 @@ static PX_FORCE_INLINE void appendEdgeRow(const anvil::Vec6* normal, const anvil
 	anvil::CompactContact& row = problem.beginScalarContact();
 	row.body[0] = bodyIndex0;
 	row.body[1] = bodyIndex1;
-	// Only an all-zero row is degenerate. Testing each entry avoids a serial sum of squares.
-	bool nonzero = false;
+	// Only an all-zero row is degenerate. Counting its entries also gives the row's
+	// refactorization work without a later pass over its Jacobian.
+	int nonzeroCount = 0;
 	for(PxU32 end = 0; end < 2; ++end)
 	{
 		if((end ? bodyIndex1 : bodyIndex0) < 0)
@@ -255,17 +263,17 @@ static PX_FORCE_INLINE void appendEdgeRow(const anvil::Vec6* normal, const anvil
 		{
 			const double value = normal[end][column] + scale * tangent[end][column];
 			row.jacobian[end][column] = value;
-			nonzero = nonzero | (value != 0.0);
+			nonzeroCount += value != 0.0;
 		}
 	}
-	if(!nonzero)
+	if(!nonzeroCount)
 	{
 		problem.cancelScalarContact();
 		return;
 	}
 	row.freeVelocity = freeVelocity;
 	row.regularization = regularization;
-	problem.finishScalarContact(0.0, anvil::MAX_IMPULSE);
+	problem.finishScalarContact(0.0, anvil::MAX_IMPULSE, nonzeroCount);
 }
 
 static bool prepareCompliantNormal(const PxContactPoint& contact, const PxVec3& normal, const PxVec3& angular0, const PxVec3& angular1, double penetration, const PxSolverBodyData& body0, const PxSolverBodyData& body1, PxI32 bodyIndex0, PxI32 bodyIndex1, const AnvilJacobianBody* jacobianBodies, const AnvilContactSettings& settings, anvil::CompactContact& row)
@@ -294,7 +302,7 @@ static void appendCompliantNormal(const PxContactPoint& contact, const PxVec3& n
 		return;
 	}
 	const double upper = hasContactImpulseLimit(contact.maxImpulse) ? contact.maxImpulse : anvil::MAX_IMPULSE;
-	problem.finishScalarContact(0.0, upper);
+	problem.finishScalarContact(0.0, upper, rowNonzeroCount(row));
 }
 
 static void appendCompliantFriction(const PxContactPoint& contact, const PxVec3& normalAngular0, const PxVec3& normalAngular1, double penetration, const PxVec3& arm0, const PxVec3& arm1, const PxSolverBodyData& body0, const PxSolverBodyData& body1, PxI32 bodyIndex0, PxI32 bodyIndex1, const AnvilJacobianBody* jacobianBodies, double friction, const AnvilContactSettings& settings, anvil::Problem& problem, PxVec3& tangent0, PxVec3& tangent1)
@@ -336,19 +344,19 @@ static void appendCompliantFriction(const PxContactPoint& contact, const PxVec3&
 	problem.addContact(block);
 }
 
-static void appendContactPoint(PxU32 firstContact, PxReal* forceDestination, PxU8* frictionState, PxReal friction, double freeNormalVelocity, double targetNormalVelocity, double freeTangentVelocity0, double freeTangentVelocity1, bool correctDilatancy, anvil::Problem& problem, AnvilContactRows& output)
+static void appendContactPoint(PxU32 firstContact, PxReal* forceDestination, bool frictionRows, PxReal friction, double freeNormalVelocity, double targetNormalVelocity, double freeTangentVelocity0, double freeTangentVelocity1, bool correctDilatancy, anvil::Problem& problem, AnvilContactRows& output)
 {
-	const AnvilContactPoint point = { firstContact, PxU32(problem.contacts.size()) - firstContact, forceDestination };
+	const AnvilContactPoint point = { firstContact, PxU32(problem.contacts.size()) - firstContact, forceDestination, frictionRows ? friction : 0.0f };
 	const PxU32 pointIndex = output.points.size();
 	output.points.pushBack(point);
-	if((frictionState || correctDilatancy) && point.contactCount)
+	if(correctDilatancy && point.contactCount)
 	{
-		const AnvilFrictionPoint frictionPoint = { pointIndex, friction, PxReal(freeNormalVelocity), PxReal(targetNormalVelocity), PxReal(freeTangentVelocity0), PxReal(freeTangentVelocity1), 0.0f, frictionState, correctDilatancy };
+		const AnvilFrictionPoint frictionPoint = { pointIndex, friction, PxReal(freeNormalVelocity), PxReal(targetNormalVelocity), PxReal(freeTangentVelocity0), PxReal(freeTangentVelocity1), 0.0f, correctDilatancy };
 		output.frictionPoints.pushBack(frictionPoint);
 	}
 }
 
-static void appendAnvilContact(const PxContactPoint& contact, PxReal restDistance, PxReal ccdMaxSeparation, const PxSolverBodyData& body0, const PxSolverBodyData& body1, PxI32 bodyIndex0, PxI32 bodyIndex1, const PxTransform& frame0, const PxTransform& frame1, const AnvilJacobianBody* jacobianBodies, double translationResponse, const AnvilContactSettings& settings, bool sliding, PxU8* frictionState, PxReal* forceDestination, anvil::Problem& problem, AnvilContactRows& output)
+static void appendAnvilContact(const PxContactPoint& contact, PxReal restDistance, PxReal ccdMaxSeparation, const PxSolverBodyData& body0, const PxSolverBodyData& body1, PxI32 bodyIndex0, PxI32 bodyIndex1, const PxTransform& frame0, const PxTransform& frame1, const AnvilJacobianBody* jacobianBodies, double translationResponse, const AnvilContactSettings& settings, bool sliding, const PxVec3& slip, PxReal* forceDestination, anvil::Problem& problem, AnvilContactRows& output)
 {
 	const PxVec3 arm0 = contact.point - frame0.p;
 	const PxVec3 arm1 = contact.point - frame1.p;
@@ -356,16 +364,17 @@ static void appendAnvilContact(const PxContactPoint& contact, PxReal restDistanc
 	const PxVec3 normalAngular1 = arm1.cross(contact.normal);
 	const double penetration = double(contact.separation) - restDistance;
 	const PxU32 firstContact = PxU32(problem.contacts.size());
-	const bool separateFrictionCoefficients = frictionState && contact.staticFriction != contact.dynamicFriction;
-	const PxReal frictionCoefficient = separateFrictionCoefficients && sliding ? contact.dynamicFriction : contact.staticFriction;
+	const PxReal frictionCoefficient = sliding ? contact.dynamicFriction : contact.staticFriction;
 	PxVec3 tangent0(0.0f), tangent1(0.0f);
 	double freeNormalVelocity = 0.0, targetNormalVelocity = 0.0;
 	double freeTangentVelocity0 = 0.0, freeTangentVelocity1 = 0.0;
 	bool correctDilatancy = false;
+	bool compliantFriction = false;
 	if(contact.restitution < 0.0f)
 	{
 		if(!(contact.materialFlags & PxMaterialFlag::eDISABLE_FRICTION) && frictionCoefficient > 0.0f)
 		{
+			compliantFriction = true;
 			appendCompliantFriction(contact, normalAngular0, normalAngular1, penetration, arm0, arm1, body0, body1, bodyIndex0, bodyIndex1, jacobianBodies, frictionCoefficient, settings, problem, tangent0, tangent1);
 			const PxVec3 freePointVelocity = body0.linearVelocity + body0.angularVelocity.cross(arm0) - body1.linearVelocity - body1.angularVelocity.cross(arm1) - contact.targetVel;
 			freeTangentVelocity0 = dotAnvilContact(freePointVelocity, tangent0);
@@ -421,17 +430,18 @@ static void appendAnvilContact(const PxContactPoint& contact, PxReal restDistanc
 				const double tangentTarget = dotAnvilContact(contact.targetVel, tangents[tangent]);
 				const double tangentInitialSpeed = dotAnvilContact(tangents[tangent], initialVelocity);
 				const double tangentFreeSpeed = dotAnvilContact(tangents[tangent], freePointVelocity);
+				const double tangentSlip = ANVIL_SLIP_STIFFNESS * dotAnvilContact(tangents[tangent], slip);
 				for(PxU32 sign = 0; sign < 2; ++sign)
 				{
 					const double scale = sign ? -mu : mu;
 					const double initialSpeed = initialNormalSpeed + scale * tangentInitialSpeed;
 					const double target = normalTarget + scale * tangentTarget;
 					const double freeVelocity = freeNormalVelocity + scale * tangentFreeSpeed - initialSpeed + settings.timestep *
-						(damping * (initialSpeed - target) + stiffness * impedance * penetration);
+						(damping * (initialSpeed - target) + stiffness * impedance * (penetration + scale * tangentSlip));
 					appendEdgeRow(normalJacobian, tangentJacobian, scale, bodyIndex0, bodyIndex1, freeVelocity, edgeRegularization, problem);
 				}
 			}
-			appendContactPoint(firstContact, forceDestination, separateFrictionCoefficients ? frictionState : NULL, frictionCoefficient, freeNormalVelocity, targetNormalVelocity, freeTangentVelocity0, freeTangentVelocity1, correctDilatancy, problem, output);
+			appendContactPoint(firstContact, forceDestination, true, frictionCoefficient, freeNormalVelocity, targetNormalVelocity, freeTangentVelocity0, freeTangentVelocity1, correctDilatancy, problem, output);
 			return;
 		}
 		const double response = translationResponse > 0.0 ? translationResponse : 1.0;
@@ -439,7 +449,7 @@ static void appendAnvilContact(const PxContactPoint& contact, PxReal restDistanc
 		const double upper = hasContactImpulseLimit(contact.maxImpulse) ? contact.maxImpulse : anvil::MAX_IMPULSE;
 		appendContactRow(contact.normal, normalAngular0, normalAngular1, initialNormalSpeed, dotAnvilContact(contact.normal, freePointVelocity), normalTarget, penetration, stiffness, damping, impedance, regularization, bodyIndex0, bodyIndex1, jacobianBodies, settings, problem, upper);
 	}
-	appendContactPoint(firstContact, forceDestination, separateFrictionCoefficients ? frictionState : NULL, frictionCoefficient, freeNormalVelocity, targetNormalVelocity, freeTangentVelocity0, freeTangentVelocity1, correctDilatancy, problem, output);
+	appendContactPoint(firstContact, forceDestination, compliantFriction, frictionCoefficient, freeNormalVelocity, targetNormalVelocity, freeTangentVelocity0, freeTangentVelocity1, correctDilatancy, problem, output);
 }
 
 void prepareAnvilContacts(PxsContactManager& manager, PxsContactManagerOutput& contactOutput, const PxSolverBodyData& body0, const PxSolverBodyData& body1, PxI32 bodyIndex0, PxI32 bodyIndex1, const AnvilContactSettings& settings, ThreadContext& threadContext, anvil::Problem& problem, AnvilContactRows& output)
@@ -450,29 +460,74 @@ void prepareAnvilContacts(PxsContactManager& manager, PxsContactManagerOutput& c
 		PxMemZero(contactOutput.contactForces, sizeof(PxReal) * contactOutput.nbContacts);
 	}
 	PX_ASSERT(unit.getDominance0() && unit.getDominance1());
-	const bool sliding = unit.mFrictionPatchCount == ANVIL_FRICTION_STATE_MARKER && unit.mFrictionDataPtr && *unit.mFrictionDataPtr != 0;
+	const AnvilFrictionState* previous = unit.mFrictionPatchCount == ANVIL_FRICTION_STATE_MARKER ? reinterpret_cast<const AnvilFrictionState*>(unit.mFrictionDataPtr) : NULL;
+	const bool sliding = previous && previous->twist == ANVIL_SLIDING_TWIST;
 	PxContactBuffer& buffer = threadContext.mContactBuffer;
 	PxU16 originalIndices[PxContactBuffer::MAX_CONTACTS];
-	bool separateFrictionCoefficients;
-	extractAnvilContacts(contactOutput, buffer, originalIndices, PxMin(body0.maxContactImpulse, body1.maxContactImpulse), separateFrictionCoefficients);
+	extractAnvilContacts(contactOutput, buffer, originalIndices, PxMin(body0.maxContactImpulse, body1.maxContactImpulse));
 	if(buffer.count == 0)
 	{
 		unit.mFrictionDataPtr = NULL;
 		unit.mFrictionPatchCount = 0;
 		return;
 	}
-	PxU8* frictionState = separateFrictionCoefficients ? threadContext.mFrictionPatchStreamPair.reserve<PxU8>(sizeof(PxU8)) : NULL;
-	if(frictionState)
+	// The stream packs records without padding; this is its only record, a multiple of 4 bytes.
+	PX_COMPILE_TIME_ASSERT((sizeof(AnvilFrictionState) & 3) == 0);
+	AnvilFrictionState* frictionState = threadContext.mFrictionPatchStreamPair.reserve<AnvilFrictionState>(sizeof(AnvilFrictionState));
+	if(frictionState == reinterpret_cast<AnvilFrictionState*>(-1))
 	{
-		*frictionState = 0;
+		frictionState = NULL;
 	}
-	unit.mFrictionDataPtr = frictionState;
+	unit.mFrictionDataPtr = reinterpret_cast<PxU8*>(frictionState);
 	unit.mFrictionPatchCount = frictionState ? ANVIL_FRICTION_STATE_MARKER : 0;
 
 	const PxTransform& frame0 = unit.mRigidCore0->body2World;
 	const PxTransform identity(PxIdentity);
 	const PxTransform& frame1 = unit.mRigidCore1 ? unit.mRigidCore1->body2World : identity;
+	const PxU32 contactCount = buffer.count;
+	// A sticking pair keeps the slip and twist accumulated up to the last step, which writeback
+	// extended by that step's motion at the contact centre, in the plane of the current normal.
 	AnvilContactPair pair;
+	pair.state = frictionState;
+	PxVec3 slip(0.0f), centre(0.0f);
+	PxReal twist = 0.0f;
+	const PxVec3& normal = buffer.contacts[0].normal;
+	if(frictionState)
+	{
+		for(PxU32 i = 0; i < contactCount; ++i)
+		{
+			centre += buffer.contacts[i].point;
+		}
+		centre *= 1.0f / PxReal(contactCount);
+		pair.body[0] = bodyIndex0;
+		pair.body[1] = bodyIndex1;
+		pair.arm[0] = centre - frame0.p;
+		pair.arm[1] = centre - frame1.p;
+		pair.normal = normal;
+		pair.freeSlipVelocity = body0.linearVelocity + body0.angularVelocity.cross(pair.arm[0]) - body1.linearVelocity - body1.angularVelocity.cross(pair.arm[1]) - buffer.contacts[0].targetVel;
+		pair.freeTwistVelocity = (body0.angularVelocity - body1.angularVelocity).dot(normal);
+		if(previous && !sliding)
+		{
+			slip = PxVec3(previous->slip[0], previous->slip[1], previous->slip[2]);
+			slip -= normal * normal.dot(slip);
+			twist = previous->twist;
+			PxReal radius = 0.0f;
+			for(PxU32 i = 0; i < contactCount; ++i)
+			{
+				radius = PxMax(radius, (buffer.contacts[i].point - centre).magnitudeSquared());
+			}
+			const PxReal limit = settings.slipLimit;
+			if(slip.magnitudeSquared() > limit * limit || twist * twist * radius > limit * limit)
+			{
+				slip = PxVec3(0.0f);
+				twist = 0.0f;
+			}
+		}
+		frictionState->slip[0] = slip.x;
+		frictionState->slip[1] = slip.y;
+		frictionState->slip[2] = slip.z;
+		frictionState->twist = twist;
+	}
 	pair.firstPoint = output.points.size();
 	pair.reportThreshold = (unit.mFlags & PxcNpWorkUnitFlag::eFORCE_THRESHOLD) && (body0.reportThreshold < PX_MAX_F32 || body1.reportThreshold < PX_MAX_F32);
 	pair.threshold.shapeInteraction = reinterpret_cast<Sc::ShapeInteraction*>(manager.getShapeInteraction());
@@ -490,10 +545,11 @@ void prepareAnvilContacts(PxsContactManager& manager, PxsContactManagerOutput& c
 	AnvilJacobianBody jacobianBodies[2];
 	prepareJacobianBody(jacobianBodies[0], body0, bodyIndex0, rootInverseMass0, 1.0, settings.bodyLockFlags);
 	prepareJacobianBody(jacobianBodies[1], body1, bodyIndex1, rootInverseMass1, -1.0, settings.bodyLockFlags);
-	const PxU32 contactCount = buffer.count;
 	for(PxU32 i = 0; i < contactCount; ++i)
 	{
-		appendAnvilContact(buffer.contacts[i], unit.mRestDistance, ccdMaxSeparation, body0, body1, bodyIndex0, bodyIndex1, frame0, frame1, jacobianBodies, translationResponse, settings, sliding, frictionState, contactOutput.contactForces ? contactOutput.contactForces + originalIndices[i] : NULL, problem, output);
+		// Each point's slip adds the twist's displacement about the centre.
+		const PxVec3 pointSlip = twist != 0.0f ? slip + normal.cross(buffer.contacts[i].point - centre) * twist : slip;
+		appendAnvilContact(buffer.contacts[i], unit.mRestDistance, ccdMaxSeparation, body0, body1, bodyIndex0, bodyIndex1, frame0, frame1, jacobianBodies, translationResponse, settings, sliding, pointSlip, contactOutput.contactForces ? contactOutput.contactForces + originalIndices[i] : NULL, problem, output);
 	}
 	pair.pointCount = output.points.size() - pair.firstPoint;
 	output.pairs.pushBack(pair);
@@ -501,14 +557,24 @@ void prepareAnvilContacts(PxsContactManager& manager, PxsContactManagerOutput& c
 
 static double normalImpulse(const AnvilContactPoint& point, const anvil::Problem& problem, const anvil::Result& result)
 {
-	double impulse = 0.0;
-	const PxU32 contactCount = point.contactCount;
-	for(PxU32 i = 0; i < contactCount; ++i)
+	// A point is one three-row block, whose last row is the normal, or consecutive scalar
+	// rows whose unit normal components sum to the normal impulse.
+	if(!point.contactCount)
 	{
-		const anvil::CompactContact& contact = problem.contacts[point.firstContact + i];
-		impulse += result.impulse[contact.row + (contact.rowCount() == 3 ? 2 : 0)];
+		return 0.0;
 	}
-	return impulse;
+	const anvil::CompactContact& contact = problem.contacts[point.firstContact];
+	if(contact.rowCount() == 3)
+	{
+		return result.impulse[contact.row + 2];
+	}
+	const double* impulse = result.impulse.data() + contact.row;
+	double sum = 0.0;
+	for(PxU32 i = 0; i < point.contactCount; ++i)
+	{
+		sum += impulse[i];
+	}
+	return sum;
 }
 
 static double contactVelocityCorrection(const anvil::CompactContact& contact, PxU32 axis, const anvil::Problem& problem, const anvil::Result& result)
@@ -603,9 +669,13 @@ struct AnvilPointFriction
 
 // A point's friction is saturated when it reaches the cone limit. Soft friction rows let a
 // holding contact creep in proportion to its load, so slip speed cannot separate the cases.
-static AnvilPointFriction::Enum pointFriction(const AnvilFrictionPoint& frictionPoint, const AnvilContactRows& rows, const anvil::Problem& problem, const anvil::Result& result)
+// A point without friction rows carries no friction load.
+static AnvilPointFriction::Enum pointFriction(const AnvilContactPoint& point, const anvil::Problem& problem, const anvil::Result& result)
 {
-	const AnvilContactPoint& point = rows.points[frictionPoint.pointIndex];
+	if(point.friction == 0.0f || point.contactCount == 0)
+	{
+		return AnvilPointFriction::eUNLOADED;
+	}
 	const anvil::CompactContact& contact = problem.contacts[point.firstContact];
 	if(point.contactCount == 1 && contact.rowCount() == 3)
 	{
@@ -615,57 +685,82 @@ static AnvilPointFriction::Enum pointFriction(const AnvilFrictionPoint& friction
 		{
 			return AnvilPointFriction::eUNLOADED;
 		}
-		const double limit = double(frictionPoint.friction) * normal * (1.0 - 1.0e-9);
+		const double limit = double(point.friction) * normal * (1.0 - 1.0e-9);
 		return std::abs(result.impulse[contact.row]) >= limit || std::abs(result.impulse[contact.row + 1]) >= limit ?
 			AnvilPointFriction::eSATURATED : AnvilPointFriction::eHOLDING;
 	}
-	if(point.contactCount == 4 && frictionPoint.friction > 0.0f)
+	PX_ASSERT(point.contactCount == 4);
+	// Edges n + mu t0, n - mu t0, n + mu t1, n - mu t1 give friction mu (e0 - e1, e2 - e3)
+	// and normal e0 + e1 + e2 + e3. |f0| + |f1| reaches mu N exactly when one edge of
+	// each opposing pair is inactive; inactive rows have exactly zero impulse. The four
+	// scalar edges take consecutive rows.
+	const double* edge = result.impulse.data() + contact.row;
+	if(edge[0] + edge[1] + edge[2] + edge[3] <= 0.0)
 	{
-		// Edges n + mu t0, n - mu t0, n + mu t1, n - mu t1 give friction mu (e0 - e1, e2 - e3)
-		// and normal e0 + e1 + e2 + e3. |f0| + |f1| reaches mu N exactly when one edge of
-		// each opposing pair is inactive; inactive rows have exactly zero impulse.
-		double edge[4];
-		for(PxU32 i = 0; i < 4; ++i)
-		{
-			edge[i] = result.impulse[problem.contacts[point.firstContact + i].row];
-		}
-		if(edge[0] + edge[1] + edge[2] + edge[3] <= 0.0)
-		{
-			return AnvilPointFriction::eUNLOADED;
-		}
-		return PxMin(edge[0], edge[1]) == 0.0 && PxMin(edge[2], edge[3]) == 0.0 ? AnvilPointFriction::eSATURATED : AnvilPointFriction::eHOLDING;
+		return AnvilPointFriction::eUNLOADED;
 	}
-	return frictionPoint.friction == 0.0f ? AnvilPointFriction::eSATURATED : AnvilPointFriction::eHOLDING;
+	return PxMin(edge[0], edge[1]) == 0.0 && PxMin(edge[2], edge[3]) == 0.0 ? AnvilPointFriction::eSATURATED : AnvilPointFriction::eHOLDING;
 }
 
-void writebackAnvilContacts(const AnvilContactRows& rows, const anvil::Problem& problem, const anvil::Result& result, DynamicsContext& context)
+void writebackAnvilContacts(const AnvilContactRows& rows, const anvil::Problem& problem, const anvil::Result& result, const PxSolverBody* bodies, const PxSolverBodyData* bodyData, DynamicsContext& context)
 {
-	// A pair's points share one friction state. A rigid contact slides only when every loaded
-	// point is saturated; one saturated corner does not move a body the others still hold.
-	const PxU32 frictionPointCount = rows.frictionPoints.size();
-	for(PxU32 first = 0; first < frictionPointCount;)
+	// A sticking pair's slip grows by the step's tangential motion at the contact centre: the
+	// free relative velocity plus the solve's corrections, as body integration applies them.
+	// Slip relaxes over ANVIL_SLIP_RELAXATION_TIME. A sustained load keeps renewing the slip that
+	// holds it, but slip left by a transient would otherwise lock tangential forces into a stack,
+	// which other contacts then balance near their friction limits.
+	const PxReal timestep = context.getDt();
+	const PxReal retention = PxMax(0.0f, 1.0f - timestep / ANVIL_SLIP_RELAXATION_TIME);
+	const PxU32 pairCount = rows.pairs.size();
+	for(PxU32 i = 0; i < pairCount; ++i)
 	{
-		PxU8* state = rows.frictionPoints[first].state;
-		PxU32 end = first + 1;
-		while(end < frictionPointCount && rows.frictionPoints[end].state == state)
+		const AnvilContactPair& pair = rows.pairs[i];
+		AnvilFrictionState* state = pair.state;
+		if(!state || state->twist == ANVIL_SLIDING_TWIST)
 		{
-			++end;
+			continue;
 		}
-		if(state && *state == 0)
+		// A rigid contact slides only when every loaded point is saturated; one saturated corner
+		// does not move a body the others still hold.
+		bool loaded = false, saturated = true;
+		const PxU32 lastPoint = pair.firstPoint + pair.pointCount;
+		for(PxU32 j = pair.firstPoint; j < lastPoint && saturated; ++j)
 		{
-			bool loaded = false, saturated = true;
-			for(PxU32 i = first; i < end && saturated; ++i)
-			{
-				const AnvilPointFriction::Enum friction = pointFriction(rows.frictionPoints[i], rows, problem, result);
-				loaded = loaded || friction != AnvilPointFriction::eUNLOADED;
-				saturated = friction != AnvilPointFriction::eHOLDING;
-			}
-			if(loaded && saturated)
-			{
-				*state = 1;
-			}
+			const AnvilPointFriction::Enum friction = pointFriction(rows.points[j], problem, result);
+			loaded = loaded || friction != AnvilPointFriction::eUNLOADED;
+			saturated = friction != AnvilPointFriction::eHOLDING;
 		}
-		first = end;
+		if(!loaded)
+		{
+			// Friction that carries no load holds no slip.
+			state->slip[0] = state->slip[1] = state->slip[2] = 0.0f;
+			state->twist = 0.0f;
+			continue;
+		}
+		if(saturated)
+		{
+			state->twist = ANVIL_SLIDING_TWIST;
+			continue;
+		}
+		PxVec3 velocity = pair.freeSlipVelocity;
+		PxReal twistVelocity = pair.freeTwistVelocity;
+		for(PxU32 end = 0; end < 2; ++end)
+		{
+			const PxI32 body = pair.body[end];
+			if(body < 0)
+			{
+				continue;
+			}
+			const PxVec3 angular = bodyData[body].sqrtInvInertia * bodies[body].angularState;
+			const PxVec3 linear = bodies[body].linearVelocity + angular.cross(pair.arm[end]);
+			velocity += end ? -linear : linear;
+			twistVelocity += end ? -angular.dot(pair.normal) : angular.dot(pair.normal);
+		}
+		velocity -= pair.normal * pair.normal.dot(velocity);
+		state->slip[0] = state->slip[0] * retention + velocity.x * timestep;
+		state->slip[1] = state->slip[1] * retention + velocity.y * timestep;
+		state->slip[2] = state->slip[2] * retention + velocity.z * timestep;
+		state->twist = state->twist * retention + twistVelocity * timestep;
 	}
 	const PxU32 pointCount = rows.points.size();
 	for(PxU32 i = 0; i < pointCount; ++i)
@@ -676,7 +771,6 @@ void writebackAnvilContacts(const AnvilContactRows& rows, const anvil::Problem& 
 			*point.destination = PxReal(normalImpulse(point, problem, result));
 		}
 	}
-	const PxU32 pairCount = rows.pairs.size();
 	for(PxU32 i = 0; i < pairCount; ++i)
 	{
 		const AnvilContactPair& pair = rows.pairs[i];
