@@ -78,6 +78,22 @@ ANVIL_FORCE_INLINE Double2 negativeMultiplyAdd(Double2 left, Double2 right, Doub
 ANVIL_FORCE_INLINE Double2 multiplyAdd(Double2 left, Double2 right, Double2 addend) { return wasm_f64x2_add(wasm_f64x2_mul(left, right), addend); }
 ANVIL_FORCE_INLINE Double2 negativeMultiplyAdd(Double2 left, Double2 right, Double2 addend) { return wasm_f64x2_sub(addend, wasm_f64x2_mul(left, right)); }
 #endif
+typedef v128_t Float4;
+ANVIL_FORCE_INLINE Float4 loadFloat(const float* values) { return wasm_v128_load(values); }
+ANVIL_FORCE_INLINE void storeFloat(float* values, Float4 value) { wasm_v128_store(values, value); }
+ANVIL_FORCE_INLINE Float4 splatFloat(float value) { return wasm_f32x4_splat(value); }
+ANVIL_FORCE_INLINE Float4 multiplyFloat(Float4 left, Float4 right) { return wasm_f32x4_mul(left, right); }
+#if defined(__wasm_relaxed_simd__)
+ANVIL_FORCE_INLINE Float4 negativeMultiplyAddFloat(Float4 left, Float4 right, Float4 addend) { return wasm_f32x4_relaxed_nmadd(left, right, addend); }
+#else
+ANVIL_FORCE_INLINE Float4 negativeMultiplyAddFloat(Float4 left, Float4 right, Float4 addend) { return wasm_f32x4_sub(addend, wasm_f32x4_mul(left, right)); }
+#endif
+// Lanes 0-1 and 2-3 converted to doubles.
+ANVIL_FORCE_INLINE Double2 promoteLow(Float4 value) { return wasm_f64x2_promote_low_f32x4(value); }
+ANVIL_FORCE_INLINE Double2 promoteHigh(Float4 value) { return wasm_f64x2_promote_low_f32x4(wasm_i32x4_shuffle(value, value, 2, 3, 2, 3)); }
+// Two doubles as the low floats of a vector whose high floats are zero, and four doubles as floats.
+ANVIL_FORCE_INLINE Float4 demoteLow(Double2 value) { return wasm_f32x4_demote_f64x2_zero(value); }
+ANVIL_FORCE_INLINE Float4 demote(Double2 low, Double2 high) { return wasm_i32x4_shuffle(demoteLow(low), demoteLow(high), 0, 1, 4, 5); }
 #else
 typedef __m128d Double2;
 ANVIL_FORCE_INLINE Double2 load(const double* values) { return _mm_loadu_pd(values); }
@@ -105,6 +121,16 @@ ANVIL_FORCE_INLINE double low(Double2 value) { return _mm_cvtsd_f64(value); }
 ANVIL_FORCE_INLINE double high(Double2 value) { return _mm_cvtsd_f64(_mm_unpackhi_pd(value, value)); }
 ANVIL_FORCE_INLINE Double2 multiplyAdd(Double2 left, Double2 right, Double2 addend) { return _mm_add_pd(_mm_mul_pd(left, right), addend); }
 ANVIL_FORCE_INLINE Double2 negativeMultiplyAdd(Double2 left, Double2 right, Double2 addend) { return _mm_sub_pd(addend, _mm_mul_pd(left, right)); }
+typedef __m128 Float4;
+ANVIL_FORCE_INLINE Float4 loadFloat(const float* values) { return _mm_loadu_ps(values); }
+ANVIL_FORCE_INLINE void storeFloat(float* values, Float4 value) { _mm_storeu_ps(values, value); }
+ANVIL_FORCE_INLINE Float4 splatFloat(float value) { return _mm_set1_ps(value); }
+ANVIL_FORCE_INLINE Float4 multiplyFloat(Float4 left, Float4 right) { return _mm_mul_ps(left, right); }
+ANVIL_FORCE_INLINE Float4 negativeMultiplyAddFloat(Float4 left, Float4 right, Float4 addend) { return _mm_sub_ps(addend, _mm_mul_ps(left, right)); }
+ANVIL_FORCE_INLINE Double2 promoteLow(Float4 value) { return _mm_cvtps_pd(value); }
+ANVIL_FORCE_INLINE Double2 promoteHigh(Float4 value) { return _mm_cvtps_pd(_mm_movehl_ps(value, value)); }
+ANVIL_FORCE_INLINE Float4 demoteLow(Double2 value) { return _mm_cvtpd_ps(value); }
+ANVIL_FORCE_INLINE Float4 demote(Double2 low, Double2 high) { return _mm_movelh_ps(_mm_cvtpd_ps(low), _mm_cvtpd_ps(high)); }
 #endif
 ANVIL_FORCE_INLINE double sum(Double2 value) { return low(value) + high(value); }
 }
@@ -452,6 +478,230 @@ ANVIL_FORCE_INLINE void subtractLowerOuterProduct6(double* destination, const do
 			destination[6 * column + row] -= product;
 		}
 	}
+#endif
+}
+
+// Single-precision 6x6 blocks store each column in eight floats. Rows 6 and 7 are zero
+// padding, so a column is one AVX register or two 128-bit vectors, and the padding stays
+// zero through every kernel below.
+
+// destination -= left * right^T.
+ANVIL_FORCE_INLINE void subtractProductFloat6(float* ANVIL_RESTRICT destination, const float* ANVIL_RESTRICT left, const float* ANVIL_RESTRICT right)
+{
+#if defined(ANVIL_AVX2_FMA)
+	__m256 column0 = _mm256_loadu_ps(destination);
+	__m256 column1 = _mm256_loadu_ps(destination + 8);
+	__m256 column2 = _mm256_loadu_ps(destination + 16);
+	__m256 column3 = _mm256_loadu_ps(destination + 24);
+	__m256 column4 = _mm256_loadu_ps(destination + 32);
+	__m256 column5 = _mm256_loadu_ps(destination + 40);
+	for(int inner = 0; inner < 6; ++inner)
+	{
+		const __m256 source = _mm256_loadu_ps(left + 8 * inner);
+		const float* scale = right + 8 * inner;
+		column0 = _mm256_fnmadd_ps(_mm256_set1_ps(scale[0]), source, column0);
+		column1 = _mm256_fnmadd_ps(_mm256_set1_ps(scale[1]), source, column1);
+		column2 = _mm256_fnmadd_ps(_mm256_set1_ps(scale[2]), source, column2);
+		column3 = _mm256_fnmadd_ps(_mm256_set1_ps(scale[3]), source, column3);
+		column4 = _mm256_fnmadd_ps(_mm256_set1_ps(scale[4]), source, column4);
+		column5 = _mm256_fnmadd_ps(_mm256_set1_ps(scale[5]), source, column5);
+	}
+	_mm256_storeu_ps(destination, column0);
+	_mm256_storeu_ps(destination + 8, column1);
+	_mm256_storeu_ps(destination + 16, column2);
+	_mm256_storeu_ps(destination + 24, column3);
+	_mm256_storeu_ps(destination + 32, column4);
+	_mm256_storeu_ps(destination + 40, column5);
+#elif defined(ANVIL_SIMD128)
+	// Twelve accumulators hold the whole result, so each left column is loaded once.
+	simd::Float4 low0 = simd::loadFloat(destination), high0 = simd::loadFloat(destination + 4);
+	simd::Float4 low1 = simd::loadFloat(destination + 8), high1 = simd::loadFloat(destination + 12);
+	simd::Float4 low2 = simd::loadFloat(destination + 16), high2 = simd::loadFloat(destination + 20);
+	simd::Float4 low3 = simd::loadFloat(destination + 24), high3 = simd::loadFloat(destination + 28);
+	simd::Float4 low4 = simd::loadFloat(destination + 32), high4 = simd::loadFloat(destination + 36);
+	simd::Float4 low5 = simd::loadFloat(destination + 40), high5 = simd::loadFloat(destination + 44);
+	for(int inner = 0; inner < 6; ++inner)
+	{
+		const simd::Float4 sourceLow = simd::loadFloat(left + 8 * inner), sourceHigh = simd::loadFloat(left + 8 * inner + 4);
+		const float* scale = right + 8 * inner;
+		simd::Float4 multiplier = simd::splatFloat(scale[0]);
+		low0 = simd::negativeMultiplyAddFloat(multiplier, sourceLow, low0);
+		high0 = simd::negativeMultiplyAddFloat(multiplier, sourceHigh, high0);
+		multiplier = simd::splatFloat(scale[1]);
+		low1 = simd::negativeMultiplyAddFloat(multiplier, sourceLow, low1);
+		high1 = simd::negativeMultiplyAddFloat(multiplier, sourceHigh, high1);
+		multiplier = simd::splatFloat(scale[2]);
+		low2 = simd::negativeMultiplyAddFloat(multiplier, sourceLow, low2);
+		high2 = simd::negativeMultiplyAddFloat(multiplier, sourceHigh, high2);
+		multiplier = simd::splatFloat(scale[3]);
+		low3 = simd::negativeMultiplyAddFloat(multiplier, sourceLow, low3);
+		high3 = simd::negativeMultiplyAddFloat(multiplier, sourceHigh, high3);
+		multiplier = simd::splatFloat(scale[4]);
+		low4 = simd::negativeMultiplyAddFloat(multiplier, sourceLow, low4);
+		high4 = simd::negativeMultiplyAddFloat(multiplier, sourceHigh, high4);
+		multiplier = simd::splatFloat(scale[5]);
+		low5 = simd::negativeMultiplyAddFloat(multiplier, sourceLow, low5);
+		high5 = simd::negativeMultiplyAddFloat(multiplier, sourceHigh, high5);
+	}
+	simd::storeFloat(destination, low0);
+	simd::storeFloat(destination + 4, high0);
+	simd::storeFloat(destination + 8, low1);
+	simd::storeFloat(destination + 12, high1);
+	simd::storeFloat(destination + 16, low2);
+	simd::storeFloat(destination + 20, high2);
+	simd::storeFloat(destination + 24, low3);
+	simd::storeFloat(destination + 28, high3);
+	simd::storeFloat(destination + 32, low4);
+	simd::storeFloat(destination + 36, high4);
+	simd::storeFloat(destination + 40, low5);
+	simd::storeFloat(destination + 44, high5);
+#else
+	for(int column = 0; column < 6; ++column)
+	{
+		for(int inner = 0; inner < 6; ++inner)
+		{
+			for(int row = 0; row < 6; ++row)
+			{
+				destination[8 * column + row] -= left[8 * inner + row] * right[8 * inner + column];
+			}
+		}
+	}
+#endif
+}
+
+// value = value * inverse(lower)^T for a lower triangular factor with the given reciprocal
+// diagonal, one column at a time.
+ANVIL_FORCE_INLINE void solveTransposedLowerFloat6(float* ANVIL_RESTRICT value, const float* ANVIL_RESTRICT lower, const double* ANVIL_RESTRICT inverseDiagonal)
+{
+#if defined(ANVIL_AVX2_FMA)
+	__m256 solved[6];
+	for(int column = 0; column < 6; ++column)
+	{
+		__m256 current = _mm256_loadu_ps(value + 8 * column);
+		for(int inner = 0; inner < column; ++inner)
+		{
+			current = _mm256_fnmadd_ps(_mm256_set1_ps(lower[8 * inner + column]), solved[inner], current);
+		}
+		solved[column] = _mm256_mul_ps(current, _mm256_set1_ps(float(inverseDiagonal[column])));
+		_mm256_storeu_ps(value + 8 * column, solved[column]);
+	}
+#elif defined(ANVIL_SIMD128)
+	simd::Float4 solvedLow[6], solvedHigh[6];
+	for(int column = 0; column < 6; ++column)
+	{
+		simd::Float4 low = simd::loadFloat(value + 8 * column), high = simd::loadFloat(value + 8 * column + 4);
+		for(int inner = 0; inner < column; ++inner)
+		{
+			const simd::Float4 multiplier = simd::splatFloat(lower[8 * inner + column]);
+			low = simd::negativeMultiplyAddFloat(multiplier, solvedLow[inner], low);
+			high = simd::negativeMultiplyAddFloat(multiplier, solvedHigh[inner], high);
+		}
+		const simd::Float4 inverse = simd::splatFloat(float(inverseDiagonal[column]));
+		solvedLow[column] = simd::multiplyFloat(low, inverse);
+		solvedHigh[column] = simd::multiplyFloat(high, inverse);
+		simd::storeFloat(value + 8 * column, solvedLow[column]);
+		simd::storeFloat(value + 8 * column + 4, solvedHigh[column]);
+	}
+#else
+	for(int column = 0; column < 6; ++column)
+	{
+		float* current = value + 8 * column;
+		for(int inner = 0; inner < column; ++inner)
+		{
+			const float scale = lower[8 * inner + column];
+			for(int row = 0; row < 6; ++row)
+			{
+				current[row] -= scale * value[8 * inner + row];
+			}
+		}
+		const float inverse = float(inverseDiagonal[column]);
+		for(int row = 0; row < 6; ++row)
+		{
+			current[row] *= inverse;
+		}
+	}
+#endif
+}
+
+// destination -= matrix * vector for a single-precision block, in double precision.
+ANVIL_FORCE_INLINE void subtractFloatMatrixVector6(double* ANVIL_RESTRICT destination, const float* ANVIL_RESTRICT matrix, const double* ANVIL_RESTRICT vector)
+{
+#if defined(ANVIL_AVX2_FMA)
+	__m256d first = _mm256_loadu_pd(destination);
+	__m128d second = _mm_loadu_pd(destination + 4);
+	for(int column = 0; column < 6; ++column)
+	{
+		const __m256d multiplier = _mm256_set1_pd(vector[column]);
+		first = _mm256_fnmadd_pd(multiplier, _mm256_cvtps_pd(_mm_loadu_ps(matrix + 8 * column)), first);
+		second = _mm_fnmadd_pd(_mm256_castpd256_pd128(multiplier), _mm_cvtps_pd(_mm_loadu_ps(matrix + 8 * column + 4)), second);
+	}
+	_mm256_storeu_pd(destination, first);
+	_mm_storeu_pd(destination + 4, second);
+#elif defined(ANVIL_SIMD128)
+	simd::Double2 first = simd::load(destination);
+	simd::Double2 second = simd::load(destination + 2);
+	simd::Double2 third = simd::load(destination + 4);
+	for(int column = 0; column < 6; ++column)
+	{
+		const simd::Double2 multiplier = simd::splat(vector[column]);
+		const simd::Float4 low = simd::loadFloat(matrix + 8 * column), high = simd::loadFloat(matrix + 8 * column + 4);
+		first = simd::negativeMultiplyAdd(multiplier, simd::promoteLow(low), first);
+		second = simd::negativeMultiplyAdd(multiplier, simd::promoteHigh(low), second);
+		third = simd::negativeMultiplyAdd(multiplier, simd::promoteLow(high), third);
+	}
+	simd::store(destination, first);
+	simd::store(destination + 2, second);
+	simd::store(destination + 4, third);
+#else
+	for(int column = 0; column < 6; ++column)
+	{
+		for(int row = 0; row < 6; ++row)
+		{
+			destination[row] -= double(matrix[8 * column + row]) * vector[column];
+		}
+	}
+#endif
+}
+
+// A double-precision six-row column as a padded single-precision one.
+ANVIL_FORCE_INLINE void convertColumnFloat6(float* ANVIL_RESTRICT destination, const double* ANVIL_RESTRICT source)
+{
+#if defined(ANVIL_AVX2_FMA)
+	_mm_storeu_ps(destination, _mm256_cvtpd_ps(_mm256_loadu_pd(source)));
+	_mm_storeu_ps(destination + 4, _mm_cvtpd_ps(_mm_loadu_pd(source + 4)));
+#elif defined(ANVIL_SIMD128)
+	simd::storeFloat(destination, simd::demote(simd::load(source), simd::load(source + 2)));
+	simd::storeFloat(destination + 4, simd::demoteLow(simd::load(source + 4)));
+#else
+	for(int row = 0; row < 6; ++row)
+	{
+		destination[row] = float(source[row]);
+	}
+	destination[6] = destination[7] = 0.0f;
+#endif
+}
+
+// Dot product of a single-precision block column and a double vector, in double precision.
+ANVIL_FORCE_INLINE double dotFloat6(const float* ANVIL_RESTRICT left, const double* ANVIL_RESTRICT right)
+{
+#if defined(ANVIL_AVX2_FMA)
+	const __m256d product = _mm256_mul_pd(_mm256_cvtps_pd(_mm_loadu_ps(left)), _mm256_loadu_pd(right));
+	const __m128d halves = _mm_add_pd(_mm256_castpd256_pd128(product), _mm256_extractf128_pd(product, 1));
+	const __m128d sum = _mm_add_pd(halves, _mm_unpackhi_pd(halves, halves));
+	const __m128d end = _mm_mul_pd(_mm_cvtps_pd(_mm_loadu_ps(left + 4)), _mm_loadu_pd(right + 4));
+	return _mm_cvtsd_f64(sum) + _mm_cvtsd_f64(end) + _mm_cvtsd_f64(_mm_unpackhi_pd(end, end));
+#elif defined(ANVIL_SIMD128)
+	const simd::Float4 low = simd::loadFloat(left), high = simd::loadFloat(left + 4);
+	const simd::Double2 first = simd::multiply(simd::promoteLow(low), simd::load(right));
+	const simd::Double2 second = simd::multiplyAdd(simd::promoteHigh(low), simd::load(right + 2), first);
+	return simd::sum(simd::multiplyAdd(simd::promoteLow(high), simd::load(right + 4), second));
+#else
+	double result = double(left[0]) * right[0];
+	for(int i = 1; i < 6; ++i)
+	{
+		result += double(left[i]) * right[i];
+	}
+	return result;
 #endif
 }
 

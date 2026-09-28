@@ -251,6 +251,23 @@ struct AnvilBodySeed
 	AnvilBodySeed() : body(NULL), update(0), pose(PxIdentity), linearCorrection(0.0f), angularCorrection(0.0f), inverseInertia(0.0f), inverseMass(0.0f), timestep(0.0f), lockFlags(0) {}
 };
 
+// Contact rows of one chunk of a large island's descriptors, prepared in parallel and then
+// merged in descriptor order, so the island's rows match serial preparation.
+struct AnvilPrepareChunk : public PxUserAllocated
+{
+	anvil::Problem problem;
+	AnvilContactRows contacts;
+	PxContactBuffer buffer;
+	// One friction state per descriptor, reserved before the parallel region; NULL if none.
+	AnvilFrictionState* frictionStates;
+	// The chunk's first records in the island's arrays.
+	PxU32 firstContact;
+	PxU32 firstBounds;
+	PxU32 firstBlock;
+	PxU32 firstPoint;
+	PxU32 firstPair;
+};
+
 struct AnvilIslandWorkspace : public PxUserAllocated
 {
 	anvil::Problem problem;
@@ -263,6 +280,21 @@ struct AnvilIslandWorkspace : public PxUserAllocated
 	// A batch's constraint descriptors grouped by island, and each descriptor's island.
 	PxArray<PxU32> descriptorOrder;
 	PxArray<PxU32> descriptorIslands;
+	// Retained staging for parallel row preparation.
+	PxArray<AnvilPrepareChunk*> prepareChunks;
+
+	AnvilIslandWorkspace() {}
+	~AnvilIslandWorkspace()
+	{
+		for(PxU32 i = 0; i < prepareChunks.size(); ++i)
+		{
+			PX_DELETE(prepareChunks[i]);
+		}
+	}
+
+private:
+	AnvilIslandWorkspace(const AnvilIslandWorkspace&);
+	AnvilIslandWorkspace& operator=(const AnvilIslandWorkspace&);
 };
 
 class AnvilSolver : public PxUserAllocated
@@ -509,7 +541,158 @@ static PxI32 anvilBodyIndex(PxU32 dataIndex, PxU32 firstBodyIndex, PxU32 bodyCou
 	return dataIndex > firstBodyIndex && dataIndex <= firstBodyIndex + bodyCount ? PxI32(dataIndex - firstBodyIndex - 1) : -1;
 }
 
-static void prepareAnvilRows(AnvilSolver& solver, AnvilIslandWorkspace& workspace, DynamicsContext& context, ThreadContext& threadContext, const Cm::SpatialVector* motionVelocities, PxSolverBodyData* bodyData, PxU32 firstBodyIndex, PxU32 bodyCount, const PxU32* descriptors, PxU32 descriptorCount)
+// Islands with this many bodies prepare contact rows in parallel, in chunks of this many
+// descriptors. A chunk's friction states fit one friction stream block.
+static const PxU32 ANVIL_PARALLEL_PREPARE_BODIES = 500;
+static const PxU32 ANVIL_PREPARE_CHUNK_DESCRIPTORS = 256;
+PX_COMPILE_TIME_ASSERT(ANVIL_PREPARE_CHUNK_DESCRIPTORS * sizeof(AnvilFrictionState) <= PxcNpMemBlock::SIZE);
+
+struct AnvilParallelPrepare
+{
+	AnvilIslandWorkspace* workspace;
+	DynamicsContext* context;
+	const PxSolverConstraintDesc* descriptorArray;
+	const PxU32* descriptors;
+	PxU32 descriptorCount;
+	PxSolverBodyData* bodyData;
+	PxU32 firstBodyIndex;
+	PxU32 bodyCount;
+	const AnvilContactSettings* settings;
+};
+
+static void prepareAnvilChunk(void* context, int index)
+{
+	const AnvilParallelPrepare& prepare = *static_cast<const AnvilParallelPrepare*>(context);
+	AnvilPrepareChunk& chunk = *prepare.workspace->prepareChunks[PxU32(index)];
+	chunk.problem.clearContacts();
+	chunk.contacts.clear();
+	const PxU32 first = PxU32(index) * ANVIL_PREPARE_CHUNK_DESCRIPTORS;
+	const PxU32 end = PxMin(first + ANVIL_PREPARE_CHUNK_DESCRIPTORS, prepare.descriptorCount);
+	for(PxU32 k = first; k < end; ++k)
+	{
+		const PxSolverConstraintDesc& desc = prepare.descriptorArray[prepare.descriptors ? prepare.descriptors[k] : k];
+		PX_ASSERT(desc.constraintType == DY_SC_TYPE_RB_CONTACT);
+		PxsContactManager& manager = *reinterpret_cast<PxsContactManager*>(desc.constraint);
+		PxsContactManagerOutput& output = prepare.context->mOutputIterator.getContactManagerOutput(manager.getWorkUnit().mNpIndex);
+		prepareAnvilContacts(manager, output, prepare.bodyData[desc.bodyADataIndex], prepare.bodyData[desc.bodyBDataIndex],
+			anvilBodyIndex(desc.bodyADataIndex, prepare.firstBodyIndex, prepare.bodyCount), anvilBodyIndex(desc.bodyBDataIndex, prepare.firstBodyIndex, prepare.bodyCount),
+			*prepare.settings, chunk.buffer, NULL, chunk.frictionStates ? chunk.frictionStates + (k - first) : NULL, chunk.problem, chunk.contacts);
+	}
+}
+
+// Copy a chunk's records to its offsets in the island, rebasing their indices.
+static void mergeAnvilChunk(void* context, int index)
+{
+	const AnvilParallelPrepare& prepare = *static_cast<const AnvilParallelPrepare*>(context);
+	const AnvilPrepareChunk& chunk = *prepare.workspace->prepareChunks[PxU32(index)];
+	anvil::Problem& problem = prepare.workspace->problem;
+	AnvilContactRows& rows = prepare.workspace->contacts;
+	const PxU32 contactCount = PxU32(chunk.problem.contacts.size());
+	for(PxU32 i = 0; i < contactCount; ++i)
+	{
+		anvil::CompactContact& contact = problem.contacts[chunk.firstContact + i];
+		contact = chunk.problem.contacts[i];
+		if(contact.hasScalarBounds())
+		{
+			contact.block -= int(chunk.firstBounds);
+		}
+		else if(contact.block > 0)
+		{
+			contact.block += int(chunk.firstBlock);
+		}
+		else if(contact.block < 0)
+		{
+			contact.block -= int(chunk.firstBlock);
+		}
+	}
+	for(PxU32 i = 0; i < PxU32(chunk.problem.scalarBounds.size()); ++i)
+	{
+		problem.scalarBounds[chunk.firstBounds + i] = chunk.problem.scalarBounds[i];
+	}
+	for(PxU32 i = 0; i < PxU32(chunk.problem.contactBlocks.size()); ++i)
+	{
+		problem.contactBlocks[chunk.firstBlock + i] = chunk.problem.contactBlocks[i];
+	}
+	for(PxU32 i = 0; i < chunk.contacts.points.size(); ++i)
+	{
+		AnvilContactPoint& point = rows.points[chunk.firstPoint + i];
+		point = chunk.contacts.points[i];
+		point.firstContact += chunk.firstContact;
+	}
+	for(PxU32 i = 0; i < chunk.contacts.pairs.size(); ++i)
+	{
+		AnvilContactPair& pair = rows.pairs[chunk.firstPair + i];
+		pair = chunk.contacts.pairs[i];
+		pair.firstPoint += chunk.firstPoint;
+	}
+}
+
+// Prepares a contact-only island's rows in parallel; false leaves them to the serial path.
+static bool prepareAnvilRowsParallel(AnvilIslandWorkspace& workspace, DynamicsContext& context, ThreadContext& threadContext, PxSolverBodyData* bodyData, PxU32 firstBodyIndex, PxU32 bodyCount,
+	const PxU32* descriptors, PxU32 descriptorCount, const AnvilContactSettings& settings, anvil::ParallelExecutor* parallelExecutor)
+{
+	if(!parallelExecutor || bodyCount < ANVIL_PARALLEL_PREPARE_BODIES || descriptorCount <= ANVIL_PREPARE_CHUNK_DESCRIPTORS)
+	{
+		return false;
+	}
+	for(PxU32 k = 0; k < descriptorCount; ++k)
+	{
+		if(threadContext.contactConstraintDescArray[descriptors ? descriptors[k] : k].constraintType != DY_SC_TYPE_RB_CONTACT)
+		{
+			return false;
+		}
+	}
+	if(parallelExecutor->acquireWorkerCount() < 2)
+	{
+		return false;
+	}
+	const PxU32 chunkCount = (descriptorCount + ANVIL_PREPARE_CHUNK_DESCRIPTORS - 1) / ANVIL_PREPARE_CHUNK_DESCRIPTORS;
+	while(workspace.prepareChunks.size() < chunkCount)
+	{
+		workspace.prepareChunks.pushBack(PX_NEW(AnvilPrepareChunk));
+	}
+	// The friction stream is not thread safe, so each chunk reserves its states here.
+	for(PxU32 i = 0; i < chunkCount; ++i)
+	{
+		const PxU32 count = PxMin(ANVIL_PREPARE_CHUNK_DESCRIPTORS, descriptorCount - i * ANVIL_PREPARE_CHUNK_DESCRIPTORS);
+		AnvilFrictionState* states = threadContext.mFrictionPatchStreamPair.reserve<AnvilFrictionState>(count * PxU32(sizeof(AnvilFrictionState)));
+		workspace.prepareChunks[i]->frictionStates = states == reinterpret_cast<AnvilFrictionState*>(-1) ? NULL : states;
+	}
+	AnvilParallelPrepare prepare = { &workspace, &context, threadContext.contactConstraintDescArray, descriptors, descriptorCount, bodyData, firstBodyIndex, bodyCount, &settings };
+	parallelExecutor->parallelFor(int(chunkCount), prepareAnvilChunk, &prepare);
+	PxU32 contacts = 0, bounds = 0, blocks = 0, points = 0, pairs = 0;
+	double reportedWork = 0.0;
+	PxU32 reportedRows = 0;
+	for(PxU32 i = 0; i < chunkCount; ++i)
+	{
+		AnvilPrepareChunk& chunk = *workspace.prepareChunks[i];
+		chunk.firstContact = contacts;
+		chunk.firstBounds = bounds;
+		chunk.firstBlock = blocks;
+		chunk.firstPoint = points;
+		chunk.firstPair = pairs;
+		contacts += PxU32(chunk.problem.contacts.size());
+		bounds += PxU32(chunk.problem.scalarBounds.size());
+		blocks += PxU32(chunk.problem.contactBlocks.size());
+		points += chunk.contacts.points.size();
+		pairs += chunk.contacts.pairs.size();
+		// Integer-valued work sums exactly in any order.
+		reportedWork += chunk.problem.reportedRebuildWork;
+		reportedRows += chunk.problem.reportedRebuildRows;
+	}
+	anvil::Problem& problem = workspace.problem;
+	problem.contacts.resize(contacts);
+	problem.scalarBounds.resize(bounds);
+	problem.contactBlocks.resize(blocks);
+	problem.reportedRebuildWork = reportedWork;
+	problem.reportedRebuildRows = reportedRows;
+	workspace.contacts.points.resize(points);
+	workspace.contacts.pairs.resize(pairs);
+	parallelExecutor->parallelFor(int(chunkCount), mergeAnvilChunk, &prepare);
+	return true;
+}
+
+static void prepareAnvilRows(AnvilSolver& solver, AnvilIslandWorkspace& workspace, DynamicsContext& context, ThreadContext& threadContext, const Cm::SpatialVector* motionVelocities, PxSolverBodyData* bodyData, PxU32 firstBodyIndex, PxU32 bodyCount, const PxU32* descriptors, PxU32 descriptorCount, anvil::ParallelExecutor* parallelExecutor)
 {
 	anvil::Problem& problem = workspace.problem;
 	problem.clearContacts();
@@ -524,6 +707,10 @@ static void prepareAnvilRows(AnvilSolver& solver, AnvilIslandWorkspace& workspac
 	contactSettings.initialVelocities = motionVelocities;
 	// Without a grouped list, the island owns all of its thread context's descriptors.
 	const PxU32 contactDescriptionCount = descriptors ? descriptorCount : threadContext.contactDescArraySize;
+	if(prepareAnvilRowsParallel(workspace, context, threadContext, bodyData, firstBodyIndex, bodyCount, descriptors, contactDescriptionCount, contactSettings, parallelExecutor))
+	{
+		return;
+	}
 	for(PxU32 k = 0; k < contactDescriptionCount; ++k)
 	{
 		const PxSolverConstraintDesc& desc = threadContext.contactConstraintDescArray[descriptors ? descriptors[k] : k];
@@ -541,7 +728,7 @@ static void prepareAnvilRows(AnvilSolver& solver, AnvilIslandWorkspace& workspac
 			PX_ASSERT(desc.constraintType == DY_SC_TYPE_RB_CONTACT);
 			PxsContactManager& manager = *reinterpret_cast<PxsContactManager*>(desc.constraint);
 			PxsContactManagerOutput& output = context.mOutputIterator.getContactManagerOutput(manager.getWorkUnit().mNpIndex);
-			prepareAnvilContacts(manager, output, body0, body1, index0, index1, contactSettings, threadContext, problem, workspace.contacts);
+			prepareAnvilContacts(manager, output, body0, body1, index0, index1, contactSettings, threadContext.mContactBuffer, &threadContext.mFrictionPatchStreamPair, NULL, problem, workspace.contacts);
 		}
 	}
 }
@@ -597,7 +784,7 @@ static bool solveAnvilRows(AnvilSolver& solver, AnvilIslandWorkspace& workspace,
 	{
 		PX_PROFILE_ZONE("Dynamics.anvilPrepare", context.getContextId());
 		prepareAnvilBodies(solver, workspace, bodyCores, nodeIndices, bodyData, bodyCount, timestep);
-		prepareAnvilRows(solver, workspace, context, threadContext, motionVelocities, allBodyData, firstBodyIndex, bodyCount, descriptors, descriptorCount);
+		prepareAnvilRows(solver, workspace, context, threadContext, motionVelocities, allBodyData, firstBodyIndex, bodyCount, descriptors, descriptorCount, parallelExecutor);
 		anvil::prepareCompactProblemFromColumnCounts(workspace.problem);
 	}
 	threadContext.mAxisConstraintCount += PxU32(workspace.problem.rowCount());

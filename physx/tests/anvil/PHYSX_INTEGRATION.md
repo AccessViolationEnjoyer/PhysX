@@ -81,12 +81,43 @@ eight workers. The Anvil island task participates in the work and waits at
 the same cooperative barriers used by PhysX's parallel PGS solver. Helpers are launched lazily on
 the first sufficiently large factorization and finish when that factorization ends. The established
 left-looking factorization remains unchanged for smaller factors; selection uses symbolic update
-work rather than body count. At most one island recruits helpers while other island tasks continue
-through the serial path. Anvil adds no OpenMP dependency, and the PGS and TGS paths are unchanged.
+work rather than body count. Both factorizations read the Hessian's body-pair blocks directly,
+without exporting and permuting a scalar matrix. At most one island recruits helpers while other
+island tasks continue through the serial path. Anvil adds no OpenMP dependency, and the PGS and TGS
+paths are unchanged.
+
+Islands of at least 500 bodies also run their other large phases on the same helpers: contact rows
+are prepared in chunks of 256 pair descriptors and merged in descriptor order (islands with joints
+keep serial preparation), and the Hessian blocks, `J v` and the gradient `J' lambda` are computed
+per row, body or block. Each body and block gathers its rows in the order serial evaluation adds
+them, so results are the same as serial evaluation. On the 1,000-box pile this took native steps
+from 17.2 to 13.4 ms and WebAssembly from 26.0 to 22.4 ms with eight workers.
+
+The block factor stores its 6x6 blocks in single precision, each column padded to eight floats,
+so one block column is one AVX register or two WebAssembly `f32x4` vectors and the block updates
+that dominate factorization process twice the values per instruction. Diagonal blocks are
+factored in double precision and then rounded, and triangular solves accumulate in double. The
+factor only sets the Newton direction: the factor of a slightly perturbed positive definite
+Hessian still gives a descent direction, and the line search and convergence tests use the
+double-precision problem, so the solution is unchanged up to the solver tolerance; rank updates
+continue on the exported double factor. Piles step 13-18% faster, native and WebAssembly, and the
+platform scene 3-5%; penetration, overlap and slip metrics are unchanged.
+
+Results do not depend on the worker count or on which island holds the helpers, so a
+WebAssembly build gives the same results on every machine. The serial factorization updates each
+block in ascending pivot order, the order of the parallel one, so both round alike, and the choice
+between refactoring and rank updates assumes eight workers for every factor large enough to use
+helpers, whatever the machine has. Parallel evaluation, assembly and row preparation keep the
+serial order. The pile benchmark's `state_hash` column hashes every pose and velocity bit; all
+benchmark scenes give identical outputs with one, three and eight workers.
 
 `PxDefaultCpuDispatcher` workers in wait-for-work mode sleep on their own wake signal. A
 submitted job wakes one sleeping worker, the one that slept most recently, instead of every
-sleeper; busy workers make no event calls. This applies to PGS and TGS scenes too.
+sleeper; busy workers make no event calls. This applies to PGS and TGS scenes too. A worker that
+announced sleep but then found a job itself passes on any wake a submitter meant for it, so no
+job waits in a queue while a worker sleeps. Without this, a parallel region's helpers, which wait
+for each other, occasionally hung for good (about once in 300,000 regions in a dispatcher stress
+test of that pattern, and once in the 1,000-box pile benchmark).
 
 Friction and normal rows are all scalar rows, so the core keeps its compact, vectorized
 row kernels for them: rows carry `[lower, upper]` impulse bounds (`[0, cap]` for normals,

@@ -68,51 +68,109 @@ static PX_FORCE_INLINE double contactSpeed(const PxSolverBodyData& body0, const 
 	return contactSpeed(body0.linearVelocity, body0.angularVelocity, body1.linearVelocity, body1.angularVelocity, direction, angular0, angular1);
 }
 
-// Jacobian inputs of one pair body, converted once for every row of the pair.
+// Jacobian coefficients of one pair body, converted once for every row of the pair. A row's
+// Jacobian is (s d, S a) for its direction d and angular direction a, with s the signed root
+// inverse mass, zero on locked axes, and S the signed root inverse inertia. The coefficients
+// are stored for the row pairs (0,1), (2,3) and (4,5):
+//   (0,1) = linear01 * (d.x, d.y)
+//   (2,3) = middleX * (d.z, a.x) + middleY * a.y + middleZ * a.z
+//   (4,5) = upperX * a.x + upperY * a.y + upperZ * a.z
+// An absent body has zero coefficients and so zero Jacobians.
 struct AnvilJacobianBody
 {
-	double inertia[3][3];
-	double linearScale;
-	double sign;
-	PxU8 locks;
-	bool present;
+	double linear01[2];
+	double middleX[2];
+	double middleY[2];
+	double middleZ[2];
+	double upperX[2];
+	double upperY[2];
+	double upperZ[2];
 };
 
 static PX_FORCE_INLINE void prepareJacobianBody(AnvilJacobianBody& result, const PxSolverBodyData& body, PxI32 bodyIndex, double rootInverseMass, double sign, const PxU8* lockFlags)
 {
-	result.present = bodyIndex >= 0;
-	result.sign = sign;
-	result.linearScale = sign * rootInverseMass;
-	result.locks = lockFlags && bodyIndex >= 0 ? lockFlags[bodyIndex] : 0;
-	const PxMat33& inertia = body.sqrtInvInertia;
+	const bool present = bodyIndex >= 0;
+	const PxU8 locks = lockFlags && present ? lockFlags[bodyIndex] : 0;
+	const double linearScale = present ? sign * rootInverseMass : 0.0;
+	const double angularSign = present ? sign : 0.0;
+	double linear[3], inertia[3][3];
+	const PxMat33& root = body.sqrtInvInertia;
 	for(PxU32 axis = 0; axis < 3; ++axis)
 	{
-		result.inertia[axis][0] = double(inertia.column0[axis]);
-		result.inertia[axis][1] = double(inertia.column1[axis]);
-		result.inertia[axis][2] = double(inertia.column2[axis]);
+		linear[axis] = locks & (1 << axis) ? 0.0 : linearScale;
+		inertia[axis][0] = angularSign * double(root.column0[axis]);
+		inertia[axis][1] = angularSign * double(root.column1[axis]);
+		inertia[axis][2] = angularSign * double(root.column2[axis]);
+	}
+	result.linear01[0] = linear[0];
+	result.linear01[1] = linear[1];
+	result.middleX[0] = linear[2];
+	result.middleX[1] = inertia[0][0];
+	result.middleY[0] = 0.0;
+	result.middleY[1] = inertia[0][1];
+	result.middleZ[0] = 0.0;
+	result.middleZ[1] = inertia[0][2];
+	for(PxU32 row = 0; row < 2; ++row)
+	{
+		result.upperX[row] = inertia[row + 1][0];
+		result.upperY[row] = inertia[row + 1][1];
+		result.upperZ[row] = inertia[row + 1][2];
 	}
 }
 
-static PX_FORCE_INLINE void contactJacobian(anvil::Vec6& jacobian, const AnvilJacobianBody& body, const PxVec3& direction, const PxVec3& angular)
+#if defined(ANVIL_SIMD128)
+// Writes one body's Jacobian and returns its nonzero entry count.
+static PX_FORCE_INLINE int contactJacobian(double* jacobian, const AnvilJacobianBody& body, anvil::simd::Double2 direction01, anvil::simd::Double2 middle, anvil::simd::Double2 angularX,
+	anvil::simd::Double2 angularY, anvil::simd::Double2 angularZ)
 {
-	if(!body.present)
+	using namespace anvil;
+	const simd::Double2 row01 = simd::multiply(simd::load(body.linear01), direction01);
+	const simd::Double2 row23 = simd::multiplyAdd(simd::load(body.middleZ), angularZ, simd::multiplyAdd(simd::load(body.middleY), angularY, simd::multiply(simd::load(body.middleX), middle)));
+	const simd::Double2 row45 = simd::multiplyAdd(simd::load(body.upperZ), angularZ, simd::multiplyAdd(simd::load(body.upperY), angularY, simd::multiply(simd::load(body.upperX), angularX)));
+	simd::store(jacobian, row01);
+	simd::store(jacobian + 2, row23);
+	simd::store(jacobian + 4, row45);
+	const simd::Double2 zero = simd::zero();
+	const int nonzero01 = simd::mask(simd::notEqual(row01, zero));
+	const int nonzero23 = simd::mask(simd::notEqual(row23, zero));
+	const int nonzero45 = simd::mask(simd::notEqual(row45, zero));
+	return (nonzero01 & 1) + (nonzero01 >> 1) + (nonzero23 & 1) + (nonzero23 >> 1) + (nonzero45 & 1) + (nonzero45 >> 1);
+}
+#endif
+
+// Writes a row's two Jacobians and returns their nonzero entry count.
+static PX_FORCE_INLINE int contactJacobians(anvil::CompactContact& row, const AnvilJacobianBody* bodies, const PxVec3& direction, const PxVec3& angular0, const PxVec3& angular1)
+{
+#if defined(ANVIL_SIMD128)
+	using namespace anvil;
+	const simd::Double2 direction01 = simd::make(direction.x, direction.y);
+	return contactJacobian(row.jacobian[0].data(), bodies[0], direction01, simd::make(direction.z, angular0.x), simd::splat(angular0.x), simd::splat(angular0.y), simd::splat(angular0.z)) +
+		contactJacobian(row.jacobian[1].data(), bodies[1], direction01, simd::make(direction.z, angular1.x), simd::splat(angular1.x), simd::splat(angular1.y), simd::splat(angular1.z));
+#else
+	const PxVec3* angular[2] = { &angular0, &angular1 };
+	int count = 0;
+	for(PxU32 end = 0; end < 2; ++end)
 	{
-		jacobian.setZero();
-		return;
+		const AnvilJacobianBody& body = bodies[end];
+		const PxVec3& a = *angular[end];
+		double* jacobian = row.jacobian[end].data();
+		jacobian[0] = body.linear01[0] * direction.x;
+		jacobian[1] = body.linear01[1] * direction.y;
+		jacobian[2] = body.middleZ[0] * a.z + (body.middleY[0] * a.y + body.middleX[0] * direction.z);
+		jacobian[3] = body.middleZ[1] * a.z + (body.middleY[1] * a.y + body.middleX[1] * a.x);
+		jacobian[4] = body.upperZ[0] * a.z + (body.upperY[0] * a.y + body.upperX[0] * a.x);
+		jacobian[5] = body.upperZ[1] * a.z + (body.upperY[1] * a.y + body.upperX[1] * a.x);
+		count += anvil::nonzeroCount6(jacobian);
 	}
-	for(PxU32 axis = 0; axis < 3; ++axis)
-	{
-		jacobian[axis] = body.locks & (1 << axis) ? 0.0 : body.linearScale * direction[axis];
-		jacobian[axis + 3] = body.sign * (body.inertia[axis][0] * angular.x + body.inertia[axis][1] * angular.y + body.inertia[axis][2] * angular.z);
-	}
+	return count;
+#endif
 }
 
 static PX_FORCE_INLINE double prepareContactJacobian(anvil::CompactContact& row, const AnvilJacobianBody* jacobianBodies, PxI32 bodyIndex0, PxI32 bodyIndex1, const PxVec3& direction, const PxVec3& angular0, const PxVec3& angular1)
 {
 	row.body[0] = bodyIndex0;
 	row.body[1] = bodyIndex1;
-	contactJacobian(row.jacobian[0], jacobianBodies[0], direction, angular0);
-	contactJacobian(row.jacobian[1], jacobianBodies[1], direction, angular1);
+	contactJacobians(row, jacobianBodies, direction, angular0, angular1);
 	return row.jacobian[0].squaredNorm() + row.jacobian[1].squaredNorm();
 }
 
@@ -235,10 +293,9 @@ static PX_FORCE_INLINE void appendContactRow(const PxVec3& direction, const PxVe
 	anvil::CompactContact& row = problem.beginScalarContact();
 	row.body[0] = bodyIndex0;
 	row.body[1] = bodyIndex1;
-	contactJacobian(row.jacobian[0], jacobianBodies[0], direction, angular0);
-	contactJacobian(row.jacobian[1], jacobianBodies[1], direction, angular1);
 	// Only an all-zero row is degenerate; its entry count is also its refactorization work.
-	const int nonzeroCount = rowNonzeroCount(row);
+	// Absent bodies have zero Jacobians, so the count covers the present ones.
+	const int nonzeroCount = contactJacobians(row, jacobianBodies, direction, angular0, angular1);
 	if(!nonzeroCount)
 	{
 		problem.cancelScalarContact();
@@ -303,9 +360,10 @@ static void appendCompliantFriction(const PxContactPoint& contact, const PxVec3&
 	{
 		const PxVec3 angular0 = arm0.cross(tangents[tangent]);
 		const PxVec3 angular1 = arm1.cross(tangents[tangent]);
-		anvil::Vec6 jacobian0, jacobian1;
-		contactJacobian(jacobian0, jacobianBodies[0], tangents[tangent], angular0);
-		contactJacobian(jacobian1, jacobianBodies[1], tangents[tangent], angular1);
+		anvil::CompactContact rows;
+		contactJacobians(rows, jacobianBodies, tangents[tangent], angular0, angular1);
+		const anvil::Vec6& jacobian0 = rows.jacobian[0];
+		const anvil::Vec6& jacobian1 = rows.jacobian[1];
 		block.jacobian[0].row(tangent) = jacobian0;
 		block.jacobian[1].row(tangent) = jacobian1;
 		block.freeVelocity[tangent] = contactSpeed(body0, body1, tangents[tangent], angular0, angular1) - dotAnvilContact(contact.targetVel, tangents[tangent]);
@@ -404,7 +462,7 @@ static void appendAnvilContact(const PxContactPoint& contact, PxReal restDistanc
 	appendContactPoint(firstContact, forceDestination, 0.0f, 0.0f, problem, output);
 }
 
-void prepareAnvilContacts(PxsContactManager& manager, PxsContactManagerOutput& contactOutput, const PxSolverBodyData& body0, const PxSolverBodyData& body1, PxI32 bodyIndex0, PxI32 bodyIndex1, const AnvilContactSettings& settings, ThreadContext& threadContext, anvil::Problem& problem, AnvilContactRows& output)
+void prepareAnvilContacts(PxsContactManager& manager, PxsContactManagerOutput& contactOutput, const PxSolverBodyData& body0, const PxSolverBodyData& body1, PxI32 bodyIndex0, PxI32 bodyIndex1, const AnvilContactSettings& settings, PxContactBuffer& buffer, FrictionPatchStreamPair* frictionStream, AnvilFrictionState* reservedState, anvil::Problem& problem, AnvilContactRows& output)
 {
 	PxcNpWorkUnit& unit = manager.getWorkUnit();
 	if(contactOutput.contactForces)
@@ -414,7 +472,6 @@ void prepareAnvilContacts(PxsContactManager& manager, PxsContactManagerOutput& c
 	PX_ASSERT(unit.getDominance0() && unit.getDominance1());
 	const AnvilFrictionState* previous = unit.mFrictionPatchCount == ANVIL_FRICTION_STATE_MARKER ? reinterpret_cast<const AnvilFrictionState*>(unit.mFrictionDataPtr) : NULL;
 	const bool sliding = previous && previous->twist == ANVIL_SLIDING_TWIST;
-	PxContactBuffer& buffer = threadContext.mContactBuffer;
 	PxU16 originalIndices[PxContactBuffer::MAX_CONTACTS];
 	extractAnvilContacts(contactOutput, buffer, originalIndices, PxMin(body0.maxContactImpulse, body1.maxContactImpulse));
 	if(buffer.count == 0)
@@ -425,7 +482,7 @@ void prepareAnvilContacts(PxsContactManager& manager, PxsContactManagerOutput& c
 	}
 	// The stream packs records without padding; this is its only record, a multiple of 4 bytes.
 	PX_COMPILE_TIME_ASSERT((sizeof(AnvilFrictionState) & 3) == 0);
-	AnvilFrictionState* frictionState = threadContext.mFrictionPatchStreamPair.reserve<AnvilFrictionState>(sizeof(AnvilFrictionState));
+	AnvilFrictionState* frictionState = frictionStream ? frictionStream->reserve<AnvilFrictionState>(sizeof(AnvilFrictionState)) : reservedState;
 	if(frictionState == reinterpret_cast<AnvilFrictionState*>(-1))
 	{
 		frictionState = NULL;

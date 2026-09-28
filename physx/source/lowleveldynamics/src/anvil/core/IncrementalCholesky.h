@@ -7,7 +7,9 @@ class IncrementalCholesky
 {
 	enum
 	{
-		MIN_METIS_BODIES = 192
+		MIN_METIS_BODIES = 192,
+		// Workers the update-or-refactor choice assumes for factors large enough to use helpers.
+		PARALLEL_FACTOR_WORKERS = 8
 	};
 
 	struct RankUpdate
@@ -38,6 +40,7 @@ public:
 			m_updateInverseCurrent = false;
 		}
 		m_profile = profile;
+		m_parallelExecutor = parallelExecutor;
 		m_factor.setParallelExecutor(parallelExecutor);
 	}
 
@@ -147,12 +150,14 @@ public:
 		// This changes only how the same target Hessian is factorized. The
 		// estimate is deterministic and depends on the sparse pattern and
 		// current changed contacts, never wall time or a scene identifier.
-		// Matrix assembly remains serial; only discount the numeric factor work.
+		// Only the numeric factor work is discounted for parallel factorization. The discount
+		// assumes PARALLEL_FACTOR_WORKERS whenever the factor is large enough to use helpers,
+		// whatever this machine has, so the choice and the rounding it implies are the same on
+		// every machine.
 		double refactorWork = m_factorWork + problem.rebuildWorkEstimate();
-		const int parallelWorkers = m_factor.parallelWorkerCount();
-		if(parallelWorkers > 1)
+		if(m_factor.parallelSized())
 		{
-			refactorWork -= m_factorWork * double(parallelWorkers - 1) / parallelWorkers;
+			refactorWork -= m_factorWork * double(PARALLEL_FACTOR_WORKERS - 1) / PARALLEL_FACTOR_WORKERS;
 		}
 		double updateWork = 0.0;
 		for(const RankUpdate& update : m_updates)
@@ -497,7 +502,7 @@ private:
 		const bool firstFactor = m_size == 0;
 		bool changedPattern = false;
 		const Clock::time_point assemblyStart = profileStart(m_profile);
-		assembleHessianBlocks(problem, weights, m_hessian);
+		assembleHessianBlocks(problem, weights, m_hessian, m_parallelExecutor);
 		// The scalar CSC Hessian is exported only for symbolic analysis and for
 		// factor paths that do not read the body-pair blocks directly.
 		const Sparse* matrix = NULL;
@@ -894,6 +899,7 @@ private:
 	int m_size;
 	bool m_profile;
 	BlockCholesky m_factor;
+	ParallelExecutor* m_parallelExecutor = NULL;
 	std::vector<BodyPair> m_bodyEdges;
 	std::vector<int> m_bodyOrder, m_permutation;
 	std::vector<idx_t> m_metisOuter, m_metisInner, m_metisInverse;

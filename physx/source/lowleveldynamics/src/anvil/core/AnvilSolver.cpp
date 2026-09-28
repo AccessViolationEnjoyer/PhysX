@@ -324,6 +324,79 @@ static ANVIL_FORCE_INLINE std::uint32_t topologyGroupEnd(const std::vector<Scala
 	return grouped ? std::uint32_t(runs[group].end) : group + 1;
 }
 
+// Problems with this many bodies evaluate their rows and assemble their Hessian in parallel.
+static const int MIN_PARALLEL_BODIES = 500;
+
+static void countedOffsets(std::vector<int>& outer)
+{
+	const std::uint32_t count = std::uint32_t(outer.size()) - 1;
+	for(std::uint32_t i = 0; i < count; ++i)
+	{
+		outer[i + 1] += outer[i];
+	}
+}
+
+// Placing entries advanced each start to the next one's; restore the starts.
+static void restoreOffsets(std::vector<int>& outer)
+{
+	for(std::uint32_t i = std::uint32_t(outer.size()) - 1; i > 0; --i)
+	{
+		outer[i] = outer[i - 1];
+	}
+	outer[0] = 0;
+}
+
+static void prepareRunIncidence(Problem& problem)
+{
+	const std::vector<ScalarContactRun>& runs = problem.scalarContactRuns;
+	if(runs.empty() || problem.bodyCount() < MIN_PARALLEL_BODIES)
+	{
+		problem.bodyRunOuter.clear();
+		return;
+	}
+	const int runCount = int(runs.size());
+	problem.bodyRunOuter.assign(problem.bodyCount() + 1, 0);
+	problem.blockRunOuter.assign(problem.hessianPairs.size() + 1, 0);
+	for(int run = 0; run < runCount; ++run)
+	{
+		const CompactContact& contact = problem.contacts[runs[run].first];
+		for(int side = 0; side < 2; ++side)
+		{
+			if(contact.body[side] >= 0)
+			{
+				++problem.bodyRunOuter[contact.body[side] + 1];
+			}
+		}
+		const int block = problem.hessianContactBlocks[runs[run].first];
+		if(block >= 0)
+		{
+			++problem.blockRunOuter[block + 1];
+		}
+	}
+	countedOffsets(problem.bodyRunOuter);
+	countedOffsets(problem.blockRunOuter);
+	problem.bodyRuns.resize(problem.bodyRunOuter.back());
+	problem.blockRuns.resize(problem.blockRunOuter.back());
+	for(int run = 0; run < runCount; ++run)
+	{
+		const CompactContact& contact = problem.contacts[runs[run].first];
+		for(int side = 0; side < 2; ++side)
+		{
+			if(contact.body[side] >= 0)
+			{
+				problem.bodyRuns[problem.bodyRunOuter[contact.body[side]]++] = 2 * run + side;
+			}
+		}
+		const int block = problem.hessianContactBlocks[runs[run].first];
+		if(block >= 0)
+		{
+			problem.blockRuns[problem.blockRunOuter[block]++] = run;
+		}
+	}
+	restoreOffsets(problem.bodyRunOuter);
+	restoreOffsets(problem.blockRunOuter);
+}
+
 static void prepareHessianTopology(Problem& problem)
 {
 	const std::uint32_t bodyCount = std::uint32_t(problem.bodyCount());
@@ -387,6 +460,7 @@ static void prepareHessianTopology(Problem& problem)
 			}
 			std::fill(problem.hessianContactBlocks.begin() + begin, problem.hessianContactBlocks.begin() + end, block);
 		}
+		prepareRunIncidence(problem);
 		return;
 	}
 
@@ -426,6 +500,7 @@ static void prepareHessianTopology(Problem& problem)
 		}
 		std::fill(problem.hessianContactBlocks.begin() + begin, problem.hessianContactBlocks.begin() + end, block);
 	}
+	prepareRunIncidence(problem);
 }
 
 template<bool CountEntries, bool BuildJacobian>
@@ -1150,9 +1225,80 @@ static void addRunLowerOuterProducts(BodyBlock& block, const CompactContact* ANV
 #endif
 }
 
+// Runs without curvature, such as untouched neighbours, add nothing.
+static bool curvedRun(const double* diagonal, int first, int end)
+{
+	bool curved = false;
+	for(int i = first; i < end; ++i)
+	{
+		curved = curved | (diagonal[i] != 0.0);
+	}
+	return curved;
+}
+
+// One block of a scalar problem's Hessian from its incident runs, added in run order as
+// the serial assembly adds them.
+static void assembleScalarBlock(const Problem& problem, const double* diagonal, HessianStorage& storage, int pair)
+{
+	BodyBlock& block = storage.blocks[pair];
+	const int first = int(problem.hessianPairs[pair] >> 32);
+	const CompactContact* contacts = problem.contacts.data();
+	if(first == int(std::uint32_t(problem.hessianPairs[pair])))
+	{
+		block.setIdentity();
+		storage.nonzero[pair] = 1;
+		for(int incidence = problem.bodyRunOuter[first]; incidence < problem.bodyRunOuter[first + 1]; ++incidence)
+		{
+			const ScalarContactRun& run = problem.scalarContactRuns[problem.bodyRuns[incidence] >> 1];
+			if(curvedRun(diagonal, run.first, run.end))
+			{
+				addRunLowerOuterProducts(block, contacts, run.first, run.end, diagonal, problem.bodyRuns[incidence] & 1);
+			}
+		}
+		return;
+	}
+	block.setZero();
+	storage.nonzero[pair] = 0;
+	for(int index = problem.blockRunOuter[pair]; index < problem.blockRunOuter[pair + 1]; ++index)
+	{
+		const ScalarContactRun& run = problem.scalarContactRuns[problem.blockRuns[index]];
+		if(curvedRun(diagonal, run.first, run.end))
+		{
+			const int low = contacts[run.first].body[0] < contacts[run.first].body[1] ? 0 : 1;
+			addRunOuterProducts(block, contacts, run.first, run.end, diagonal, 1 - low, low);
+			storage.nonzero[pair] = 1;
+		}
+	}
+}
+
+struct HessianAssembly
+{
+	const Problem* problem;
+	const double* diagonal;
+	HessianStorage* storage;
+	int chunks;
+};
+
+static void assembleScalarBlocksChunk(void* context, int index)
+{
+	HessianAssembly& assembly = *static_cast<HessianAssembly*>(context);
+	const int pairCount = int(assembly.problem->hessianPairs.size());
+	const int end = int(std::int64_t(pairCount) * (index + 1) / assembly.chunks);
+	for(int pair = int(std::int64_t(pairCount) * index / assembly.chunks); pair < end; ++pair)
+	{
+		assembleScalarBlock(*assembly.problem, assembly.diagonal, *assembly.storage, pair);
+	}
+}
+
+// Workers for parallel evaluation or assembly of a problem, or one.
+static int parallelWorkers(const Problem& problem, ParallelExecutor* parallelExecutor)
+{
+	return parallelExecutor != NULL && problem.bodyCount() >= MIN_PARALLEL_BODIES ? parallelExecutor->acquireWorkerCount() : 1;
+}
+
 // Accumulate the Hessian's 6x6 body-pair blocks. Diagonal blocks are read only
 // through their lower triangles.
-static void assembleHessianBlocks(const Problem& problem, const Curvature& weights, HessianStorage& storage)
+static void assembleHessianBlocks(const Problem& problem, const Curvature& weights, HessianStorage& storage, ParallelExecutor* parallelExecutor = NULL)
 {
 	const std::vector<std::uint64_t>& pairs = problem.hessianPairs;
 	const std::uint32_t pairCount = std::uint32_t(pairs.size());
@@ -1160,6 +1306,16 @@ static void assembleHessianBlocks(const Problem& problem, const Curvature& weigh
 	storage.blocks.resize(pairCount);
 	reserveStorage(storage.nonzero, pairCount);
 	storage.nonzero.resize(pairCount);
+	if(problem.isScalar() && !problem.bodyRunOuter.empty())
+	{
+		const int workers = parallelWorkers(problem, parallelExecutor);
+		if(workers > 1)
+		{
+			HessianAssembly assembly = { &problem, weights.diagonal.data(), &storage, 4 * workers };
+			parallelExecutor->parallelFor(assembly.chunks, assembleScalarBlocksChunk, &assembly);
+			return;
+		}
+	}
 	for(std::uint32_t pair = 0; pair < pairCount; ++pair)
 	{
 		BodyBlock& block = storage.blocks[pair];
@@ -1187,13 +1343,7 @@ static void assembleHessianBlocks(const Problem& problem, const Curvature& weigh
 			const int first = problem.scalarContactRuns[run].first, end = problem.scalarContactRuns[run].end;
 			const int a = contacts[first].body[0], b = contacts[first].body[1];
 			assert(contacts[first].row == first);
-			// Runs without curvature, such as untouched neighbours, add nothing.
-			bool curved = false;
-			for(int i = first; i < end; ++i)
-			{
-				curved = curved | (diagonal[i] != 0.0);
-			}
-			if(!curved)
+			if(!curvedRun(diagonal, first, end))
 			{
 				continue;
 			}
@@ -1812,13 +1962,10 @@ static bool evaluateImpulses(const Problem& problem, ConstVector contactVelocity
 
 // These calls use distinct solver-owned input/output buffers. The prepared
 // Jacobian is compressed CSC with strictly increasing row indices per column.
-static void multiplyJacobianScalarContacts(const Problem& problem, ConstVector vector, MutableVector product)
+static void multiplyJacobianScalarRuns(const Problem& problem, const double* ANVIL_RESTRICT input, double* ANVIL_RESTRICT output, int firstRun, int endRun)
 {
-	const double* ANVIL_RESTRICT input = vector.data();
-	double* ANVIL_RESTRICT output = product.data();
 	const CompactContact* ANVIL_RESTRICT contacts = problem.contacts.data();
-	const int runCount = int(problem.scalarContactRuns.size());
-	for(int runIndex = 0; runIndex < runCount; ++runIndex)
+	for(int runIndex = firstRun; runIndex < endRun; ++runIndex)
 	{
 		const ScalarContactRun& run = problem.scalarContactRuns[runIndex];
 		const int body0 = contacts[run.first].body[0];
@@ -1855,6 +2002,56 @@ static void multiplyJacobianScalarContacts(const Problem& problem, ConstVector v
 			}
 		}
 	}
+}
+
+struct ScalarRowEvaluation
+{
+	const Problem* problem;
+	const double* input;
+	const double* velocity;
+	double* output;
+	int chunks;
+};
+
+static void multiplyJacobianScalarChunk(void* context, int index)
+{
+	ScalarRowEvaluation& evaluation = *static_cast<ScalarRowEvaluation*>(context);
+	const int runCount = int(evaluation.problem->scalarContactRuns.size());
+	multiplyJacobianScalarRuns(*evaluation.problem, evaluation.input, evaluation.output, runCount * index / evaluation.chunks, runCount * (index + 1) / evaluation.chunks);
+}
+
+// gradient = velocity - J' impulse for the given bodies. Each body gathers its runs' rows in
+// row order, as the serial scatter adds them.
+static void evaluateGradientScalarBodies(const Problem& problem, const double* ANVIL_RESTRICT impulse, const double* ANVIL_RESTRICT velocity, double* ANVIL_RESTRICT gradient, int firstBody, int endBody)
+{
+	const CompactContact* ANVIL_RESTRICT contacts = problem.contacts.data();
+	for(int body = firstBody; body < endBody; ++body)
+	{
+		double sum[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+		for(int incidence = problem.bodyRunOuter[body]; incidence < problem.bodyRunOuter[body + 1]; ++incidence)
+		{
+			const ScalarContactRun& run = problem.scalarContactRuns[problem.bodyRuns[incidence] >> 1];
+			const int side = problem.bodyRuns[incidence] & 1;
+			for(int i = run.first; i < run.end; ++i)
+			{
+				if(impulse[i] != 0.0)
+				{
+					addScaled6(sum, contacts[i].jacobian[side].data(), impulse[i]);
+				}
+			}
+		}
+		for(int axis = 0; axis < 6; ++axis)
+		{
+			gradient[6 * body + axis] = velocity[6 * body + axis] - sum[axis];
+		}
+	}
+}
+
+static void evaluateGradientScalarChunk(void* context, int index)
+{
+	ScalarRowEvaluation& evaluation = *static_cast<ScalarRowEvaluation*>(context);
+	const int bodies = evaluation.problem->bodyCount();
+	evaluateGradientScalarBodies(*evaluation.problem, evaluation.input, evaluation.velocity, evaluation.output, bodies * index / evaluation.chunks, bodies * (index + 1) / evaluation.chunks);
 }
 
 static void multiplyJacobianCscSerial(const Problem& problem, ConstVector vector, MutableVector product)
@@ -1934,10 +2131,17 @@ static void multiplyJacobianCsc(const Problem& problem, ConstVector vector, Muta
 {
 	if(problem.isScalar())
 	{
-		multiplyJacobianScalarContacts(problem, vector, product);
+		const int workers = parallelWorkers(problem, parallelExecutor);
+		if(workers > 1)
+		{
+			ScalarRowEvaluation evaluation = { &problem, vector.data(), NULL, product.data(), 4 * workers };
+			parallelExecutor->parallelFor(evaluation.chunks, multiplyJacobianScalarChunk, &evaluation);
+			return;
+		}
+		multiplyJacobianScalarRuns(problem, vector.data(), product.data(), 0, int(problem.scalarContactRuns.size()));
 		return;
 	}
-	if(parallelExecutor != NULL && problem.bodyCount() >= 500)
+	if(parallelExecutor != NULL && problem.bodyCount() >= MIN_PARALLEL_BODIES)
 	{
 		const int workers = parallelExecutor->acquireWorkerCount();
 		if(workers > 1)
@@ -2154,10 +2358,17 @@ static void evaluatePrimalGradientCsc(const Problem& problem, ConstVector veloci
 {
 	if(problem.isScalar())
 	{
+		const int workers = problem.bodyRunOuter.empty() ? 1 : parallelWorkers(problem, parallelExecutor);
+		if(workers > 1)
+		{
+			ScalarRowEvaluation evaluation = { &problem, impulse.data(), velocity.data(), gradient.data(), 4 * workers };
+			parallelExecutor->parallelFor(evaluation.chunks, evaluateGradientScalarChunk, &evaluation);
+			return;
+		}
 		evaluateGradientScalarContacts(problem, impulse.data(), velocity.data(), gradient.data());
 		return;
 	}
-	if(parallelExecutor != NULL && problem.bodyCount() >= 500)
+	if(parallelExecutor != NULL && problem.bodyCount() >= MIN_PARALLEL_BODIES)
 	{
 		const int workers = parallelExecutor->acquireWorkerCount();
 		if(workers > 1)

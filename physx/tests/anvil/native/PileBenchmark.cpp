@@ -67,7 +67,7 @@ int main(int argc, char** argv)
 	NativeSolverProfiler profiler;
 	if(solver == PxSolverType::eANVIL)
 		PxSetProfilerCallback(&profiler);
-	std::fprintf(output, "step,step_ms,island_wall_ms,solve_wall_ms,prepare_cpu_ms,solve_cpu_ms,islands,rows,iterations,iteration_limits,contact_pairs,minimum_y,maximum_speed\n");
+	std::fprintf(output, "step,step_ms,island_wall_ms,solve_wall_ms,prepare_cpu_ms,solve_cpu_ms,islands,rows,iterations,iteration_limits,contact_pairs,minimum_y,maximum_speed,state_hash\n");
 	printf("%s pile: %dx%dx%d, %zu bodies, dt=0.01, workers=%u, regularization=%.9g, normal offsets\n",
 		solver == PxSolverType::eANVIL ? "Anvil" : "PGS", width, depth, layers, bodies.size(), workers, double(desc.anvilRegularization));
 	bool finite = true;
@@ -79,19 +79,29 @@ int main(int argc, char** argv)
 		scene->fetchResults(true);
 		const double stepMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 		double minimumY = 1e30, maximumSpeed = 0.0;
+		// FNV-1a over every pose and velocity bit, for exact determinism checks.
+		unsigned long long hash = 14695981039346656037ull;
 		for(size_t i = 0; i < bodies.size(); ++i)
 		{
-			finite = finite && bodies[i]->getGlobalPose().isFinite() && bodies[i]->getLinearVelocity().isFinite();
-			minimumY = std::min(minimumY, double(bodies[i]->getGlobalPose().p.y));
-			maximumSpeed = std::max(maximumSpeed, double(bodies[i]->getLinearVelocity().magnitude()));
+			const PxTransform pose = bodies[i]->getGlobalPose();
+			const PxVec3 linear = bodies[i]->getLinearVelocity(), angular = bodies[i]->getAngularVelocity();
+			finite = finite && pose.isFinite() && linear.isFinite();
+			minimumY = std::min(minimumY, double(pose.p.y));
+			maximumSpeed = std::max(maximumSpeed, double(linear.magnitude()));
+			const float values[13] = { pose.p.x, pose.p.y, pose.p.z, pose.q.x, pose.q.y, pose.q.z, pose.q.w, linear.x, linear.y, linear.z, angular.x, angular.y, angular.z };
+			const unsigned char* bytes = reinterpret_cast<const unsigned char*>(values);
+			for(size_t b = 0; b < sizeof(values); ++b)
+			{
+				hash = (hash ^ bytes[b]) * 1099511628211ull;
+			}
 		}
 		PxSimulationStatistics statistics;
 		scene->getSimulationStatistics(statistics);
-		std::fprintf(output, "%d,%.9g,%.9g,%.9g,%.9g,%.9g,%d,%d,%d,%d,%u,%.9g,%.9g\n", frame + 1,
+		std::fprintf(output, "%d,%.9g,%.9g,%.9g,%.9g,%.9g,%d,%d,%d,%d,%u,%.9g,%.9g,%016llx\n", frame + 1,
 			stepMs, profiler.wallMilliseconds(), profiler.solveWallMilliseconds(),
 			profiler.prepareTime.load() * 1e-6, profiler.solveTime.load() * 1e-6,
 			profiler.islandCount.load(), profiler.rows.load(), profiler.iterations.load(), profiler.iterationLimits.load(),
-			statistics.nbDiscreteContactPairsWithContacts, minimumY, maximumSpeed);
+			statistics.nbDiscreteContactPairsWithContacts, minimumY, maximumSpeed, hash);
 	}
 	std::fclose(output);
 	PxSetProfilerCallback(NULL);

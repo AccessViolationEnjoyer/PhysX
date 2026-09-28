@@ -195,7 +195,12 @@ void Ext::DefaultCpuDispatcher::prepareToWait(CpuWorkerThread& worker)
 
 void Ext::DefaultCpuDispatcher::cancelWait(CpuWorkerThread& worker)
 {
-	// A submitter that already claimed the worker has removed it from the count.
+	// A submitter that already claimed the worker has removed it from the count. Its wake was
+	// for its own job, which this worker, having found another, may not take; pass the wake on,
+	// or that job could wait in a queue while a worker sleeps. Tasks that wait for each other,
+	// such as a parallel region's helpers, would then never finish.
 	if(worker.claimSleeping())
 		PxAtomicDecrement(&mSleepingThreads);
+	else
+		wakeSleepingThread();
 }

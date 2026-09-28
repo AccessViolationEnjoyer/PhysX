@@ -135,6 +135,10 @@ struct Problem
 	std::vector<int> hessianPairLookup;
 	std::vector<int> hessianContactBlocks;
 	std::vector<int> hessianDiagonalBlocks;
+	// Large scalar problems only: each body's incident runs as 2 * run + side, and each
+	// off-diagonal Hessian block's runs, both in run order. Parallel evaluation and assembly
+	// gather per body or block and so keep the serial accumulation order.
+	std::vector<int> bodyRunOuter, bodyRuns, blockRunOuter, blockRuns;
 	int equalityRows = 0;
 	// Structural arithmetic of a fresh factorization's contact outer products, counting
 	// potential entries of inactive rows too. It is computed when the update or refactor

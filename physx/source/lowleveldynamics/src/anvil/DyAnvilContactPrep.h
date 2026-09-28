@@ -43,6 +43,8 @@ namespace physx
 {
 class PxsContactManager;
 struct PxsContactManagerOutput;
+class PxContactBuffer;
+class FrictionPatchStreamPair;
 struct PxSolverBody;
 struct PxSolverBodyData;
 
@@ -148,7 +150,9 @@ struct AnvilContactRows
 	}
 };
 
-void prepareAnvilContacts(PxsContactManager& manager, PxsContactManagerOutput& contactOutput, const PxSolverBodyData& body0, const PxSolverBodyData& body1, PxI32 bodyIndex0, PxI32 bodyIndex1, const AnvilContactSettings& settings, ThreadContext& threadContext, anvil::Problem& problem, AnvilContactRows& output);
+// The pair's friction state comes from frictionStream when given, otherwise it is reservedState,
+// which may be NULL. buffer is scratch storage for the pair's contacts.
+void prepareAnvilContacts(PxsContactManager& manager, PxsContactManagerOutput& contactOutput, const PxSolverBodyData& body0, const PxSolverBodyData& body1, PxI32 bodyIndex0, PxI32 bodyIndex1, const AnvilContactSettings& settings, PxContactBuffer& buffer, FrictionPatchStreamPair* frictionStream, AnvilFrictionState* reservedState, anvil::Problem& problem, AnvilContactRows& output);
 
 void writebackAnvilContacts(const AnvilContactRows& rows, const anvil::Problem& problem, const anvil::Result& result, const PxSolverBody* bodies, const PxSolverBodyData* bodyData, DynamicsContext& context);
 
