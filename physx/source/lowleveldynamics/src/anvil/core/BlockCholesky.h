@@ -9,6 +9,10 @@ class BlockCholesky : public StorageCholesky
 	{
 		MIN_PARALLEL_FACTOR_UPDATES = 60000,
 		MIN_PARALLEL_PIVOT_UPDATES = 64,
+		// A panel groups up to this many pivots, or pivots with this many block updates. Larger
+		// panels synchronize less but factor more of their own columns serially.
+		PANEL_PIVOTS = 16,
+		PANEL_UPDATES = 8192,
 		MIN_PARALLEL_SOLVE_UPDATES = 1000000
 	};
 public:
@@ -204,6 +208,7 @@ public:
 					}
 				}
 			}
+			preparePanels(bodies);
 			m_inputBlocks.resize(ap.nonZeros());
 			const int columnCount = ap.outerSize();
 			const int* inputOuter = ap.outerIndexPtr();
@@ -648,18 +653,121 @@ private:
 		m_scalarCurrent = true;
 	}
 
-	bool factorizeParallel(const SparseStorage& ap)
+	// Consecutive pivots form panels. A panel factors its pivots in order and applies their
+	// updates to the panel's own later columns serially; the updates to every later column are
+	// then applied in one parallel region, one task per target column, instead of one region per
+	// pivot. Each target block still receives its updates in pivot order, as in the serial factor.
+	void preparePanels(int bodies)
 	{
-		const int bodies = int(ap.cols()) / 6;
-		const std::uint32_t blockCount = std::uint32_t(m_blocks.size());
-		for(std::uint32_t block = 0; block < blockCount; ++block)
+		m_panelOuter.clear();
+		m_panelTaskOuter.clear();
+		m_panelTaskItemOuter.clear();
+		m_panelItems.clear();
+		m_panelOuter.push_back(0);
+		m_panelTaskOuter.push_back(0);
+		m_panelTaskItemOuter.push_back(0);
+		std::vector<int>& targetCounts = m_tags;
+		std::fill(targetCounts.begin(), targetCounts.end(), 0);
+		int begin = 0;
+		while(begin < bodies)
 		{
-			m_blocks[block].setZero();
+			int end = begin;
+			int work = 0;
+			while(end < bodies && end - begin < PANEL_PIVOTS && work < PANEL_UPDATES)
+			{
+				const int count = m_blockOuter[end + 1] - m_blockOuter[end] - 1;
+				work += count * (count + 1) / 2;
+				++end;
+			}
+			m_panelOuter.push_back(end);
+			// Group the panel's updates of later columns by target column, pivots ascending.
+			int taskCount = 0;
+			for(int pivot = begin; pivot < end; ++pivot)
+			{
+				for(int address = m_blockOuter[pivot] + 1; address < m_blockOuter[pivot + 1]; ++address)
+				{
+					const int target = m_blockRows[address];
+					if(target >= end && targetCounts[target]++ == 0)
+					{
+						m_pattern[taskCount++] = target;
+					}
+				}
+			}
+			std::sort(m_pattern.begin(), m_pattern.begin() + taskCount);
+			const std::uint32_t itemBase = std::uint32_t(m_panelItems.size());
+			int itemCursor = int(itemBase);
+			for(int task = 0; task < taskCount; ++task)
+			{
+				const int target = m_pattern[task];
+				itemCursor += targetCounts[target];
+				m_panelTaskItemOuter.push_back(itemCursor);
+				targetCounts[target] = itemCursor - targetCounts[target];
+			}
+			m_panelItems.resize(itemCursor);
+			for(int pivot = begin; pivot < end; ++pivot)
+			{
+				const int first = m_blockOuter[pivot] + 1;
+				for(int address = first; address < m_blockOuter[pivot + 1]; ++address)
+				{
+					const int target = m_blockRows[address];
+					if(target >= end)
+					{
+						PanelItem& item = m_panelItems[targetCounts[target]++];
+						item.pivot = pivot;
+						item.local = address - first;
+					}
+				}
+			}
+			for(int task = 0; task < taskCount; ++task)
+			{
+				targetCounts[m_pattern[task]] = 0;
+			}
+			m_panelTaskOuter.push_back(m_panelTaskOuter.back() + taskCount);
+			begin = end;
 		}
-		const int columnCount = ap.outerSize();
+	}
+
+	struct PanelItem
+	{
+		int pivot;
+		int local;
+	};
+
+	void updatePanelTarget(int task)
+	{
+		for(int item = m_panelTaskItemOuter[task]; item < m_panelTaskItemOuter[task + 1]; ++item)
+		{
+			const PanelItem& update = m_panelItems[item];
+			const int first = m_blockOuter[update.pivot] + 1;
+			const int end = m_blockOuter[update.pivot + 1];
+			updateTrailingColumn(update.pivot, first, end, end - first, update.local);
+		}
+	}
+
+	struct PanelUpdate
+	{
+		BlockCholesky* factor;
+		int firstTask;
+	};
+
+	static void updatePanelTargetParallel(void* context, int index)
+	{
+		PanelUpdate& update = *static_cast<PanelUpdate*>(context);
+		update.factor->updatePanelTarget(update.firstTask + index);
+	}
+
+	// Zero row block k of the factor and scatter input column block k into it. Row blocks are
+	// disjoint, so bodies load in parallel.
+	void loadInputRow(const SparseStorage& ap, int body)
+	{
+		m_blocks[m_blockOuter[body]].setZero();
+		for(int entry = m_rowOuter[body]; entry < m_rowOuter[body + 1]; ++entry)
+		{
+			m_blocks[m_rowEntries[entry]].setZero();
+		}
 		const int* inputOuter = ap.outerIndexPtr();
 		const double* inputValues = ap.valuePtr();
-		for(int column = 0; column < columnCount; ++column)
+		for(int column = 6 * body; column < 6 * body + 6; ++column)
 		{
 			const int end = inputOuter[column + 1];
 			for(int entry = inputOuter[column]; entry < end; ++entry)
@@ -667,54 +775,93 @@ private:
 				m_blocks[m_inputBlocks[entry]](column % 6, m_inputCoordinates[entry] & 7) = inputValues[entry];
 			}
 		}
-		for(int body = 0; body < bodies; ++body)
+	}
+
+	struct InputLoad
+	{
+		BlockCholesky* factor;
+		const SparseStorage* input;
+	};
+
+	static void loadInputRowParallel(void* context, int body)
+	{
+		InputLoad& load = *static_cast<InputLoad*>(context);
+		load.factor->loadInputRow(*load.input, body);
+	}
+
+	// Factor one pivot's diagonal block and scale its column; false for a nonpositive pivot.
+	bool factorPivot(int body)
+	{
+		Block lower;
+		if(!cholesky6(m_blocks[m_blockOuter[body]], lower))
 		{
-			Block lower;
-			if(!cholesky6(m_blocks[m_blockOuter[body]], lower))
-			{
-				m_parallelWorkers = 1;
-				return scalarFallback(ap);
-			}
-			m_blocks[m_blockOuter[body]] = lower;
-			double inverseDiagonal[6];
+			return false;
+		}
+		m_blocks[m_blockOuter[body]] = lower;
+		double inverseDiagonal[6];
+		for(int column = 0; column < 6; ++column)
+		{
+			inverseDiagonal[column] = 1.0 / lower(column, column);
+			m_inverseDiagonal[6 * body + column] = inverseDiagonal[column];
+		}
+		const int first = m_blockOuter[body] + 1;
+		const int end = m_blockOuter[body + 1];
+		for(int address = first; address < end; ++address)
+		{
+			Block& value = m_blocks[address];
 			for(int column = 0; column < 6; ++column)
 			{
-				inverseDiagonal[column] = 1.0 / lower(column, column);
-				m_inverseDiagonal[6 * body + column] = inverseDiagonal[column];
-			}
-			const int first = m_blockOuter[body] + 1;
-			const int end = m_blockOuter[body + 1];
-			for(int address = first; address < end; ++address)
-			{
-				Block& value = m_blocks[address];
-				for(int column = 0; column < 6; ++column)
+				for(int inner = 0; inner < column; ++inner)
 				{
-					for(int inner = 0; inner < column; ++inner)
-					{
-						subtractScaled6(value.data() + 6 * column, value.data() + 6 * inner, lower(column, inner));
-					}
-					for(int row = 0; row < 6; ++row)
-					{
-						value(row, column) *= inverseDiagonal[column];
-					}
+					subtractScaled6(value.data() + 6 * column, value.data() + 6 * inner, lower(column, inner));
+				}
+				for(int row = 0; row < 6; ++row)
+				{
+					value(row, column) *= inverseDiagonal[column];
 				}
 			}
-			const int count = end - first;
-			if(count * (count + 1) / 2 >= MIN_PARALLEL_PIVOT_UPDATES)
+		}
+		return true;
+	}
+
+	bool factorizeParallel(const SparseStorage& ap)
+	{
+		const int bodies = int(ap.cols()) / 6;
+		InputLoad load = { this, &ap };
+		m_parallelExecutor->parallelFor(bodies, loadInputRowParallel, &load);
+		const int panels = int(m_panelOuter.size()) - 1;
+		for(int panel = 0; panel < panels; ++panel)
+		{
+			const int begin = m_panelOuter[panel], end = m_panelOuter[panel + 1];
+			for(int body = begin; body < end; ++body)
 			{
-				ParallelUpdate update;
-				update.factor = this;
-				update.body = body;
-				update.first = first;
-				update.end = end;
-				update.count = count;
-				m_parallelExecutor->parallelFor(count, updateTrailingColumnParallel, &update);
+				if(!factorPivot(body))
+				{
+					m_parallelWorkers = 1;
+					return scalarFallback(ap);
+				}
+				// Complete the panel's own later columns before they are factored.
+				const int first = m_blockOuter[body] + 1;
+				const int last = m_blockOuter[body + 1];
+				const int count = last - first;
+				for(int column = 0; column < count && m_blockRows[first + column] < end; ++column)
+				{
+					updateTrailingColumn(body, first, last, count, column);
+				}
+			}
+			const int firstTask = m_panelTaskOuter[panel];
+			const int taskCount = m_panelTaskOuter[panel + 1] - firstTask;
+			const int updates = m_updateOuter[end] - m_updateOuter[begin];
+			if(updates >= MIN_PARALLEL_PIVOT_UPDATES && taskCount > 1)
+			{
+				PanelUpdate update = { this, firstTask };
+				m_parallelExecutor->parallelFor(taskCount, updatePanelTargetParallel, &update);
 			}
 			else
 			{
-				for(int column = 0; column < count; ++column)
+				for(int task = 0; task < taskCount; ++task)
 				{
-					updateTrailingColumn(body, first, end, count, column);
+					updatePanelTarget(firstTask + task);
 				}
 			}
 		}
@@ -744,6 +891,8 @@ private:
 	std::vector<int> m_solveLevels, m_solveLevelOuter, m_solveBodies;
 	std::vector<int> m_updateOuter, m_updateTargets, m_inputBlocks, m_blockInputOuter;
 	std::vector<BlockInput> m_blockInputs;
+	std::vector<int> m_panelOuter, m_panelTaskOuter, m_panelTaskItemOuter;
+	std::vector<PanelItem> m_panelItems;
 	std::vector<Block> m_blocks, m_work;
 	// Serial factor only: blocks known to be nonzero, and work blocks holding values.
 	std::vector<unsigned char> m_blockNonzero, m_workNonzero;

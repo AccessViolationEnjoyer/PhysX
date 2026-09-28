@@ -29,7 +29,7 @@
 #define DY_BATCH_1D 1
 // Islands with fewer bodies share a Anvil task chain, avoiding per-island dispatch.
 #ifndef ANVIL_ISLAND_BATCH_BODIES
-#define ANVIL_ISLAND_BATCH_BODIES 16
+#define ANVIL_ISLAND_BATCH_BODIES 32
 #endif
 
 static const bool gMergePartitionAndFinalizeConstraintsTasks = true;

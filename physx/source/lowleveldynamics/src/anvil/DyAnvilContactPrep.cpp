@@ -233,7 +233,13 @@ static PX_FORCE_INLINE int rowNonzeroCount(const anvil::CompactContact& row)
 static PX_FORCE_INLINE void appendContactRow(const PxVec3& direction, const PxVec3& angular0, const PxVec3& angular1, double initialSpeed, double freeSpeed, double targetSpeed, double positionError, double stiffness, double damping, double impedance, double regularization, PxI32 bodyIndex0, PxI32 bodyIndex1, const AnvilJacobianBody* jacobianBodies, const AnvilContactSettings& settings, anvil::Problem& problem, double upperImpulse, double lowerImpulse = 0.0)
 {
 	anvil::CompactContact& row = problem.beginScalarContact();
-	if(prepareContactJacobian(row, jacobianBodies, bodyIndex0, bodyIndex1, direction, angular0, angular1) == 0.0)
+	row.body[0] = bodyIndex0;
+	row.body[1] = bodyIndex1;
+	contactJacobian(row.jacobian[0], jacobianBodies[0], direction, angular0);
+	contactJacobian(row.jacobian[1], jacobianBodies[1], direction, angular1);
+	// Only an all-zero row is degenerate; its entry count is also its refactorization work.
+	const int nonzeroCount = rowNonzeroCount(row);
+	if(!nonzeroCount)
 	{
 		problem.cancelScalarContact();
 		return;
@@ -241,7 +247,7 @@ static PX_FORCE_INLINE void appendContactRow(const PxVec3& direction, const PxVe
 	row.freeVelocity = freeSpeed - initialSpeed + settings.timestep *
 		(damping * (initialSpeed - targetSpeed) + stiffness * impedance * positionError);
 	row.regularization = regularization;
-	problem.finishScalarContact(lowerImpulse, upperImpulse, rowNonzeroCount(row));
+	problem.finishScalarContact(lowerImpulse, upperImpulse, nonzeroCount);
 }
 
 static bool prepareCompliantNormal(const PxContactPoint& contact, const PxVec3& normal, const PxVec3& angular0, const PxVec3& angular1, double penetration, const PxSolverBodyData& body0, const PxSolverBodyData& body1, PxI32 bodyIndex0, PxI32 bodyIndex1, const AnvilJacobianBody* jacobianBodies, const AnvilContactSettings& settings, anvil::CompactContact& row)
