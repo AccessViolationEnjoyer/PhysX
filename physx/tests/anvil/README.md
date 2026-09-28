@@ -265,7 +265,8 @@ it must lift. `AnvilGripperTests anvil|pgs grip-force hold-seconds` reports a si
 use a 0.5 mm contact offset, so pairs make contacts within 1 mm (the 2 cm default gave the same
 Anvil results).
 
-Anvil drops the row at 41 N and lifts it from 42 N. PGS (16+2) drops it up to 42 N and lifts it
+Anvil drops the row at 40.5 N and lifts it from 41 N, slipping 27 mm at 41 N and 0.9 mm at
+42 N. PGS (16+2) drops it up to 42 N and lifts it
 at 45 N with 19 mm of slip and 2.6 degrees of tilt; at 150 N it still tilts the boxes 0.8 degrees
 and squeezes them 0.5 mm into each other, against 0.01 mm for Anvil. A step takes about 35 us
 natively for either solver (70 and 55 us in WebAssembly).
@@ -283,9 +284,9 @@ velocities, and its friction rows correct it with twice the stiffness of penetra
 relaxes over 1 s: slip left by a transient would otherwise lock tangential forces into stacks,
 which then need extra solver iterations (5.3 to 7.8 per step on the pallet conveyor). Holding
 strength trades against that work: a stiffer correction or slower relaxation creeps less and
-costs more on stacks. Over a 60 s hold at 150 N the boxes slip 0.43 mm and creep at 0.005 mm/s,
-against 22 mm and 0.36 mm/s without the correction; at 46.7 N they slip 2.9 mm and creep at
-0.05 mm/s. PGS (16+2) slips 2.6 mm and creeps at 0.42 mm/s at 150 N; with 100 position
+costs more on stacks. Over a 60 s hold at 150 N the boxes slip 0.39 mm and creep at 0.0065 mm/s,
+against 22 mm and 0.36 mm/s without the correction; at 46.7 N they slip 1.1 mm and creep at
+0.018 mm/s. PGS (16+2) slips 2.6 mm and creeps at 0.42 mm/s at 150 N; with 100 position
 iterations it slips 0.26 mm at twice Anvil's step time. Shaking the arm (`shake-amplitude` and
 `shake-frequency` arguments, 1-5 Hz) does not add slip. The correction costs about 6-8% of a step
 on the pallet and platform scenes and nothing measurable on the piles, cases and totes.

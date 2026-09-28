@@ -183,8 +183,8 @@ struct Curvature
 	explicit Curvature(const Problem& problem) { resize(problem); }
 	void resize(const Problem& problem)
 	{
-		// Unilateral evaluation writes every row's curvature before anything reads it.
-		if(problem.isUnilateral())
+		// Scalar evaluation writes every row's curvature before anything reads it.
+		if(problem.isScalar())
 		{
 			diagonal.resize(problem.rowCount());
 		}
@@ -517,7 +517,7 @@ static void prepareProblemInternal(Problem& problem)
 	// records, only while the problem can still be unilateral.
 	std::vector<ScalarContactRun>& runs = problem.scalarContactRuns;
 	runs.clear();
-	bool detectRuns = problem.scalarBounds.empty() && problem.patches.empty();
+	bool detectRuns = problem.contactBlocks.empty() && problem.patches.empty();
 	if(detectRuns)
 	{
 		reserveStorage(runs, std::uint32_t(contactCount));
@@ -532,7 +532,7 @@ static void prepareProblemInternal(Problem& problem)
 		for(int i = 0; i < contactCount; ++i)
 		{
 			CompactContact& contact = problem.contacts[i];
-			assert(validContact(problem, contact) && contact.block == 0 && contact.regularization > 0.0);
+			assert(validContact(problem, contact) && (contact.block == 0 || contact.hasScalarBounds()) && contact.regularization > 0.0);
 			contact.row = i;
 			rowContact[i] = i;
 			freeVelocity[i] = contact.freeVelocity;
@@ -558,7 +558,7 @@ static void prepareProblemInternal(Problem& problem)
 			{
 				assert(validContact(problem, contact));
 			}
-			detectRuns = detectRuns && !contact.block;
+			detectRuns = detectRuns && contact.rowCount() == 1;
 			if(detectRuns)
 			{
 				if(i && contact.body[0] == problem.contacts[i - 1].body[0] && contact.body[1] == problem.contacts[i - 1].body[1])
@@ -666,7 +666,27 @@ static void prepareProblemInternal(Problem& problem)
 		assert(work == problem.contactRebuildWork);
 	}
 #endif
-	if(!problem.isUnilateral())
+	if(problem.isScalar() && !problem.scalarBounds.empty())
+	{
+		if(!CountEntries && !BuildJacobian)
+		{
+			// The compact loop above skips the bound bookkeeping; its caller excluded equality rows.
+			for(const ScalarBounds& limits : problem.scalarBounds)
+			{
+				problem.hasFiniteBounds = problem.hasFiniteBounds || limits.lower != -MAX_IMPULSE || limits.upper != MAX_IMPULSE;
+			}
+		}
+		problem.rowLower.resize(rows);
+		problem.rowUpper.resize(rows);
+		for(int i = 0; i < contactCount; ++i)
+		{
+			const CompactContact& contact = problem.contacts[i];
+			const bool bounded = contact.hasScalarBounds();
+			problem.rowLower[i] = bounded ? problem.bounds(contact).lower : 0.0;
+			problem.rowUpper[i] = bounded ? problem.bounds(contact).upper : MAX_IMPULSE;
+		}
+	}
+	if(!problem.isScalar())
 	{
 		runs.clear();
 	}
@@ -689,11 +709,16 @@ void prepareCompactProblemFromColumnCounts(Problem& problem) noexcept
 {
 	// Every nonzero block tag owns a contact block or scalar bounds, so without either all
 	// contacts are plain scalar rows.
-	const bool compact = problem.contactBlocks.empty() && problem.scalarBounds.empty() && problem.patches.empty();
+	// Bounded scalar rows stay compact unless one is an equality row.
+	bool compact = problem.contactBlocks.empty() && problem.patches.empty();
+	for(std::uint32_t i = 0; compact && i < problem.scalarBounds.size(); ++i)
+	{
+		compact = problem.scalarBounds[i].lower != -MAX_IMPULSE || problem.scalarBounds[i].upper != MAX_IMPULSE;
+	}
 #ifndef NDEBUG
 	for(std::uint32_t i = 0; compact && i < problem.contacts.size(); ++i)
 	{
-		assert(problem.contacts[i].block == 0);
+		assert(problem.contacts[i].block == 0 || problem.contacts[i].hasScalarBounds());
 	}
 #endif
 	if(compact)
@@ -1151,7 +1176,7 @@ static void assembleHessianBlocks(const Problem& problem, const Curvature& weigh
 		}
 	}
 	const std::uint32_t contactCount = std::uint32_t(problem.contacts.size());
-	if(problem.isUnilateral())
+	if(problem.isScalar())
 	{
 		// Runs share one ordered body pair, so their three blocks accumulate together.
 		const CompactContact* contacts = problem.contacts.data();
@@ -1541,6 +1566,155 @@ static double evaluateUnilateralStep(int rowCount, double alpha, bool advance, d
 	return quadratic;
 }
 
+// Scalar rows with impulse bounds: lambda = clamp(-s / R, lower, upper), with curvature 1 / R
+// strictly between the bounds. Unilateral rows are the bounds [0, MAX_IMPULSE].
+static void evaluateBoundedImpulses(int rowCount, const double* ANVIL_RESTRICT contactVelocity, const double* ANVIL_RESTRICT inverseRoot, const double* ANVIL_RESTRICT lower,
+	const double* ANVIL_RESTRICT upper, double* ANVIL_RESTRICT impulse, double* ANVIL_RESTRICT diagonal)
+{
+	int row = 0;
+#if defined(ANVIL_AVX2_FMA)
+	const __m256d zero = _mm256_setzero_pd();
+	for(; row + 4 <= rowCount; row += 4)
+	{
+		const __m256d root = _mm256_loadu_pd(inverseRoot + row);
+		const __m256d inverseCompliance = _mm256_mul_pd(root, root);
+		const __m256d unconstrained = _mm256_mul_pd(_mm256_sub_pd(zero, _mm256_loadu_pd(contactVelocity + row)), inverseCompliance);
+		const __m256d low = _mm256_loadu_pd(lower + row), high = _mm256_loadu_pd(upper + row);
+		_mm256_storeu_pd(impulse + row, _mm256_min_pd(_mm256_max_pd(unconstrained, low), high));
+		if(diagonal)
+		{
+			const __m256d inside = _mm256_and_pd(_mm256_cmp_pd(unconstrained, low, _CMP_GT_OQ), _mm256_cmp_pd(unconstrained, high, _CMP_LT_OQ));
+			_mm256_storeu_pd(diagonal + row, _mm256_and_pd(inside, inverseCompliance));
+		}
+	}
+#elif defined(ANVIL_SIMD128)
+	const simd::Double2 zero = simd::zero();
+	for(; row + 2 <= rowCount; row += 2)
+	{
+		const simd::Double2 root = simd::load(inverseRoot + row);
+		const simd::Double2 inverseCompliance = simd::multiply(root, root);
+		const simd::Double2 unconstrained = simd::multiply(simd::subtract(zero, simd::load(contactVelocity + row)), inverseCompliance);
+		const simd::Double2 low = simd::load(lower + row), high = simd::load(upper + row);
+		simd::store(impulse + row, simd::minimum(simd::maximum(unconstrained, low), high));
+		if(diagonal)
+		{
+			simd::store(diagonal + row, simd::bitAnd(simd::bitAnd(simd::greater(unconstrained, low), simd::less(unconstrained, high)), inverseCompliance));
+		}
+	}
+#endif
+	for(; row < rowCount; ++row)
+	{
+		const double inverseCompliance = inverseRoot[row] * inverseRoot[row];
+		const double unconstrained = -contactVelocity[row] * inverseCompliance;
+		impulse[row] = std::min(std::max(unconstrained, lower[row]), upper[row]);
+		if(diagonal)
+		{
+			diagonal[row] = unconstrained > lower[row] && unconstrained < upper[row] ? inverseCompliance : 0.0;
+		}
+	}
+}
+
+// Bounded counterpart of evaluateUnilateralStep. Returns the sum of -2 s lambda - R lambda^2,
+// twice the conjugate cost; for an active unilateral row that is its squared drive.
+static double evaluateBoundedStep(int rowCount, double alpha, bool advance, double* ANVIL_RESTRICT contactVelocity, const double* ANVIL_RESTRICT contactDirection,
+	const double* ANVIL_RESTRICT inverseRoot, const double* ANVIL_RESTRICT compliance, const double* ANVIL_RESTRICT lower, const double* ANVIL_RESTRICT upper,
+	double* ANVIL_RESTRICT impulse, double* ANVIL_RESTRICT diagonal, const double* ANVIL_RESTRICT factorDiagonal, int* ANVIL_RESTRICT changedRows, int& changedCount)
+{
+	int changes = 0;
+	int row = 0;
+	double quadratic = 0.0;
+#if defined(ANVIL_AVX2_FMA)
+	const __m256d zero = _mm256_setzero_pd();
+	const __m256d two = _mm256_set1_pd(2.0);
+	const __m256d step = _mm256_set1_pd(advance ? alpha : 0.0);
+	__m256d quadraticSum = zero;
+	for(; row + 4 <= rowCount; row += 4)
+	{
+		__m256d velocity = _mm256_loadu_pd(contactVelocity + row);
+		if(advance)
+		{
+			velocity = _mm256_fmadd_pd(step, _mm256_loadu_pd(contactDirection + row), velocity);
+			_mm256_storeu_pd(contactVelocity + row, velocity);
+		}
+		const __m256d root = _mm256_loadu_pd(inverseRoot + row);
+		const __m256d inverseCompliance = _mm256_mul_pd(root, root);
+		const __m256d unconstrained = _mm256_mul_pd(_mm256_sub_pd(zero, velocity), inverseCompliance);
+		const __m256d low = _mm256_loadu_pd(lower + row), high = _mm256_loadu_pd(upper + row);
+		const __m256d value = _mm256_min_pd(_mm256_max_pd(unconstrained, low), high);
+		_mm256_storeu_pd(impulse + row, value);
+		const __m256d inside = _mm256_and_pd(_mm256_cmp_pd(unconstrained, low, _CMP_GT_OQ), _mm256_cmp_pd(unconstrained, high, _CMP_LT_OQ));
+		const __m256d weight = _mm256_and_pd(inside, inverseCompliance);
+		_mm256_storeu_pd(diagonal + row, weight);
+		// -2 s lambda - R lambda^2 = -lambda (2 s + R lambda)
+		const __m256d term = _mm256_fmadd_pd(_mm256_loadu_pd(compliance + row), value, _mm256_mul_pd(two, velocity));
+		quadraticSum = _mm256_fnmadd_pd(value, term, quadraticSum);
+		int changed = _mm256_movemask_pd(_mm256_cmp_pd(weight, _mm256_loadu_pd(factorDiagonal + row), _CMP_NEQ_UQ));
+		while(changed)
+		{
+			const int lane = int(_tzcnt_u32(unsigned(changed)));
+			changedRows[changes++] = row + lane;
+			changed &= changed - 1;
+		}
+	}
+	const __m128d quadraticHalves = _mm_add_pd(_mm256_castpd256_pd128(quadraticSum), _mm256_extractf128_pd(quadraticSum, 1));
+	quadratic = _mm_cvtsd_f64(_mm_add_pd(quadraticHalves, _mm_unpackhi_pd(quadraticHalves, quadraticHalves)));
+#elif defined(ANVIL_SIMD128)
+	const simd::Double2 zero = simd::zero();
+	const simd::Double2 two = simd::splat(2.0);
+	const simd::Double2 step = simd::splat(advance ? alpha : 0.0);
+	simd::Double2 quadraticSum = zero;
+	for(; row + 2 <= rowCount; row += 2)
+	{
+		simd::Double2 velocity = simd::load(contactVelocity + row);
+		if(advance)
+		{
+			velocity = simd::multiplyAdd(step, simd::load(contactDirection + row), velocity);
+			simd::store(contactVelocity + row, velocity);
+		}
+		const simd::Double2 root = simd::load(inverseRoot + row);
+		const simd::Double2 inverseCompliance = simd::multiply(root, root);
+		const simd::Double2 unconstrained = simd::multiply(simd::subtract(zero, velocity), inverseCompliance);
+		const simd::Double2 low = simd::load(lower + row), high = simd::load(upper + row);
+		const simd::Double2 value = simd::minimum(simd::maximum(unconstrained, low), high);
+		simd::store(impulse + row, value);
+		const simd::Double2 weight = simd::bitAnd(simd::bitAnd(simd::greater(unconstrained, low), simd::less(unconstrained, high)), inverseCompliance);
+		simd::store(diagonal + row, weight);
+		const simd::Double2 term = simd::multiplyAdd(simd::load(compliance + row), value, simd::multiply(two, velocity));
+		quadraticSum = simd::negativeMultiplyAdd(value, term, quadraticSum);
+		const int changed = simd::mask(simd::notEqual(weight, simd::load(factorDiagonal + row)));
+		if(changed & 1)
+		{
+			changedRows[changes++] = row;
+		}
+		if(changed & 2)
+		{
+			changedRows[changes++] = row + 1;
+		}
+	}
+	quadratic = simd::sum(quadraticSum);
+#endif
+	for(; row < rowCount; ++row)
+	{
+		if(advance)
+		{
+			contactVelocity[row] += alpha * contactDirection[row];
+		}
+		const double velocity = contactVelocity[row];
+		const double inverseCompliance = inverseRoot[row] * inverseRoot[row];
+		const double unconstrained = -velocity * inverseCompliance;
+		const double value = std::min(std::max(unconstrained, lower[row]), upper[row]);
+		impulse[row] = value;
+		diagonal[row] = unconstrained > lower[row] && unconstrained < upper[row] ? inverseCompliance : 0.0;
+		quadratic -= value * (compliance[row] * value + 2.0 * velocity);
+		if(diagonal[row] != factorDiagonal[row])
+		{
+			changedRows[changes++] = row;
+		}
+	}
+	changedCount = changes;
+	return quadratic;
+}
+
 static bool evaluateImpulses(const Problem& problem, ConstVector contactVelocity, ConstVector inverseRoot, MutableVector impulse, Curvature* weights, PatchScratch& scratch)
 {
 	ConstVector compliance = problem.regularization;
@@ -1758,7 +1932,7 @@ static void evaluateContactVelocityChunk(void* context, int index)
 
 static void multiplyJacobianCsc(const Problem& problem, ConstVector vector, MutableVector product, ParallelExecutor* parallelExecutor)
 {
-	if(problem.isUnilateral())
+	if(problem.isScalar())
 	{
 		multiplyJacobianScalarContacts(problem, vector, product);
 		return;
@@ -1978,7 +2152,7 @@ static void evaluateGradientChunk(void* context, int index)
 
 static void evaluatePrimalGradientCsc(const Problem& problem, ConstVector velocity, ConstVector impulse, MutableVector gradient, ParallelExecutor* parallelExecutor)
 {
-	if(problem.isUnilateral())
+	if(problem.isScalar())
 	{
 		evaluateGradientScalarContacts(problem, impulse.data(), velocity.data(), gradient.data());
 		return;
@@ -2000,6 +2174,10 @@ static bool evaluatePrimalFromContactVelocity(const Problem& problem, ConstVecto
 	if(problem.isUnilateral())
 	{
 		evaluateUnilateralImpulses(contactVelocity, inverseRoot, impulse, weights);
+	}
+	else if(problem.isScalar())
+	{
+		evaluateBoundedImpulses(problem.rowCount(), contactVelocity.data(), inverseRoot.data(), problem.rowLower.data(), problem.rowUpper.data(), impulse.data(), weights ? weights->diagonal.data() : NULL);
 	}
 	else if(!evaluateImpulses(problem, contactVelocity, inverseRoot, impulse, weights, scratch))
 	{
@@ -2297,6 +2475,8 @@ static ConvexLineValue evaluateUnilateralLine(int rowCount, ConstVector contactV
 // already projected the impulses and assembled the active curvature diagonal.
 // Reusing those values at alpha == 0 avoids reconstructing both from contact
 // velocity while retaining the same row order and arithmetic grouping.
+// Bounded rows at a bound carry impulse without curvature, so they cannot be skipped.
+template<bool SkipInactive>
 static ConvexLineValue evaluateUnilateralInitialLine(int rowCount, ConstVector contactDirection, ConstVector impulse, ConstVector diagonal, double velocitySlope, double directionNorm)
 {
 	ConvexLineValue result = { velocitySlope, directionNorm, true };
@@ -2308,7 +2488,7 @@ static ConvexLineValue evaluateUnilateralInitialLine(int rowCount, ConstVector c
 	{
 		const __m256d inverseCompliance = _mm256_loadu_pd(diagonal.data() + row);
 		const __m256i inverseComplianceBits = _mm256_castpd_si256(inverseCompliance);
-		if(_mm256_testz_si256(inverseComplianceBits, inverseComplianceBits))
+		if(SkipInactive && _mm256_testz_si256(inverseComplianceBits, inverseComplianceBits))
 		{
 			continue;
 		}
@@ -2334,7 +2514,7 @@ static ConvexLineValue evaluateUnilateralInitialLine(int rowCount, ConstVector c
 	for(; row + 2 <= rowCount; row += 2)
 	{
 		const simd::Double2 inverseCompliance = simd::load(diagonal.data() + row);
-		if(!simd::any(simd::notEqual(inverseCompliance, zero)))
+		if(SkipInactive && !simd::any(simd::notEqual(inverseCompliance, zero)))
 		{
 			continue;
 		}
@@ -2400,6 +2580,132 @@ static bool staysInUnilateralSegment(int rowCount, ConstVector contactVelocity, 
 		const double velocity = contactVelocity[row];
 		const double candidateVelocity = velocity + alpha * contactDirection[row];
 		if((velocity < 0.0 && candidateVelocity > 0.0) || (velocity >= 0.0 && candidateVelocity < 0.0))
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+template<bool ComputeCurvature>
+static ConvexLineValue evaluateBoundedLine(int rowCount, const double* ANVIL_RESTRICT contactVelocity, const double* ANVIL_RESTRICT contactDirection, const double* ANVIL_RESTRICT inverseRoot,
+	const double* ANVIL_RESTRICT lower, const double* ANVIL_RESTRICT upper, double velocitySlope, double directionNorm, double alpha)
+{
+	ConvexLineValue result = { velocitySlope + alpha * directionNorm, directionNorm, true };
+	int row = 0;
+#if defined(ANVIL_AVX2_FMA)
+	const __m256d zero = _mm256_setzero_pd();
+	const __m256d alphaVector = _mm256_set1_pd(alpha);
+	__m256d slopeSum = zero, curvatureSum = zero;
+	for(; row + 4 <= rowCount; row += 4)
+	{
+		const __m256d direction = _mm256_loadu_pd(contactDirection + row);
+		const __m256d root = _mm256_loadu_pd(inverseRoot + row);
+		const __m256d inverseCompliance = _mm256_mul_pd(root, root);
+		const __m256d drive = _mm256_sub_pd(_mm256_sub_pd(zero, _mm256_loadu_pd(contactVelocity + row)), _mm256_mul_pd(alphaVector, direction));
+		const __m256d unconstrained = _mm256_mul_pd(drive, inverseCompliance);
+		const __m256d low = _mm256_loadu_pd(lower + row), high = _mm256_loadu_pd(upper + row);
+		slopeSum = _mm256_fmadd_pd(direction, _mm256_min_pd(_mm256_max_pd(unconstrained, low), high), slopeSum);
+		if(ComputeCurvature)
+		{
+			const __m256d inside = _mm256_and_pd(_mm256_cmp_pd(unconstrained, low, _CMP_GT_OQ), _mm256_cmp_pd(unconstrained, high, _CMP_LT_OQ));
+			curvatureSum = _mm256_add_pd(curvatureSum, _mm256_and_pd(inside, _mm256_mul_pd(direction, _mm256_mul_pd(inverseCompliance, direction))));
+		}
+	}
+	const __m128d slopeHalves = _mm_add_pd(_mm256_castpd256_pd128(slopeSum), _mm256_extractf128_pd(slopeSum, 1));
+	result.slope -= _mm_cvtsd_f64(_mm_add_pd(slopeHalves, _mm_unpackhi_pd(slopeHalves, slopeHalves)));
+	if(ComputeCurvature)
+	{
+		const __m128d curvatureHalves = _mm_add_pd(_mm256_castpd256_pd128(curvatureSum), _mm256_extractf128_pd(curvatureSum, 1));
+		result.curvature += _mm_cvtsd_f64(_mm_add_pd(curvatureHalves, _mm_unpackhi_pd(curvatureHalves, curvatureHalves)));
+	}
+#elif defined(ANVIL_SIMD128)
+	const simd::Double2 zero = simd::zero();
+	const simd::Double2 alphaVector = simd::splat(alpha);
+	simd::Double2 slopeSum = zero, curvatureSum = zero;
+	for(; row + 2 <= rowCount; row += 2)
+	{
+		const simd::Double2 direction = simd::load(contactDirection + row);
+		const simd::Double2 root = simd::load(inverseRoot + row);
+		const simd::Double2 inverseCompliance = simd::multiply(root, root);
+		const simd::Double2 drive = simd::subtract(simd::subtract(zero, simd::load(contactVelocity + row)), simd::multiply(alphaVector, direction));
+		const simd::Double2 unconstrained = simd::multiply(drive, inverseCompliance);
+		const simd::Double2 low = simd::load(lower + row), high = simd::load(upper + row);
+		slopeSum = simd::multiplyAdd(direction, simd::minimum(simd::maximum(unconstrained, low), high), slopeSum);
+		if(ComputeCurvature)
+		{
+			const simd::Double2 inside = simd::bitAnd(simd::greater(unconstrained, low), simd::less(unconstrained, high));
+			curvatureSum = simd::add(curvatureSum, simd::bitAnd(inside, simd::multiply(direction, simd::multiply(inverseCompliance, direction))));
+		}
+	}
+	result.slope -= simd::sum(slopeSum);
+	if(ComputeCurvature)
+	{
+		result.curvature += simd::sum(curvatureSum);
+	}
+#endif
+	for(; row < rowCount; ++row)
+	{
+		const double direction = contactDirection[row];
+		const double inverseCompliance = inverseRoot[row] * inverseRoot[row];
+		const double unconstrained = (-contactVelocity[row] - alpha * direction) * inverseCompliance;
+		result.slope -= direction * std::min(std::max(unconstrained, lower[row]), upper[row]);
+		if(ComputeCurvature && unconstrained > lower[row] && unconstrained < upper[row])
+		{
+			result.curvature += direction * (inverseCompliance * direction);
+		}
+	}
+	return result;
+}
+
+// Whether every bounded row keeps its segment (below, between or above its bounds) from 0 to alpha.
+static bool staysInBoundedSegment(int rowCount, const double* ANVIL_RESTRICT contactVelocity, const double* ANVIL_RESTRICT contactDirection, const double* ANVIL_RESTRICT inverseRoot,
+	const double* ANVIL_RESTRICT lower, const double* ANVIL_RESTRICT upper, double alpha)
+{
+	int row = 0;
+#if defined(ANVIL_AVX2_FMA)
+	const __m256d zero = _mm256_setzero_pd();
+	const __m256d alphaVector = _mm256_set1_pd(alpha);
+	for(; row + 4 <= rowCount; row += 4)
+	{
+		const __m256d root = _mm256_loadu_pd(inverseRoot + row);
+		const __m256d inverseCompliance = _mm256_mul_pd(root, root);
+		const __m256d velocity = _mm256_loadu_pd(contactVelocity + row);
+		const __m256d start = _mm256_mul_pd(_mm256_sub_pd(zero, velocity), inverseCompliance);
+		const __m256d end = _mm256_mul_pd(_mm256_sub_pd(zero, _mm256_fmadd_pd(alphaVector, _mm256_loadu_pd(contactDirection + row), velocity)), inverseCompliance);
+		const __m256d low = _mm256_loadu_pd(lower + row), high = _mm256_loadu_pd(upper + row);
+		const __m256d aboveLow = _mm256_xor_pd(_mm256_cmp_pd(start, low, _CMP_GT_OQ), _mm256_cmp_pd(end, low, _CMP_GT_OQ));
+		const __m256d belowHigh = _mm256_xor_pd(_mm256_cmp_pd(start, high, _CMP_LT_OQ), _mm256_cmp_pd(end, high, _CMP_LT_OQ));
+		if(_mm256_movemask_pd(_mm256_or_pd(aboveLow, belowHigh)) != 0)
+		{
+			return false;
+		}
+	}
+#elif defined(ANVIL_SIMD128)
+	const simd::Double2 zero = simd::zero();
+	const simd::Double2 alphaVector = simd::splat(alpha);
+	for(; row + 2 <= rowCount; row += 2)
+	{
+		const simd::Double2 root = simd::load(inverseRoot + row);
+		const simd::Double2 inverseCompliance = simd::multiply(root, root);
+		const simd::Double2 velocity = simd::load(contactVelocity + row);
+		const simd::Double2 start = simd::multiply(simd::subtract(zero, velocity), inverseCompliance);
+		const simd::Double2 end = simd::multiply(simd::subtract(zero, simd::multiplyAdd(alphaVector, simd::load(contactDirection + row), velocity)), inverseCompliance);
+		const simd::Double2 low = simd::load(lower + row), high = simd::load(upper + row);
+		const int startState = simd::mask(simd::greater(start, low)) | (simd::mask(simd::less(start, high)) << 2);
+		const int endState = simd::mask(simd::greater(end, low)) | (simd::mask(simd::less(end, high)) << 2);
+		if(startState != endState)
+		{
+			return false;
+		}
+	}
+#endif
+	for(; row < rowCount; ++row)
+	{
+		const double inverseCompliance = inverseRoot[row] * inverseRoot[row];
+		const double start = -contactVelocity[row] * inverseCompliance;
+		const double end = -(contactVelocity[row] + alpha * contactDirection[row]) * inverseCompliance;
+		if((start > lower[row]) != (end > lower[row]) || (start < upper[row]) != (end < upper[row]))
 		{
 			return false;
 		}
@@ -2501,10 +2807,17 @@ struct LineInput
 	double directionNorm;
 	PatchScratch* scratch;
 	bool unilateral;
+	bool bounded;
 };
 
 static ConvexLineValue evaluateLine(const LineInput& line, double alpha, bool computeCurvature)
 {
+	if(line.bounded)
+	{
+		const Problem& problem = *line.problem;
+		return computeCurvature ? evaluateBoundedLine<true>(problem.rowCount(), line.contactVelocity->data(), line.contactDirection->data(), line.inverseRoot->data(), problem.rowLower.data(), problem.rowUpper.data(), line.velocitySlope, line.directionNorm, alpha) :
+			evaluateBoundedLine<false>(problem.rowCount(), line.contactVelocity->data(), line.contactDirection->data(), line.inverseRoot->data(), problem.rowLower.data(), problem.rowUpper.data(), line.velocitySlope, line.directionNorm, alpha);
+	}
 	if(!line.unilateral)
 	{
 		return evaluateConvexLine(*line.problem, *line.contactVelocity, *line.contactDirection, *line.compliance, *line.inverseRoot, line.velocitySlope, line.directionNorm, alpha, *line.scratch);
@@ -2520,8 +2833,10 @@ static bool searchConvex(const Problem& problem, ConstVector direction, ConstVec
 	ConstVector compliance = problem.regularization;
 	multiplyJacobianCsc(problem, direction, contactDirection, parallelExecutor);
 	const bool unilateral = problem.isUnilateral();
-	const LineInput line = { &problem, &contactVelocity, &contactDirection, &compliance, &inverseRoot, velocitySlope, directionNorm, &scratch, unilateral };
-	const ConvexLineValue initial = unilateral ? evaluateUnilateralInitialLine(problem.rowCount(), contactDirection, impulse, weights.diagonal, velocitySlope, directionNorm) : evaluateLine(line, 0.0, true);
+	const bool bounded = !unilateral && problem.isScalar();
+	const LineInput line = { &problem, &contactVelocity, &contactDirection, &compliance, &inverseRoot, velocitySlope, directionNorm, &scratch, unilateral, bounded };
+	const ConvexLineValue initial = unilateral ? evaluateUnilateralInitialLine<true>(problem.rowCount(), contactDirection, impulse, weights.diagonal, velocitySlope, directionNorm) :
+		bounded ? evaluateUnilateralInitialLine<false>(problem.rowCount(), contactDirection, impulse, weights.diagonal, velocitySlope, directionNorm) : evaluateLine(line, 0.0, true);
 	++evaluations;
 	if(!initial.valid)
 	{
@@ -2533,13 +2848,14 @@ static bool searchConvex(const Problem& problem, ConstVector direction, ConstVec
 		return true;
 	}
 	const double initialCandidate = -initial.slope / initial.curvature;
-	if(unilateral && staysInUnilateralSegment(problem.rowCount(), contactVelocity, contactDirection, initialCandidate))
+	if(unilateral ? staysInUnilateralSegment(problem.rowCount(), contactVelocity, contactDirection, initialCandidate) :
+		bounded && staysInBoundedSegment(problem.rowCount(), contactVelocity.data(), contactDirection.data(), inverseRoot.data(), problem.rowLower.data(), problem.rowUpper.data(), initialCandidate))
 	{
 		alphaResult = initialCandidate;
 		return true;
 	}
 	double lower = 0.0, upper = 1.0;
-	bool upperHasCurvature = unilateral && initialCandidate >= upper;
+	bool upperHasCurvature = (unilateral || bounded) && initialCandidate >= upper;
 	ConvexLineValue atUpper = evaluateLine(line, upper, upperHasCurvature);
 	++evaluations;
 	if(!atUpper.valid)
@@ -2550,7 +2866,7 @@ static bool searchConvex(const Problem& problem, ConstVector direction, ConstVec
 	{
 		lower = upper;
 		upper *= 2.0;
-		upperHasCurvature = unilateral && initialCandidate >= upper;
+		upperHasCurvature = (unilateral || bounded) && initialCandidate >= upper;
 		atUpper = evaluateLine(line, upper, upperHasCurvature);
 		++evaluations;
 		if(!atUpper.valid)
@@ -3002,6 +3318,10 @@ static SolveStatus::Enum solveAnvilInternal(const Problem& problem, const Settin
 		{
 			evaluateUnilateralImpulses(problem.freeVelocity, inverseRoot, coldImpulse, NULL);
 		}
+		else if(problem.isScalar())
+		{
+			evaluateBoundedImpulses(rows, problem.freeVelocity.data(), inverseRoot.data(), problem.rowLower.data(), problem.rowUpper.data(), coldImpulse.data(), NULL);
+		}
 		else if(!evaluateImpulses(problem, problem.freeVelocity, inverseRoot, coldImpulse, NULL, workspace.patchScratch))
 		{
 			return SolveStatus::eNUMERICAL_FAILURE;
@@ -3041,8 +3361,10 @@ static SolveStatus::Enum solveAnvilInternal(const Problem& problem, const Settin
 		cost = primalCost(problem, velocity, contactVelocity, impulse);
 	}
 	const bool unilateral = problem.isUnilateral();
+	// Scalar problems, with or without bounds, fuse the step's evaluation over their rows.
+	const bool scalarRows = problem.isScalar();
 	std::vector<int>& changedRows = workspace.changedRows;
-	if(unilateral)
+	if(scalarRows)
 	{
 		reserveStorage(changedRows, std::uint32_t(rows));
 		changedRows.resize(rows);
@@ -3163,15 +3485,18 @@ static SolveStatus::Enum solveAnvilInternal(const Problem& problem, const Settin
 		// J * (velocity + alpha * direction), periodically rebuilding from
 		// velocity to bound accumulated floating-point error.
 		const bool refreshContactVelocity = (iteration & 7) == 7;
-		if(unilateral)
+		if(scalarRows)
 		{
 			if(refreshContactVelocity)
 			{
 				multiplyJacobianCsc(problem, velocity, contactVelocity, settings.parallelExecutor);
 				contactVelocity += problem.freeVelocity;
 			}
-			const double quadratic = evaluateUnilateralStep(rows, alpha, !refreshContactVelocity, contactVelocity.data(), workspace.contactDirection.data(), inverseRoot.data(),
-				impulse.data(), weights.diagonal.data(), factor.currentWeights().diagonal.data(), changedRows.data(), changedCount);
+			const double quadratic = unilateral ?
+				evaluateUnilateralStep(rows, alpha, !refreshContactVelocity, contactVelocity.data(), workspace.contactDirection.data(), inverseRoot.data(),
+					impulse.data(), weights.diagonal.data(), factor.currentWeights().diagonal.data(), changedRows.data(), changedCount) :
+				evaluateBoundedStep(rows, alpha, !refreshContactVelocity, contactVelocity.data(), workspace.contactDirection.data(), inverseRoot.data(), compliance.data(),
+					problem.rowLower.data(), problem.rowUpper.data(), impulse.data(), weights.diagonal.data(), factor.currentWeights().diagonal.data(), changedRows.data(), changedCount);
 			evaluatePrimalGradientCsc(problem, velocity, impulse, gradient, settings.parallelExecutor);
 			result.evaluationMs += profileElapsed(settings.profile, evaluationStart);
 			const double nextCost = 0.5 * (velocity.squaredNorm() + quadratic);

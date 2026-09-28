@@ -61,7 +61,7 @@ public:
 		// updating it, so the factor is reused only for unchanged curvature.
 		if(m_dense)
 		{
-			if(problem.isUnilateral() && weights.diagonal.size() == m_weights.diagonal.size() &&
+			if(problem.isScalar() && weights.diagonal.size() == m_weights.diagonal.size() &&
 				std::equal(weights.diagonal.data(), weights.diagonal.data() + weights.diagonal.size(), m_weights.diagonal.data()))
 			{
 				++result.reusedFactors;

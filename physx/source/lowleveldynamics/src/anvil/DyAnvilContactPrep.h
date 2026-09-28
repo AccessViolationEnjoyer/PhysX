@@ -62,8 +62,6 @@ struct AnvilContactSettings
 	PxReal regularization;
 	PxReal bounceThreshold;
 	PxReal ccdMaxSeparation;
-	PxReal dilatancyTolerance;
-	bool correctDilatancy;
 	// Reference-acceleration coefficients shared by every contact of a step.
 	double impedance;
 	double damping;
@@ -86,6 +84,8 @@ struct AnvilContactPoint
 	PxReal* destination;
 	// Friction coefficient of the point's friction rows; 0 for a point without them.
 	PxReal friction;
+	// Impulse bound of the two friction rows that follow a scalar normal row.
+	PxReal frictionLimit;
 };
 
 // A contact pair's friction state, kept from step to step in PhysX's friction stream. While the
@@ -95,15 +95,14 @@ struct AnvilContactPoint
 // instead of creeping.
 // A sliding pair has no accumulated slip: its twist is ANVIL_SLIDING_TWIST, a value the slip
 // limit keeps accumulated twist from reaching.
-// slipVelocity and twistVelocity are the last step's solved tangential velocity at the centre
-// and rotation rate about the normal, loaded or not; the next step's dilatancy biases start
-// from them.
+// normalImpulse is the pair's total normal impulse in the last step. Friction is lagged: the
+// next step bounds each point's friction rows by the friction coefficient times its share, so
+// friction does not depend on the step's normal rows and sliding contacts do not separate.
 struct AnvilFrictionState
 {
 	PxReal slip[3];
 	PxReal twist;
-	PxReal slipVelocity[3];
-	PxReal twistVelocity;
+	PxReal normalImpulse;
 };
 
 static const PxReal ANVIL_SLIDING_TWIST = PX_MAX_F32;
@@ -113,18 +112,12 @@ static const PxReal ANVIL_SLIDING_TWIST = PX_MAX_F32;
 // correction holds them harder, so both also raise the solver's work on stacks.
 static const PxReal ANVIL_SLIP_RELAXATION_TIME = 1.0f;
 static const double ANVIL_SLIP_STIFFNESS = 2.0;
-
-struct AnvilFrictionPoint
-{
-	PxU32 pointIndex;
-	PxReal friction;
-	PxReal freeNormalVelocity;
-	PxReal targetNormalVelocity;
-	PxReal freeTangentVelocity0;
-	PxReal freeTangentVelocity1;
-	PxReal dilatancyBias;
-	bool correctDilatancy;
-};
+// Normal rows of contacts with friction use this fraction of the contact regularization, so
+// their friction rows are eight times softer, as the four-edge pyramid used before had at
+// friction 0.5. Softer normals take more iterations on large piles and when many contacts
+// change between sticking and sliding, and penetrate further (pallet slipsheets 9.3 um at 1/8,
+// 10.6 um at 1/4, 13.8 um at 1); stiffer ones take more on resting stacks.
+static const double ANVIL_FRICTION_NORMAL_REGULARIZATION = 0.125;
 
 struct AnvilContactPair
 {
@@ -146,13 +139,11 @@ struct AnvilContactPair
 struct AnvilContactRows
 {
 	PxArray<AnvilContactPoint> points;
-	PxArray<AnvilFrictionPoint> frictionPoints;
 	PxArray<AnvilContactPair> pairs;
 
 	void clear()
 	{
 		points.clear();
-		frictionPoints.clear();
 		pairs.clear();
 	}
 };
@@ -161,7 +152,6 @@ void prepareAnvilContacts(PxsContactManager& manager, PxsContactManagerOutput& c
 
 void writebackAnvilContacts(const AnvilContactRows& rows, const anvil::Problem& problem, const anvil::Result& result, const PxSolverBody* bodies, const PxSolverBodyData* bodyData, DynamicsContext& context);
 
-bool updateAnvilDilatancyBias(AnvilContactRows& rows, anvil::Problem& problem, const anvil::Result& result, PxReal velocityTolerance);
 }
 }
 

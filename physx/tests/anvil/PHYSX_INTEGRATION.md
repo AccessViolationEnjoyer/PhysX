@@ -17,18 +17,25 @@ one coupled solve per connected island and stops at the tolerance or iteration l
 
 ## Equations
 
-Anvil contacts use MuJoCo's convex pyramidal formulation. Each frictional contact point
-emits four nonnegative scalar edges:
-
-```text
-n + mu t0, n - mu t0, n + mu t1, n - mu t1
-```
+Anvil contacts use lagged Coulomb friction, the Lagged approximation of Castro, Han and
+Permenter, [Irrotational Contact Fields](https://arxiv.org/abs/2312.03908). Each frictional
+contact point emits a nonnegative normal row and two tangent rows whose impulses are bounded by
+`+/- mu N0`, where `N0` is the point's share of its pair's normal impulse in the previous step
+(split equally over the pair's current points; a pair without one takes the impulse that stops
+its approach). Friction therefore does not depend on the step's normal rows, so the problem
+stays convex without MuJoCo's pyramidal coupling of normal and tangential velocity, and sliding
+contacts do not separate. The lag is one step: a contact's friction limit follows a change of
+its load in the next step. The tangent basis follows the contact's initial slip direction.
 
 `anvilRegularization` maps to impedance `d = 1 / (1 + regularization)`. With
 `timeConstant = max(0.02, 2 timestep)`, the reference coefficients are
-`B = 2 / (d timeConstant)` and `K = 1 / (d^2 timeConstant^2)`. Edge compliance uses
-MuJoCo's pyramidal conversion, `R = 2 mu^2 regularization diagApprox`, where
-`diagApprox` is the translational inverse-mass response scaled by `1 + mu^2`.
+`B = 2 / (d timeConstant)` and `K = 1 / (d^2 timeConstant^2)`. Row compliance is
+`R = regularization diagApprox`, where `diagApprox` is the translational inverse-mass response;
+the normal row of a frictional contact uses an eighth of it, the normal stiffness the earlier
+four-edge pyramid had at friction 0.5. Softer normals cost iterations on large piles (a quarter:
+12% slower on 1,000 boxes) and when many contacts change between sticking and sliding, and
+penetrate further (pallet slipsheets 9.3 um at an eighth, 10.6 um at a quarter, 13.8 um without
+scaling); much stiffer normals cost iterations on resting stacks.
 
 Body velocity is captured before PhysX applies gravity and damping. The prepared free term
 therefore represents MuJoCo's acceleration-reference equation in velocity-increment units:
@@ -38,8 +45,7 @@ freeSpeed - initialSpeed + timestep *
     (B * (initialSpeed - targetSpeed) + K * d * positionError)
 ```
 
-The four edges of a contact point are assembled from its normal and tangent Jacobians, and
-the shape's contact offset slop is not applied to Anvil rows.
+The shape's contact offset slop is not applied to Anvil rows.
 
 Hard joint rows use the same reference policy. Native spring rows retain their exact implicit
 stiffness and damping law. Positive restitution, compliant contacts, contact modification,
@@ -53,8 +59,8 @@ The maintained implementation lives under `source/lowleveldynamics/src/anvil/`:
   conversion.
 - `DyAnvilConstraintPrep.cpp` converts generic `PxConstraintSolverPrep` rows, bounds,
   springs and writeback.
-- `DyAnvilContactPrep.cpp` converts native contact streams into pyramid edges and writes
-  normal impulses and threshold events.
+- `DyAnvilContactPrep.cpp` converts native contact streams into normal and bounded friction
+  rows, keeps each pair's friction state and writes normal impulses and threshold events.
 - `core/` contains the optimized incremental-Cholesky Anvil solver used by both the native
   adapter and standalone comparisons.
 
@@ -77,19 +83,18 @@ through the serial path. Anvil adds no OpenMP dependency, and the PGS and TGS pa
 submitted job wakes one sleeping worker, the one that slept most recently, instead of every
 sleeper; busy workers make no event calls. This applies to PGS and TGS scenes too.
 
-Sliding pyramid contacts are corrected for dilatancy by up to two continuation solves
-(`PxSceneDesc::anvilFrictionCorrections`; 0 disables them), each biasing the contact's edges
-by the previous solution's slip speed. Every contact pair keeps its solved slip velocity and
-twist rate in its friction state, loaded or not, and the next step's biases start from them, so
-the corrections continue from step to step instead of restarting at zero. When a contact needs
-correcting, the main solve and intermediate corrections only estimate slip speed for the next
-bias, so they are limited to 20 iterations; the last correction uses the full iteration limit,
-and if corrections stop while the last solve was still limited, one more full-limit continuation
-finishes it. `AnvilSlidingTests` (boxes and a loaded container sliding down a ramp, and a loaded
-container pushed along a floor) measure the resulting lift-off: the pushed container's load lifts
-0.05 mm and bounces at 2.4 mm/s (four corrections from zero: 0.07 mm and 10.5 mm/s); one
-correction lets it sink 3.3 mm. On the five-pallet scene this halves the fall-off peaks (WebAssembly
-fall p95 22.7 to 11.2 ms, peak 26.9 to 14.0 ms). Without corrections, sliding bodies lift about 30 mm.
+Friction and normal rows are all scalar rows, so the core keeps its compact, vectorized
+row kernels for them: rows carry `[lower, upper]` impulse bounds (`[0, cap]` for normals,
+`[-mu N0, mu N0]` for friction), and the fused step evaluation, line search and curvature
+updates clamp against them. The interior-point fallback remains for purely unilateral problems.
+Each island takes one solve per step. The four-edge pyramid used before separated sliding
+contacts (by `mu timestep` times the slip speed) unless up to four continuation solves biased
+its edges by the solved slip speed; these corrections dominated steps in which many contacts
+slide, such as pallets tipping off conveyors. `AnvilSlidingTests` (boxes and a loaded container
+sliding down a ramp, and a loaded container pushed along a floor) measure no lift-off and sliding
+accelerations within 0.5% of Coulomb's. On the five-pallet scene, the WebAssembly fall-off steps
+take 1.2 ms on average instead of 2.6 ms, the 95th percentile 3.0 ms instead of 11.6 ms and the
+slowest 5.1 ms instead of 15.3 ms.
 
 Workspaces retain row, matrix, factor and result capacity between jobs. Warm starts store
 physical body corrections and transform angular corrections into the current inertia basis.
@@ -103,17 +108,14 @@ propagate into PGS or TGS.
 
 ## Current limitations
 
-The pyramidal cone uses static friction while a contact sticks and changes to dynamic friction
-for the next step once every loaded point of the pair reaches its friction limit. For edge rows
-that means one inactive edge in each opposing pair; three-row blocks compare each tangent impulse
-with friction times the normal impulse. A slip-speed threshold is not used: soft friction lets a
-holding contact creep in proportion to its load, so such a threshold failed at large scales.
-Equal coefficients use the original path without friction-state storage or velocity writeback. The pyramid can introduce upward velocity
-while sliding; this behavior is covered by bounded regression tests and will be addressed
-separately if it is noticeable in practice.
+Friction uses static friction while a contact sticks and changes to dynamic friction for the
+next step once every loaded point of the pair reaches its friction limit: for scalar friction
+rows, one row at its bound; three-row blocks compare each tangent impulse with friction times the
+normal impulse. A slip-speed threshold is not used: soft friction lets a holding contact creep in
+proportion to its load, so such a threshold failed at large scales. The two bounded tangent rows
+form a square friction limit aligned with the initial slip direction, not a circle.
 
-An explicitly capped contact point currently retains its exact normal cap and omits friction,
-because four independent edge bounds cannot express a cap on their summed normal impulse.
+An explicitly capped contact point currently retains its exact normal cap and omits friction.
 Native negative-restitution compliant contacts use their existing implicit scalar normal row.
 
 This backend supports CPU rigid bodies. GPU dynamics, the Direct GPU API and articulations are

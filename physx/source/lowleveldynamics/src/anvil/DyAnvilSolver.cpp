@@ -48,12 +48,6 @@ namespace physx
 namespace Dy
 {
 static volatile PxI32 gAnvilParallelTaskActive = 0;
-// Pyramid friction separates sliding contacts unless each edge is biased by the solved
-// slip speed (PxSceneDesc::anvilFrictionCorrections). Each bias starts from the pair's slip
-// velocity in the previous step, so the corrections continue over steps. The main solve and
-// intermediate corrections only estimate slip speed for the next bias, so they run a bounded
-// number of iterations; the final solve uses the full limit.
-static const int ANVIL_DILATANCY_ESTIMATE_ITERATIONS = 20;
 
 class AnvilParallelExecutor;
 
@@ -275,7 +269,7 @@ class AnvilSolver : public PxUserAllocated
 {
 	PX_NOCOPY(AnvilSolver)
 public:
-	explicit AnvilSolver(const PxSceneDesc& desc) : regularization(desc.anvilRegularization), jointRegularization(desc.anvilJointRegularization), dilatancyCorrections(desc.anvilFrictionCorrections),
+	explicit AnvilSolver(const PxSceneDesc& desc) : regularization(desc.anvilRegularization), jointRegularization(desc.anvilJointRegularization),
 		surfaceRegularization(desc.anvilSurfaceRegularization), stiffeningDepth(desc.anvilStiffeningDepth), displacementTolerance(desc.anvilDisplacementTolerance), update(0), errorReported(0)
 	{
 		settings.iterations = int(desc.anvilMaxIterations);
@@ -330,7 +324,6 @@ public:
 	anvil::Settings settings;
 	PxReal regularization;
 	PxReal jointRegularization;
-	PxU32 dilatancyCorrections;
 	PxReal surfaceRegularization;
 	PxReal stiffeningDepth;
 	PxReal displacementTolerance;
@@ -371,8 +364,6 @@ void beginAnvilUpdate(AnvilSolver& solver, PxU32 nodeCount, const DynamicsContex
 	contactSettings.regularization = solver.regularization;
 	contactSettings.bounceThreshold = context.getBounceThreshold();
 	contactSettings.ccdMaxSeparation = context.getCCDSeparationThreshold();
-	contactSettings.dilatancyTolerance = 1.0e-5f * context.getLengthScale();
-	contactSettings.correctDilatancy = solver.dilatancyCorrections > 0;
 	contactSettings.impedance = 1.0 / (1.0 + double(contactSettings.regularization));
 	const double timeConstant = std::max(0.02, 2.0 * double(timestep));
 	contactSettings.damping = 2.0 / (contactSettings.impedance * timeConstant);
@@ -580,25 +571,6 @@ static bool solveAnvilSystem(const anvil::Settings& settings, AnvilIslandWorkspa
 	return status == anvil::SolveStatus::eSUCCESS || status == anvil::SolveStatus::eITERATION_LIMIT;
 }
 
-static bool continueAnvilSystem(const anvil::Settings& stepSettings, AnvilIslandWorkspace& workspace, int iterations)
-{
-	workspace.previous = workspace.result;
-	anvil::Settings settings = stepSettings;
-	// Dilatancy corrections bias contacts by the solved slip speed, so they keep solving to
-	// the full tolerance; stopping them at the displacement tolerance slowed pallet fall-off.
-	settings.velocityTolerance = 0.0;
-	settings.angularVelocityTolerance = 0.0;
-	settings.iterations = PxMin(settings.iterations, iterations);
-	const anvil::SolveStatus::Enum status = anvil::continueAnvil(workspace.problem, settings, workspace.result, workspace.numeric, &workspace.previous);
-	PX_ASSERT(status != anvil::SolveStatus::eINVALID_INPUT);
-	if(status == anvil::SolveStatus::eSUCCESS || status == anvil::SolveStatus::eITERATION_LIMIT)
-	{
-		return true;
-	}
-	workspace.result = workspace.previous;
-	return false;
-}
-
 static void profileAnvilSolve(const AnvilIslandWorkspace& workspace, PxU64 contextId)
 {
 	PX_UNUSED(workspace);
@@ -636,43 +608,10 @@ static bool solveAnvilRows(AnvilSolver& solver, AnvilIslandWorkspace& workspace,
 		// Stop once a step would move no body by the displacement tolerance in this timestep.
 		settings.velocityTolerance = double(solver.displacementTolerance) / timestep;
 		settings.angularVelocityTolerance = settings.velocityTolerance / context.getLengthScale();
-		// With sliding contacts to correct, the main solve only estimates slip speed too.
-		const PxU32 corrections = solver.dilatancyCorrections;
-		const bool mainEstimate = corrections > 0 && workspace.contacts.frictionPoints.size() > 0;
-		anvil::Settings mainSettings = settings;
-		if(mainEstimate)
-		{
-			mainSettings.iterations = PxMin(settings.iterations, ANVIL_DILATANCY_ESTIMATE_ITERATIONS);
-		}
-		if(!solveAnvilSystem(mainSettings, workspace, &workspace.previous))
+		if(!solveAnvilSystem(settings, workspace, &workspace.previous))
 		{
 			solver.report("Anvil solve failed.");
 			return false;
-		}
-		// Dilatancy corrections re-solve with biases from the previous solution. The final
-		// solve uses the full limit; earlier ones only estimate slip speed, and one that meets
-		// its tolerance within that estimate budget is already final.
-		const PxReal velocityTolerance = 1.0e-5f * context.getLengthScale() / timestep;
-		const int fullIterations = solver.settings.iterations;
-		bool converged = !mainEstimate || workspace.result.status == anvil::SolveStatus::eSUCCESS;
-		for(PxU32 iteration = 0; iteration < corrections; ++iteration)
-		{
-			if(!updateAnvilDilatancyBias(workspace.contacts, workspace.problem, workspace.result, velocityTolerance))
-			{
-				break;
-			}
-			const bool final = iteration + 1 == corrections;
-			if(!continueAnvilSystem(settings, workspace, final ? fullIterations : ANVIL_DILATANCY_ESTIMATE_ITERATIONS))
-			{
-				solver.report("Anvil friction correction failed.");
-				converged = true;
-				break;
-			}
-			converged = final || workspace.result.status == anvil::SolveStatus::eSUCCESS;
-		}
-		if(!converged && !continueAnvilSystem(settings, workspace, fullIterations))
-		{
-			solver.report("Anvil friction correction failed.");
 		}
 		profileAnvilSolve(workspace, context.getContextId());
 	}

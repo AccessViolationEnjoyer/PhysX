@@ -159,6 +159,12 @@ struct Problem
 		return contactRebuildWork;
 	}
 	bool isUnilateral() const { return equalityRows == 0 && coupledContacts.empty() && scalarBounds.empty() && patches.empty(); }
+	// Only scalar rows, with nonnegative or finite two-sided impulse bounds (no equality rows).
+	// Unilateral problems are the scalar problems without bounds.
+	bool isScalar() const { return equalityRows == 0 && contactBlocks.empty() && patches.empty(); }
+	// Per-row impulse bounds of a scalar problem with bounds, filled during preparation.
+	VectorStorage rowLower;
+	VectorStorage rowUpper;
 	VectorStorage freeVelocity;
 	VectorStorage regularization;
 	VectorStorage freeBodyVelocity;

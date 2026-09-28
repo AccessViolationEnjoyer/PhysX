@@ -59,6 +59,8 @@ ANVIL_FORCE_INLINE Double2 divide(Double2 left, Double2 right) { return wasm_f64
 ANVIL_FORCE_INLINE Double2 squareRoot(Double2 value) { return wasm_f64x2_sqrt(value); }
 // Pseudo-maximum: left < right ? right : left, which matches SSE2 for ordered values.
 ANVIL_FORCE_INLINE Double2 maximum(Double2 left, Double2 right) { return wasm_f64x2_pmax(left, right); }
+// Pseudo-minimum: right < left ? right : left, which matches SSE2 for ordered values.
+ANVIL_FORCE_INLINE Double2 minimum(Double2 left, Double2 right) { return wasm_f64x2_pmin(left, right); }
 ANVIL_FORCE_INLINE Double2 greater(Double2 left, Double2 right) { return wasm_f64x2_gt(left, right); }
 ANVIL_FORCE_INLINE Double2 greaterEqual(Double2 left, Double2 right) { return wasm_f64x2_ge(left, right); }
 ANVIL_FORCE_INLINE Double2 less(Double2 left, Double2 right) { return wasm_f64x2_lt(left, right); }
@@ -90,6 +92,7 @@ ANVIL_FORCE_INLINE Double2 multiply(Double2 left, Double2 right) { return _mm_mu
 ANVIL_FORCE_INLINE Double2 divide(Double2 left, Double2 right) { return _mm_div_pd(left, right); }
 ANVIL_FORCE_INLINE Double2 squareRoot(Double2 value) { return _mm_sqrt_pd(value); }
 ANVIL_FORCE_INLINE Double2 maximum(Double2 left, Double2 right) { return _mm_max_pd(left, right); }
+ANVIL_FORCE_INLINE Double2 minimum(Double2 left, Double2 right) { return _mm_min_pd(left, right); }
 ANVIL_FORCE_INLINE Double2 greater(Double2 left, Double2 right) { return _mm_cmpgt_pd(left, right); }
 ANVIL_FORCE_INLINE Double2 greaterEqual(Double2 left, Double2 right) { return _mm_cmpge_pd(left, right); }
 ANVIL_FORCE_INLINE Double2 less(Double2 left, Double2 right) { return _mm_cmplt_pd(left, right); }

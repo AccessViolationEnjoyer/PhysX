@@ -68,7 +68,7 @@ physx/compiler/anvil/native-build/profile/MujocoPalletConveyor.exe physx/tests/a
 Arguments:
 
 ```text
-SnippetPalletConveyor output-prefix [steps=2000] [dt=.01] [position=16] [velocity=2] [threads=8] [pgs|anvil] [regularization=1e-4] [Anvil-iterations=100] [friction-corrections=2] [surface-regularization=1e-2] [stiffening-depth=2e-5]
+SnippetPalletConveyor output-prefix [steps=2000] [dt=.01] [position=16] [velocity=2] [threads=8] [pgs|anvil] [regularization=1e-4] [Anvil-iterations=100] [surface-regularization=1e-2] [stiffening-depth=2e-5]
 MujocoPalletConveyor scene.xml output-prefix mujoco|prototype [steps=2000] [dt=.01] [iterations=100] [threads=8] [impedance=0] [audit=0] [profile=0]
 ```
 
@@ -107,8 +107,9 @@ PhysX uses `onContactModify` only for pairs involving a conveyor. The callback s
 velocity with the sign appropriate to the actor order. Conveyors themselves remain static.
 PhysX retains its default **2 cm contact offset per shape** and zero rest offset; the old
 zero-margin experiments do not constrain this test. PGS uses its patch-friction model.
-Anvil uses four nonnegative MuJoCo pyramid edges per frictional point and MuJoCo's
-reference-acceleration equation.
+PhysX Anvil uses a normal row and two lagged friction rows per frictional point (see
+`../PHYSX_INTEGRATION.md`), and MuJoCo's reference-acceleration equation; the prototype adapter
+uses four nonnegative MuJoCo pyramid edges.
 
 MuJoCo does not expose a contact target-velocity setter. The runner adjusts the contact
 reference acceleration after `mj_step1`, using the prescribed belt velocity projected onto

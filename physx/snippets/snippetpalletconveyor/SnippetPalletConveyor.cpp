@@ -80,7 +80,7 @@ int main(int argc, const char* const* argv)
 {
 	if(argc < 2)
 	{
-		printf("SnippetPalletConveyor output-prefix [steps=2000] [dt=.01] [position=16] [velocity=2] [threads=8] [pgs|anvil] [regularization=1e-4] [iterations=100] [friction-corrections=4] [surface-regularization=1e-2] [stiffening-depth=2e-5]\n");
+		printf("SnippetPalletConveyor output-prefix [steps=2000] [dt=.01] [position=16] [velocity=2] [threads=8] [pgs|anvil] [regularization=1e-4] [iterations=100] [surface-regularization=1e-2] [stiffening-depth=2e-5]\n");
 		return 1;
 	}
 	const int steps = argc > 2 ? atoi(argv[2]) : 2000;
@@ -103,9 +103,8 @@ int main(int argc, const char* const* argv)
 	description.solverType = argc > 7 && std::strcmp(argv[7], "anvil") == 0 ? PxSolverType::eANVIL : PxSolverType::ePGS;
 	description.anvilRegularization = argc > 8 ? PxReal(atof(argv[8])) : description.anvilRegularization;
 	description.anvilMaxIterations = argc > 9 ? PxU32(atoi(argv[9])) : description.anvilMaxIterations;
-	description.anvilFrictionCorrections = argc > 10 ? PxU32(atoi(argv[10])) : description.anvilFrictionCorrections;
-	description.anvilSurfaceRegularization = argc > 11 ? PxReal(atof(argv[11])) : description.anvilSurfaceRegularization;
-	description.anvilStiffeningDepth = argc > 12 ? PxReal(atof(argv[12])) : description.anvilStiffeningDepth;
+	description.anvilSurfaceRegularization = argc > 10 ? PxReal(atof(argv[10])) : description.anvilSurfaceRegularization;
+	description.anvilStiffeningDepth = argc > 11 ? PxReal(atof(argv[11])) : description.anvilStiffeningDepth;
 	description.flags |= PxSceneFlag::eENABLE_FRICTION_EVERY_ITERATION;
 	NativeSolverProfiler profiler;
 	if(description.solverType == PxSolverType::eANVIL)

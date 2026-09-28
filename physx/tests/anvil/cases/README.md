@@ -62,8 +62,9 @@ Anvil needs one iteration per tote once the stiffening curve is stable for light
 heavy loads (see `../README.md`); with MuJoCo's curve it took 17% longer.
 
 Belts that start at full speed (`belt-ramp` 0) make every tote slide for about 0.1 s while friction accelerates
-it at 0.5 g, and its boxes slide inside it. Anvil then runs its dilatancy corrections on every
-tote, so steps 2-15 take 10 ms, against 5.2 ms (native) and 3.6 ms (WebAssembly) with PGS. With
+it at 0.5 g, and its boxes slide inside it. Anvil still takes one solve per tote and step, so
+steps 2-15 take 3.6 ms natively (10 ms with the earlier pyramid friction and its dilatancy
+corrections), against 5.2 ms with PGS; in WebAssembly they include compilation. With
 the default 1 s belt ramp (`benchmark-20260926-ramp1s`) nothing slides and every tote takes one Anvil
 iteration from the first step: steps 2-15 take 3.2 ms natively and 3.9 ms in WebAssembly (PGS
 2.8 and 3.9 ms). The first step of every solver is several times slower than the rest, since
