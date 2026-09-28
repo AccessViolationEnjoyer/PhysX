@@ -49,9 +49,10 @@ namespace Dy
 {
 static volatile PxI32 gAnvilParallelTaskActive = 0;
 // Pyramid friction separates sliding contacts unless each edge is biased by the solved
-// slip speed (PxSceneDesc::anvilFrictionCorrections). Intermediate corrections only
-// estimate that speed for the next bias, so they run a bounded number of iterations;
-// the final solve uses the full limit.
+// slip speed (PxSceneDesc::anvilFrictionCorrections). Each bias starts from the pair's slip
+// velocity in the previous step, so the corrections continue over steps. The main solve and
+// intermediate corrections only estimate slip speed for the next bias, so they run a bounded
+// number of iterations; the final solve uses the full limit.
 static const int ANVIL_DILATANCY_ESTIMATE_ITERATIONS = 20;
 
 class AnvilParallelExecutor;
@@ -635,24 +636,32 @@ static bool solveAnvilRows(AnvilSolver& solver, AnvilIslandWorkspace& workspace,
 		// Stop once a step would move no body by the displacement tolerance in this timestep.
 		settings.velocityTolerance = double(solver.displacementTolerance) / timestep;
 		settings.angularVelocityTolerance = settings.velocityTolerance / context.getLengthScale();
-		if(!solveAnvilSystem(settings, workspace, &workspace.previous))
+		// With sliding contacts to correct, the main solve only estimates slip speed too.
+		const PxU32 corrections = solver.dilatancyCorrections;
+		const bool mainEstimate = corrections > 0 && workspace.contacts.frictionPoints.size() > 0;
+		anvil::Settings mainSettings = settings;
+		if(mainEstimate)
+		{
+			mainSettings.iterations = PxMin(settings.iterations, ANVIL_DILATANCY_ESTIMATE_ITERATIONS);
+		}
+		if(!solveAnvilSystem(mainSettings, workspace, &workspace.previous))
 		{
 			solver.report("Anvil solve failed.");
 			return false;
 		}
-		// Dilatancy corrections re-solve with biases from the previous solution. The main and
-		// final solves use the full limit; intermediate ones only estimate slip speed, and one
-		// that meets its tolerance within that estimate budget is already final.
+		// Dilatancy corrections re-solve with biases from the previous solution. The final
+		// solve uses the full limit; earlier ones only estimate slip speed, and one that meets
+		// its tolerance within that estimate budget is already final.
 		const PxReal velocityTolerance = 1.0e-5f * context.getLengthScale() / timestep;
 		const int fullIterations = solver.settings.iterations;
-		bool converged = true;
-		for(PxU32 iteration = 0; iteration < solver.dilatancyCorrections; ++iteration)
+		bool converged = !mainEstimate || workspace.result.status == anvil::SolveStatus::eSUCCESS;
+		for(PxU32 iteration = 0; iteration < corrections; ++iteration)
 		{
 			if(!updateAnvilDilatancyBias(workspace.contacts, workspace.problem, workspace.result, velocityTolerance))
 			{
 				break;
 			}
-			const bool final = iteration + 1 == solver.dilatancyCorrections;
+			const bool final = iteration + 1 == corrections;
 			if(!continueAnvilSystem(settings, workspace, final ? fullIterations : ANVIL_DILATANCY_ESTIMATE_ITERATIONS))
 			{
 				solver.report("Anvil friction correction failed.");

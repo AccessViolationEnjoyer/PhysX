@@ -77,15 +77,19 @@ through the serial path. Anvil adds no OpenMP dependency, and the PGS and TGS pa
 submitted job wakes one sleeping worker, the one that slept most recently, instead of every
 sleeper; busy workers make no event calls. This applies to PGS and TGS scenes too.
 
-Sliding pyramid contacts are corrected for dilatancy by up to four continuation solves
+Sliding pyramid contacts are corrected for dilatancy by up to two continuation solves
 (`PxSceneDesc::anvilFrictionCorrections`; 0 disables them), each biasing the contact's edges
-by the previous solution's slip speed. The main solve and the last correction use the full
-iteration limit. Intermediate corrections only estimate slip speed for the
-next bias, so they are limited to 20 iterations; if corrections stop while the last one was still
-limited, one more full-limit continuation finishes it. `AnvilSlidingTests` (boxes and a loaded
-container sliding down a ramp, and a loaded container pushed along a floor) measure the resulting
-lift-off: every budget of 15 or more matched the full limit, while 10 let the pushed container's
-load lift 0.6 mm. Without corrections, sliding bodies lift about 30 mm.
+by the previous solution's slip speed. Every contact pair keeps its solved slip velocity and
+twist rate in its friction state, loaded or not, and the next step's biases start from them, so
+the corrections continue from step to step instead of restarting at zero. When a contact needs
+correcting, the main solve and intermediate corrections only estimate slip speed for the next
+bias, so they are limited to 20 iterations; the last correction uses the full iteration limit,
+and if corrections stop while the last solve was still limited, one more full-limit continuation
+finishes it. `AnvilSlidingTests` (boxes and a loaded container sliding down a ramp, and a loaded
+container pushed along a floor) measure the resulting lift-off: the pushed container's load lifts
+0.05 mm and bounces at 2.4 mm/s (four corrections from zero: 0.07 mm and 10.5 mm/s); one
+correction lets it sink 3.3 mm. On the five-pallet scene this halves the fall-off peaks (WebAssembly
+fall p95 22.7 to 11.2 ms, peak 26.9 to 14.0 ms). Without corrections, sliding bodies lift about 30 mm.
 
 Workspaces retain row, matrix, factor and result capacity between jobs. Warm starts store
 physical body corrections and transform angular corrections into the current inertia basis.

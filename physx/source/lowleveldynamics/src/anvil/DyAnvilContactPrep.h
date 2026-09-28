@@ -95,10 +95,15 @@ struct AnvilContactPoint
 // instead of creeping.
 // A sliding pair has no accumulated slip: its twist is ANVIL_SLIDING_TWIST, a value the slip
 // limit keeps accumulated twist from reaching.
+// slipVelocity and twistVelocity are the last step's solved tangential velocity at the centre
+// and rotation rate about the normal, loaded or not; the next step's dilatancy biases start
+// from them.
 struct AnvilFrictionState
 {
 	PxReal slip[3];
 	PxReal twist;
+	PxReal slipVelocity[3];
+	PxReal twistVelocity;
 };
 
 static const PxReal ANVIL_SLIDING_TWIST = PX_MAX_F32;

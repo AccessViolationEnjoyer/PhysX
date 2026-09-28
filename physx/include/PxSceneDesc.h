@@ -791,7 +791,7 @@ public:
 	slightly. 0 disables them, which is cheaper when contacts slide but lets sliding bodies lift
 	by a small amount.
 
-	<b>Default:</b> 4
+	<b>Default:</b> 2
 	*/
 	PxU32 anvilFrictionCorrections;
 
@@ -1187,7 +1187,7 @@ PX_INLINE PxSceneDesc::PxSceneDesc(const PxTolerancesScale& scale):
 	anvilDisplacementTolerance			(1e-7f * scale.length),
 	anvilRegularization				(1e-4f),
 	anvilJointRegularization			(1e-10f),
-	anvilFrictionCorrections			(4),
+	anvilFrictionCorrections			(2),
 	anvilSurfaceRegularization			(1e-2f),
 	anvilStiffeningDepth				(2e-5f * scale.length),
 	bounceThresholdVelocity			(0.2f * scale.speed),

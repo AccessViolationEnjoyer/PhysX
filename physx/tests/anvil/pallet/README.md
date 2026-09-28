@@ -68,7 +68,7 @@ physx/compiler/anvil/native-build/profile/MujocoPalletConveyor.exe physx/tests/a
 Arguments:
 
 ```text
-SnippetPalletConveyor output-prefix [steps=2000] [dt=.01] [position=16] [velocity=2] [threads=8] [pgs|anvil] [regularization=1e-4] [Anvil-iterations=100] [friction-corrections=4] [surface-regularization=1e-2] [stiffening-depth=2e-5]
+SnippetPalletConveyor output-prefix [steps=2000] [dt=.01] [position=16] [velocity=2] [threads=8] [pgs|anvil] [regularization=1e-4] [Anvil-iterations=100] [friction-corrections=2] [surface-regularization=1e-2] [stiffening-depth=2e-5]
 MujocoPalletConveyor scene.xml output-prefix mujoco|prototype [steps=2000] [dt=.01] [iterations=100] [threads=8] [impedance=0] [audit=0] [profile=0]
 ```
 
