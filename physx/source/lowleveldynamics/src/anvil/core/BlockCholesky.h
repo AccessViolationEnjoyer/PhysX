@@ -530,10 +530,14 @@ private:
 			const Vec6 solved = loadVector<6>(solution + 6 * m_blockColumns[block]);
 			subtractFloatMatrixVector6(current.data(), m_blocks[block].data(), solved.data());
 		}
+		// Pivots multiply by the reciprocals of the stored pivots rather than dividing.
 		const Block& diagonal = m_blocks[m_blockOuter[body]];
+		const double* inverse = &m_inverseDiagonal[6 * body];
+		ANVIL_UNROLL
 		for(int column = 0; column < 6; ++column)
 		{
-			current[column] /= diagonal(column, column);
+			current[column] *= inverse[column];
+			ANVIL_UNROLL
 			for(int row = column + 1; row < 6; ++row)
 			{
 				current[row] -= diagonal(row, column) * current[column];
@@ -555,13 +559,16 @@ private:
 			}
 		}
 		const Block& diagonal = m_blocks[m_blockOuter[body]];
+		const double* inverse = &m_inverseDiagonal[6 * body];
+		ANVIL_UNROLL
 		for(int column = 5; column >= 0; --column)
 		{
+			ANVIL_UNROLL
 			for(int row = column + 1; row < 6; ++row)
 			{
 				current[column] -= diagonal(row, column) * current[row];
 			}
-			current[column] /= diagonal(column, column);
+			current[column] *= inverse[column];
 		}
 		storeVector<6>(solution + 6 * body, current);
 	}
@@ -841,40 +848,47 @@ private:
 
 	// Factor a diagonal block's lower triangle in double precision into its single-precision
 	// factor and the reciprocals of the stored pivots; false for a nonpositive pivot.
-	// The arithmetic is cholesky6's.
+	// Each pivot is rounded to single precision before its column is scaled, so the column,
+	// the stored factor and the returned reciprocal all use the stored pivot.
 	static bool factorDiagonal(const Block& input, Block& output, double* inverseDiagonal)
 	{
 		double lower[6][6];
+		ANVIL_UNROLL
 		for(int column = 0; column < 6; ++column)
 		{
 			double diagonal = input(column, column);
+			ANVIL_UNROLL
 			for(int inner = 0; inner < column; ++inner)
 			{
 				diagonal -= lower[inner][column] * lower[inner][column];
 			}
-			if(!(diagonal > 0.0))
+			if(diagonal <= 0.0)
 			{
 				return false;
 			}
-			lower[column][column] = std::sqrt(diagonal);
-			const double inverse = 1.0 / lower[column][column];
+			const float pivot = float(std::sqrt(diagonal));
+			const double inverse = 1.0 / double(pivot);
+			inverseDiagonal[column] = inverse;
+			float* stored = output.data() + 8 * column;
+			ANVIL_UNROLL
+			for(int row = 0; row < column; ++row)
+			{
+				stored[row] = 0.0f;
+			}
+			stored[column] = pivot;
+			ANVIL_UNROLL
 			for(int row = column + 1; row < 6; ++row)
 			{
 				double value = input(row, column);
+				ANVIL_UNROLL
 				for(int inner = 0; inner < column; ++inner)
 				{
 					value -= lower[inner][row] * lower[inner][column];
 				}
 				lower[column][row] = value * inverse;
+				stored[row] = float(lower[column][row]);
 			}
-		}
-		for(int column = 0; column < 6; ++column)
-		{
-			for(int row = 0; row < 8; ++row)
-			{
-				output(row, column) = row >= column && row < 6 ? float(lower[column][row]) : 0.0f;
-			}
-			inverseDiagonal[column] = 1.0 / double(output(column, column));
+			stored[6] = stored[7] = 0.0f;
 		}
 		return true;
 	}

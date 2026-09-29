@@ -1531,7 +1531,7 @@ static bool solveDenseReference(const Sparse& matrix, ConstVector gradient, Muta
 			const double value = lower[std::uint32_t(column) * std::uint32_t(size) + std::uint32_t(inner)];
 			diagonal -= value * value;
 		}
-		if(!(diagonal > 0.0))
+		if(diagonal <= 0.0)
 		{
 			return false;
 		}

@@ -39,6 +39,13 @@ namespace anvil
 #define ANVIL_FORCE_INLINE inline __attribute__((always_inline))
 #define ANVIL_RESTRICT __restrict__
 #endif
+// Fully unrolls the next loop, so small fixed arrays stay in registers under Clang, which
+// otherwise leaves short nested loops rolled in WebAssembly.
+#if defined(__clang__)
+#define ANVIL_UNROLL _Pragma("clang loop unroll(full)")
+#else
+#define ANVIL_UNROLL
+#endif
 
 #if defined(ANVIL_SIMD128)
 // Two-double vector operations shared by the SSE2 and WebAssembly kernels.
@@ -234,7 +241,7 @@ ANVIL_FORCE_INLINE double dot6(const double* ANVIL_RESTRICT left, const double* 
 #endif
 }
 
-// Number of entries that compare unequal to zero, including NaN.
+// Number of entries that compare unequal to zero.
 ANVIL_FORCE_INLINE int nonzeroCount6(const double* values)
 {
 #if defined(ANVIL_AVX2_FMA)
@@ -1435,7 +1442,7 @@ inline bool cholesky6(const Matrix<6, 6>& input, Matrix<6, 6>& lower, double* in
 		{
 			diagonal -= lower(column, inner) * lower(column, inner);
 		}
-		if(!(diagonal > 0.0))
+		if(diagonal <= 0.0)
 		{
 			return false;
 		}
@@ -1467,22 +1474,26 @@ inline bool cholesky6(const Matrix<6, 6>& input, Matrix<6, 6>& lower)
 // untouched) and the inverse diagonal, which is all a triangular solve needs.
 inline bool cholesky6Packed(const Matrix<6, 6>& input, double* strictLower, double* inverseDiagonal)
 {
+	ANVIL_UNROLL
 	for(int column = 0; column < 6; ++column)
 	{
 		double diagonal = input(column, column);
+		ANVIL_UNROLL
 		for(int inner = 0; inner < column; ++inner)
 		{
 			diagonal -= strictLower[column * 6 + inner] * strictLower[column * 6 + inner];
 		}
-		if(!(diagonal > 0.0))
+		if(diagonal <= 0.0)
 		{
 			return false;
 		}
 		const double inverse = 1.0 / std::sqrt(diagonal);
 		inverseDiagonal[column] = inverse;
+		ANVIL_UNROLL
 		for(int row = column + 1; row < 6; ++row)
 		{
 			double value = input(row, column);
+			ANVIL_UNROLL
 			for(int inner = 0; inner < column; ++inner)
 			{
 				value -= strictLower[row * 6 + inner] * strictLower[column * 6 + inner];

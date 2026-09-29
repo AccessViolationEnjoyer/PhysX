@@ -245,7 +245,9 @@ public:
 					continue;
 				}
 				const CompactContact& contact = problem.contacts[update.contact];
-				const bool fullRank = updateSparse(problem, contact, update.axis, update.add);
+				Vec6 vector[2];
+				updateVectors(problem, contact, update.axis, vector);
+				const bool fullRank = updatePair(contact.body, vector, update.add);
 				++result.rankUpdates;
 				if(!fullRank)
 				{
@@ -290,18 +292,22 @@ public:
 		{
 			// Solve L L^T direction = -gradient with the dense one-body factor.
 			double value[6];
+			ANVIL_UNROLL
 			for(int row = 0; row < 6; ++row)
 			{
 				double sum = -gradient[row];
+				ANVIL_UNROLL
 				for(int inner = 0; inner < row; ++inner)
 				{
 					sum -= m_denseLower[row * 6 + inner] * value[inner];
 				}
 				value[row] = sum * m_denseInverse[row];
 			}
+			ANVIL_UNROLL
 			for(int row = 5; row >= 0; --row)
 			{
 				double sum = value[row];
+				ANVIL_UNROLL
 				for(int inner = row + 1; inner < 6; ++inner)
 				{
 					sum -= m_denseLower[inner * 6 + row] * value[inner];
@@ -785,9 +791,8 @@ private:
 		}
 	}
 
-	bool updateSparse(const Problem& problem, const CompactContact& contact, const Vec3& axis, bool add)
+	void updateVectors(const Problem& problem, const CompactContact& contact, const Vec3& axis, Vec6* vector) const
 	{
-		Vec6 vector[2];
 		for(int end = 0; end < 2; ++end)
 		{
 			if(contact.body[end] >= 0)
@@ -802,23 +807,11 @@ private:
 				}
 			}
 		}
-		return updatePair(contact.body, vector, add);
 	}
 
-	template<bool Add>
-	bool updatePairSigned(const int* body, const Vec6* vector)
+	// Scatters an update's endpoint vectors into its zero work vector; returns its first column.
+	int scatterUpdate(const int* body, const Vec6* vector, double* work) const
 	{
-		// Preserve the established signed-update kernel's pivot floor.
-		static constexpr double minimumPivotSquare = 1.0e-15;
-		// The allocated Hessian contains the complete clique of each contact's
-		// endpoint coordinates, including inactive rows. Consequently its rank
-		// update reaches a single ancestor path of the Cholesky elimination tree.
-		// The first off-diagonal row in a factor column is its parent. A retained
-		// dense work vector avoids rebuilding/merging sparse index lists at every
-		// pivot, while the factor's sparse columns bound all numerical work.
-		// A successful update consumes the single elimination-tree path below and
-		// clears every visited entry, so the retained vector is already zero here.
-		// Avoid clearing the entire factor-sized vector for every contact update.
 		int first = m_size;
 		for(int end = 0; end < 2; ++end)
 		{
@@ -831,60 +824,91 @@ private:
 					if(row[component] != 0.0)
 					{
 						const int column = base + component;
-						m_vector[column] = row[component];
+						work[column] = row[component];
 						first = std::min(first, column);
 					}
 				}
 			}
 		}
+		return first;
+	}
+
+	// One column of a signed rank-one update with the given work vector; false for a pivot
+	// that requires a full refactorization.
+	template<bool Add>
+	ANVIL_FORCE_INLINE bool updateColumn(int column, double* work)
+	{
+		// Preserve the established signed-update kernel's pivot floor.
+		static constexpr double minimumPivotSquare = 1.0e-15;
+		const double x = work[column];
+		if(x == 0.0)
+		{
+			return true;
+		}
 		Sparse& lower = m_factor.m_matrix;
-		const int* outer = lower.outerIndexPtr();
 		const int* inner = lower.innerIndexPtr();
 		double* values = lower.valuePtr();
-		for(int column = first; column < m_size;)
+		const int begin = lower.outerIndexPtr()[column], end = lower.outerIndexPtr()[column + 1];
+		const double diagonal = values[begin];
+		const double square = diagonal * diagonal + (Add ? x * x : -x * x);
+		// A nonpositive or undersized pivot requires a full refactorization.
+		if(square < minimumPivotSquare)
+		{
+			return false;
+		}
+		const double r = std::sqrt(square);
+		const double inverseDiagonal = m_updateInverseDiagonal[column];
+		const double inverseR = 1.0 / r;
+		const double c = r * inverseDiagonal;
+		const double s = x * inverseDiagonal;
+		const double inverseC = diagonal * inverseR;
+		const double signedSC = (Add ? x : -x) * inverseR;
+		values[begin] = r;
+		m_updateInverseDiagonal[column] = inverseR;
+		// Full body blocks make six consecutive factor entries address six
+		// consecutive work values. Expose those packets without gathers.
+		const int remainder = 5 - column % 6;
+		int entry = begin + 1;
+		for(int stop = entry + remainder; entry < stop; ++entry)
+		{
+			const int row = inner[entry];
+			const double next = inverseC * values[entry] + signedSC * work[row];
+			values[entry] = next;
+			work[row] = c * work[row] - s * next;
+		}
+		for(; entry < end; entry += 6)
+		{
+			updateCholesky6(values + entry, work + inner[entry], inverseC, signedSC, c, s);
+		}
+		work[column] = 0.0;
+		return true;
+	}
+
+	template<bool Add>
+	bool updatePairSigned(const int* body, const Vec6* vector)
+	{
+		// The allocated Hessian contains the complete clique of each contact's
+		// endpoint coordinates, including inactive rows. Consequently its rank
+		// update reaches a single ancestor path of the Cholesky elimination tree.
+		// The first off-diagonal row in a factor column is its parent. A retained
+		// dense work vector avoids rebuilding/merging sparse index lists at every
+		// pivot, while the factor's sparse columns bound all numerical work.
+		// A successful update consumes the single elimination-tree path below and
+		// clears every visited entry, so the retained vector is already zero here.
+		// Avoid clearing the entire factor-sized vector for every contact update.
+		const Sparse& lower = m_factor.m_matrix;
+		const int* outer = lower.outerIndexPtr();
+		const int* inner = lower.innerIndexPtr();
+		for(int column = scatterUpdate(body, vector, m_vector.data()); column < m_size;)
 		{
 			const int begin = outer[column], end = outer[column + 1];
 			const int parent = end > begin + 1 ? inner[begin + 1] : m_size;
-			const double x = m_vector[column];
-			if(x != 0.0)
+			if(!updateColumn<Add>(column, m_vector.data()))
 			{
-				const double diagonal = values[begin];
-				const double square = diagonal * diagonal + (Add ? x * x : -x * x);
-				// A nonpositive or undersized pivot requires a full refactorization.
-				if(!(square >= minimumPivotSquare))
-				{
-					// A failed downdate leaves values on the unconsumed suffix of the
-					// path. Restore the zero invariant before the full-factor fallback.
-					std::fill(m_vector.begin(), m_vector.end(), 0.0);
-					return false;
-				}
-				const double r = std::sqrt(square);
-				const double inverseDiagonal = m_updateInverseDiagonal[column];
-				const double inverseR = 1.0 / r;
-				const double c = r * inverseDiagonal;
-				const double s = x * inverseDiagonal;
-				const double inverseC = diagonal * inverseR;
-				const double signedSC = (Add ? x : -x) * inverseR;
-				values[begin] = r;
-				m_updateInverseDiagonal[column] = inverseR;
-				// Full body blocks make six consecutive factor entries address six
-				// consecutive work values. Expose those packets without gathers.
-				const int remainder = 5 - column % 6;
-				int entry = begin + 1;
-				for(int stop = entry + remainder; entry < stop; ++entry)
-				{
-					const int row = inner[entry];
-					const double next = inverseC * values[entry] + signedSC * m_vector[row];
-					values[entry] = next;
-					m_vector[row] = c * m_vector[row] - s * next;
-				}
-				for(; entry < end; entry += 6)
-				{
-					double* factor = values + entry;
-					double* work = m_vector.data() + inner[entry];
-					updateCholesky6(factor, work, inverseC, signedSC, c, s);
-				}
-				m_vector[column] = 0.0;
+				// A failed downdate leaves values on the unconsumed suffix of the
+				// path. Restore the zero invariant before the full-factor fallback.
+				std::fill(m_vector.begin(), m_vector.end(), 0.0);
+				return false;
 			}
 			column = parent;
 		}

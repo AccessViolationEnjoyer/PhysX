@@ -108,7 +108,7 @@ public:
 			}
 			const int entry = outer[column] + m_nonZerosPerColumn[column]++;
 			inner[entry] = column;
-			if(!(diagonal > 0.0))
+			if(diagonal <= 0.0)
 			{
 				return false;
 			}

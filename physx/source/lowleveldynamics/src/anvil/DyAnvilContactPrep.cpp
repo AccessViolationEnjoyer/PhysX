@@ -176,12 +176,12 @@ static PX_FORCE_INLINE double prepareContactJacobian(anvil::CompactContact& row,
 
 static PX_FORCE_INLINE void contactTangents(const PxVec3& normal, const PxVec3& relativeVelocity, PxVec3& tangent0, PxVec3& tangent1)
 {
-	tangent0 = relativeVelocity - normal * normal.dot(relativeVelocity);
-	if(tangent0.magnitudeSquared() <= 0.0001f)
-	{
-		tangent0 = PxAbs(normal.x) < 0.70710678f ? PxVec3(0.0f, -normal.z, normal.y) : PxVec3(-normal.y, normal.x, 0.0f);
-	}
-	tangent0.normalize();
+	// Selects rather than branches: resting and sliding points mix within a pair. Either choice
+	// is nonzero, as the fallback is at least 1/sqrt(2) long, so it normalizes unconditionally.
+	const PxVec3 sliding = relativeVelocity - normal * normal.dot(relativeVelocity);
+	const PxVec3 fallback = PxAbs(normal.x) < 0.70710678f ? PxVec3(0.0f, -normal.z, normal.y) : PxVec3(-normal.y, normal.x, 0.0f);
+	tangent0 = sliding.magnitudeSquared() <= 0.0001f ? fallback : sliding;
+	tangent0 /= tangent0.magnitude();
 	tangent1 = normal.cross(tangent0);
 }
 
@@ -419,11 +419,11 @@ static void appendAnvilContact(const PxContactPoint& contact, PxReal restDistanc
 		(bounce ? -double(contact.restitution) * initialNormalSpeed : 0.0);
 	const double freeNormalSpeed = dotAnvilContact(contact.normal, freePointVelocity);
 	const double response = translationResponse > 0.0 ? translationResponse : 1.0;
-	const double regularization = std::max(1.0e-15, ratio * response);
+	const double regularization = ratio * response;
 	const double upper = hasContactImpulseLimit(contact.maxImpulse) ? contact.maxImpulse : anvil::MAX_IMPULSE;
 	const bool friction = !hasContactImpulseLimit(contact.maxImpulse) && !(contact.materialFlags & PxMaterialFlag::eDISABLE_FRICTION) && frictionCoefficient > 0.0f;
 	appendContactRow(contact.normal, normalAngular0, normalAngular1, initialNormalSpeed, freeNormalSpeed, normalTarget, penetration, stiffness, damping, impedance,
-		friction ? std::max(1.0e-15, ANVIL_FRICTION_NORMAL_REGULARIZATION * regularization) : regularization, bodyIndex0, bodyIndex1, jacobianBodies, settings, problem, upper);
+		friction ? ANVIL_FRICTION_NORMAL_REGULARIZATION * regularization : regularization, bodyIndex0, bodyIndex1, jacobianBodies, settings, problem, upper);
 	if(!friction || PxU32(problem.contacts.size()) == firstContact)
 	{
 		appendContactPoint(firstContact, forceDestination, 0.0f, 0.0f, problem, output);
@@ -649,7 +649,7 @@ void writebackAnvilContacts(const AnvilContactRows& rows, const anvil::Problem& 
 		{
 			pairNormal += normalImpulse(rows.points[j], problem, result);
 		}
-		state->normalImpulse = PxReal(PxMax(0.0, pairNormal));
+		state->normalImpulse = PxReal(pairNormal);
 		// A rigid contact slides only when every loaded point is saturated; one saturated corner
 		// does not move a body the others still hold.
 		bool loaded = false, saturated = true;
