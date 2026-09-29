@@ -93,8 +93,26 @@ per row, body or block. Each body and block gathers its rows in the order serial
 them, so results are the same as serial evaluation. On the 1,000-box pile this took native steps
 from 17.2 to 13.4 ms and WebAssembly from 26.0 to 22.4 ms with eight workers.
 
-The block factor stores its 6x6 blocks in single precision, each column padded to eight floats,
-so one block column is one AVX register or two WebAssembly `f32x4` vectors and the block updates
+Large factors also solve their triangular systems on the helpers. The elimination tree's chains,
+its maximal paths of bodies with one child each, are the separators of the nested dissection
+order; chains of one depth are independent. The chains of the first four depths are solved in
+stages and each subtree below them is one task. In the forward solve a chain's bodies first
+subtract the blocks of deeper chains, every body independently, and then the chain solves in
+order; the backward solve takes the chains from the top, one task per chain. Each stage's work
+is split into at most 16 tasks of similar block counts, and a stage with a single task runs
+without helpers. A row's blocks of deeper chains precede those of its own chain, so every solve
+subtracts them in the serial order and gives the serial result. The schedule it replaces ran
+one parallel region per set of independent bodies: 223 per solve on the 1,000-box pile, half of
+them a single body, with half of the forward solve in the rows of the 100-body top chain, and
+took as long with eight workers as without helpers. With 14 regions per solve, WebAssembly steps
+of the 1,000-box pile take 5% less time and those of the 500-box pile 6% less.
+
+The block factor stores its 6x6 blocks in single precision. Builds with 256-bit vectors pad each
+column to eight floats, so one block column is one AVX register. Builds with 128-bit vectors,
+WebAssembly among them, store 36 floats without padding, rows 0-3 of the six columns and then
+their rows 4-5, so two columns' last rows share a vector and a block update takes nine vectors
+instead of twelve; every entry receives the same operations in both layouts, and results are
+unchanged. WebAssembly piles step 3-7% faster for it. Either way the block updates
 that dominate factorization process twice the values per instruction. Diagonal blocks are
 factored in double precision and then rounded, and triangular solves accumulate in double. The
 factor only sets the Newton direction: the factor of a slightly perturbed positive definite
@@ -118,6 +136,14 @@ announced sleep but then found a job itself passes on any wake a submitter meant
 job waits in a queue while a worker sleeps. Without this, a parallel region's helpers, which wait
 for each other, occasionally hung for good (about once in 300,000 regions in a dispatcher stress
 test of that pattern, and once in the 1,000-box pile benchmark).
+
+A worker that wakes also leaves the sleepers itself, whether or not a submitter claimed it. A
+submitter claims a worker and signals it a moment later; in between, the worker may find a job
+itself, run it, announce sleep again and begin to wait, so the late signal wakes it while it is
+still announced. It then ran jobs while counted as sleeping, and a later job's wake went to that
+busy worker instead of a sleeping one: a WebAssembly pile benchmark hung with the island task and
+six helpers spinning and one worker asleep, about once in a hundred runs. An exhaustive model of
+the protocol reaches that deadlock with three workers and one short job, and none with the rule.
 
 Friction and normal rows are all scalar rows, so the core keeps its compact, vectorized
 row kernels for them: rows carry `[lower, upper]` impulse bounds (`[0, cap]` for normals,

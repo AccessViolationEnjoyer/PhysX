@@ -193,6 +193,17 @@ void Ext::DefaultCpuDispatcher::prepareToWait(CpuWorkerThread& worker)
 		worker.wake();
 }
 
+void Ext::DefaultCpuDispatcher::finishWait(CpuWorkerThread& worker)
+{
+	// A signal can arrive without a claim: a submitter claims a worker and signals it a moment
+	// later, and meanwhile the worker may have found a job itself, run it, announced sleep again
+	// and begun to wait. That late signal wakes it still announced. It would then run jobs
+	// while counted as sleeping, and a later job's wake would go to this busy worker instead of a
+	// sleeping one. A parallel region whose helpers wait for each other then never finishes.
+	if(worker.claimSleeping())
+		PxAtomicDecrement(&mSleepingThreads);
+}
+
 void Ext::DefaultCpuDispatcher::cancelWait(CpuWorkerThread& worker)
 {
 	// A submitter that already claimed the worker has removed it from the count. Its wake was

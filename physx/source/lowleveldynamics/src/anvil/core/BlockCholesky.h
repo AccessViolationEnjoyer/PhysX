@@ -2,22 +2,31 @@
 // Scalar storage is exported only when signed rank updates invalidate the retained blocks.
 namespace anvil
 {
-// A 6x6 factor block in single precision, each column padded to eight rows that stay zero.
+// A 6x6 factor block in single precision, in the layout of the kernels' vector width.
 // Newton directions tolerate the rounding of a single-precision factor: the factor of a
 // slightly perturbed positive definite Hessian still gives a descent direction, and the exact
 // line search and convergence test work on the double-precision problem. Halving the width
 // doubles the SIMD lanes of the block updates that dominate the factorization.
-class alignas(32) FloatBlock
+class alignas(FLOAT_BLOCK_ALIGNMENT) FloatBlock
 {
 public:
-	float& operator()(int row, int column) { return m_values[8 * column + row]; }
-	float operator()(int row, int column) const { return m_values[8 * column + row]; }
+	float& operator()(int row, int column) { return m_values[floatBlockIndex(row, column)]; }
+	float operator()(int row, int column) const { return m_values[floatBlockIndex(row, column)]; }
 	float* data() { return m_values; }
 	const float* data() const { return m_values; }
-	void setZero() { std::fill(m_values, m_values + 48, 0.0f); }
+	void setZero() { std::fill(m_values, m_values + FLOAT_BLOCK_SIZE, 0.0f); }
+	// Clears a padded column's unused rows; packed blocks have none.
+	void clearPadding(int column)
+	{
+#if defined(ANVIL_PACKED_FLOAT_BLOCKS)
+		(void)column;
+#else
+		m_values[8 * column + 6] = m_values[8 * column + 7] = 0.0f;
+#endif
+	}
 
 private:
-	float m_values[48];
+	float m_values[FLOAT_BLOCK_SIZE];
 };
 
 class BlockCholesky : public StorageCholesky
@@ -31,7 +40,14 @@ class BlockCholesky : public StorageCholesky
 		// panels synchronize less but factor more of their own columns serially.
 		PANEL_PIVOTS = 16,
 		PANEL_UPDATES = 8192,
-		MIN_PARALLEL_SOLVE_UPDATES = 1000000
+		MIN_PARALLEL_SOLVE_UPDATES = 60000,
+		// Chains of the elimination tree up to this depth are solved in stages; the subtrees
+		// below them are one task each.
+		SOLVE_STAGES = 4,
+		// A stage's work is split into at most this many tasks, of at least this many blocks,
+		// so helpers claim a few tasks of similar size rather than one for every body.
+		SOLVE_TASKS = 16,
+		SOLVE_TASK_BLOCKS = 256
 	};
 public:
 	bool usesBlocks() const { return m_useBlocks; }
@@ -49,7 +65,7 @@ public:
 
 	void solveBlocks(double* solution)
 	{
-		if(m_parallelExecutor == NULL || m_parallelWorkers < 2 || m_updateOuter.back() < MIN_PARALLEL_SOLVE_UPDATES)
+		if(m_parallelExecutor == NULL || m_parallelWorkers < 2 || m_stageGroupOuter.empty())
 		{
 			solveBlocksSerial(solution);
 			return;
@@ -57,16 +73,20 @@ public:
 		ParallelSolve solve;
 		solve.factor = this;
 		solve.solution = solution;
-		const int levels = int(m_solveLevelOuter.size()) - 1;
-		for(int level = 0; level < levels; ++level)
+		// Forward: the subtrees, then each depth's chains from the deepest. A chain's bodies
+		// first gather the blocks of deeper chains, every body on its own, and then the chain
+		// solves in order.
+		solveTasks(solve, m_groupTaskOuter, SOLVE_STAGES, solveForwardGroups);
+		for(int stage = SOLVE_STAGES - 1; stage >= 0; --stage)
 		{
-			solve.first = m_solveLevelOuter[level];
-			m_parallelExecutor->parallelFor(m_solveLevelOuter[level + 1] - solve.first, solveForwardParallel, &solve);
+			solveTasks(solve, m_gatherTaskOuter, stage, gatherForwardBodies);
+			solveTasks(solve, m_groupTaskOuter, stage, solveForwardGroups);
 		}
-		for(int level = levels - 1; level >= 0; --level)
+		// Backward: chains from the top, whose columns hold their own chain's blocks and then
+		// those of the chains above, and the subtrees last.
+		for(int stage = 0; stage <= SOLVE_STAGES; ++stage)
 		{
-			solve.first = m_solveLevelOuter[level];
-			m_parallelExecutor->parallelFor(m_solveLevelOuter[level + 1] - solve.first, solveBackwardParallel, &solve);
+			solveTasks(solve, m_groupTaskOuter, stage, solveBackwardGroups);
 		}
 	}
 
@@ -177,33 +197,6 @@ public:
 			}
 		}
 		m_rowOuter[bodies] = int(m_rowEntries.size());
-		m_solveLevels.resize(bodies);
-		int levelCount = 0;
-		for(int body = 0; body < bodies; ++body)
-		{
-			int level = 0;
-			for(int entry = m_rowOuter[body]; entry < m_rowOuter[body + 1]; ++entry)
-			{
-				level = std::max(level, m_solveLevels[m_blockColumns[m_rowEntries[entry]]] + 1);
-			}
-			m_solveLevels[body] = level;
-			levelCount = std::max(levelCount, level + 1);
-		}
-		m_solveLevelOuter.assign(levelCount + 1, 0);
-		for(int body = 0; body < bodies; ++body)
-		{
-			++m_solveLevelOuter[m_solveLevels[body] + 1];
-		}
-		for(int level = 0; level < levelCount; ++level)
-		{
-			m_solveLevelOuter[level + 1] += m_solveLevelOuter[level];
-		}
-		m_solveBodies.resize(bodies);
-		m_counts.assign(m_solveLevelOuter.begin(), m_solveLevelOuter.end() - 1);
-		for(int body = 0; body < bodies; ++body)
-		{
-			m_solveBodies[m_counts[m_solveLevels[body]]++] = body;
-		}
 		m_updateOuter.resize(bodies + 1);
 		m_updateOuter[0] = 0;
 		for(int body = 0; body < bodies; ++body)
@@ -211,6 +204,7 @@ public:
 			const int count = m_blockOuter[body + 1] - m_blockOuter[body] - 1;
 			m_updateOuter[body + 1] = m_updateOuter[body] + count * (count + 1) / 2;
 		}
+		prepareSolveStages(bodies);
 		// The right-looking factor has higher serial cost and extra symbolic
 		// storage. Use it only when parallel work repays both overheads.
 		if(m_updateOuter[bodies] >= MIN_PARALLEL_FACTOR_UPDATES && m_parallelExecutor != NULL && m_parallelExecutor->workerCapacity() > 1)
@@ -394,7 +388,7 @@ private:
 		{
 			for(int column = 0; column < 6; ++column)
 			{
-				convertColumnFloat6(destination.data() + 8 * column, source.data() + 6 * column);
+				convertColumnFloat6(destination.data(), column, source.data() + 6 * column);
 			}
 		}
 	}
@@ -521,10 +515,186 @@ private:
 		int first;
 	};
 
-	void solveForwardBody(double* solution, int body) const
+	// Schedule of a large factor's parallel solves. The elimination tree's chains are its
+	// maximal paths of bodies with one child each: the separators of a nested dissection
+	// order. A chain's depth counts the chains above it, and chains of one depth are independent.
+	// The chains of the first SOLVE_STAGES depths are groups of their own; each subtree below
+	// them is one group. A level schedule, one parallel region per set of independent bodies,
+	// does not scale here: half of the forward solve is in the rows of the top chain, whose
+	// bodies follow one another.
+	// A row holds blocks of the body's descendants. Those outside its chain lie below the
+	// chain's lowest body and so precede the chain's own, and m_solveRowSplit is the first of
+	// the chain's own. Every solve therefore subtracts a row's blocks in the serial order, and
+	// gives the serial result.
+	void prepareSolveStages(int bodies)
+	{
+		m_stageGroupOuter.clear();
+		if(m_updateOuter[bodies] < MIN_PARALLEL_SOLVE_UPDATES)
+		{
+			return;
+		}
+		std::vector<int>& children = m_tags;
+		std::vector<int>& groups = m_solveGroups;
+		std::vector<int>& stages = m_pattern;
+		std::fill(children.begin(), children.end(), 0);
+		for(int body = 0; body < bodies; ++body)
+		{
+			if(m_parent[body] >= 0)
+			{
+				++children[m_parent[body]];
+			}
+		}
+		groups.resize(bodies);
+		m_groupStages.clear();
+		// Parents follow their children, so a descending pass sees a body's parent first.
+		for(int body = bodies - 1; body >= 0; --body)
+		{
+			const int parent = m_parent[body];
+			if(parent >= 0 && (stages[parent] == SOLVE_STAGES || children[parent] == 1))
+			{
+				stages[body] = stages[parent];
+				groups[body] = groups[parent];
+				continue;
+			}
+			stages[body] = parent >= 0 ? stages[parent] + 1 : 0;
+			groups[body] = int(m_groupStages.size());
+			m_groupStages.push_back(stages[body]);
+		}
+		// Number the groups by stage, and list each group's bodies and each chain stage's
+		// bodies in ascending order.
+		const int groupCount = int(m_groupStages.size());
+		m_stageGroupOuter.assign(SOLVE_STAGES + 2, 0);
+		m_stageBodyOuter.assign(SOLVE_STAGES + 1, 0);
+		for(int group = 0; group < groupCount; ++group)
+		{
+			++m_stageGroupOuter[m_groupStages[group] + 1];
+		}
+		for(int stage = 0; stage <= SOLVE_STAGES; ++stage)
+		{
+			m_stageGroupOuter[stage + 1] += m_stageGroupOuter[stage];
+		}
+		m_counts.assign(m_stageGroupOuter.begin(), m_stageGroupOuter.end() - 1);
+		// From here m_groupStages holds each group's number instead of its stage.
+		for(int group = 0; group < groupCount; ++group)
+		{
+			m_groupStages[group] = m_counts[m_groupStages[group]]++;
+		}
+		m_groupOuter.assign(groupCount + 1, 0);
+		for(int body = 0; body < bodies; ++body)
+		{
+			groups[body] = m_groupStages[groups[body]];
+			++m_groupOuter[groups[body] + 1];
+			if(stages[body] < SOLVE_STAGES)
+			{
+				++m_stageBodyOuter[stages[body] + 1];
+			}
+		}
+		for(int group = 0; group < groupCount; ++group)
+		{
+			m_groupOuter[group + 1] += m_groupOuter[group];
+		}
+		for(int stage = 0; stage < SOLVE_STAGES; ++stage)
+		{
+			m_stageBodyOuter[stage + 1] += m_stageBodyOuter[stage];
+		}
+		m_groupBodies.resize(bodies);
+		m_stageBodies.resize(m_stageBodyOuter[SOLVE_STAGES]);
+		m_solveRowSplit.resize(bodies);
+		m_counts.assign(m_groupOuter.begin(), m_groupOuter.end() - 1);
+		int stageCursors[SOLVE_STAGES];
+		for(int stage = 0; stage < SOLVE_STAGES; ++stage)
+		{
+			stageCursors[stage] = m_stageBodyOuter[stage];
+		}
+		// Blocks each group solves, forward and backward, and each chain body gathers.
+		std::vector<int>& groupWork = m_groupWork;
+		groupWork.assign(groupCount, 0);
+		m_gatherWork.resize(m_stageBodies.size());
+		for(int body = 0; body < bodies; ++body)
+		{
+			m_groupBodies[m_counts[groups[body]]++] = body;
+			int split = m_rowOuter[body];
+			if(stages[body] < SOLVE_STAGES)
+			{
+				m_stageBodies[stageCursors[stages[body]]++] = body;
+				while(split < m_rowOuter[body + 1] && groups[m_blockColumns[m_rowEntries[split]]] != groups[body])
+				{
+					++split;
+				}
+				for(int entry = split; entry < m_rowOuter[body + 1]; ++entry)
+				{
+					// An order that breaks the rule above keeps the serial solve.
+					if(groups[m_blockColumns[m_rowEntries[entry]]] != groups[body])
+					{
+						m_stageGroupOuter.clear();
+						return;
+					}
+				}
+			}
+			m_solveRowSplit[body] = split;
+			if(stages[body] < SOLVE_STAGES)
+			{
+				m_gatherWork[stageCursors[stages[body]] - 1] = split - m_rowOuter[body];
+			}
+			groupWork[groups[body]] += m_rowOuter[body + 1] - split + m_blockOuter[body + 1] - m_blockOuter[body];
+		}
+		m_gatherTasks.clear();
+		m_groupTasks.clear();
+		m_gatherTaskOuter.assign(SOLVE_STAGES + 1, 0);
+		m_groupTaskOuter.assign(SOLVE_STAGES + 2, 0);
+		for(int stage = 0; stage <= SOLVE_STAGES; ++stage)
+		{
+			if(stage < SOLVE_STAGES)
+			{
+				appendTasks(m_gatherTasks, m_gatherWork, m_stageBodyOuter[stage], m_stageBodyOuter[stage + 1]);
+				m_gatherTaskOuter[stage + 1] = int(m_gatherTasks.size());
+			}
+			appendTasks(m_groupTasks, groupWork, m_stageGroupOuter[stage], m_stageGroupOuter[stage + 1]);
+			m_groupTaskOuter[stage + 1] = int(m_groupTasks.size());
+		}
+		m_gatherTasks.push_back(m_stageBodyOuter[SOLVE_STAGES]);
+		m_groupTasks.push_back(groupCount);
+	}
+
+	// Appends the first items of the tasks that split items [first, end) by their work.
+	static void appendTasks(std::vector<int>& tasks, const std::vector<int>& work, int first, int end)
+	{
+		int total = 0;
+		for(int item = first; item < end; ++item)
+		{
+			total += work[item];
+		}
+		const int target = std::max(int(SOLVE_TASK_BLOCKS), (total + SOLVE_TASKS - 1) / SOLVE_TASKS);
+		int gathered = target;
+		for(int item = first; item < end; ++item)
+		{
+			if(gathered >= target)
+			{
+				tasks.push_back(item);
+				gathered = 0;
+			}
+			gathered += work[item];
+		}
+	}
+
+	// Subtracts the products of a row's blocks [first, end) and their solved bodies.
+	void gatherForwardBody(double* solution, int body, int first, int end) const
 	{
 		Vec6 current = loadVector<6>(solution + 6 * body);
-		for(int entry = m_rowOuter[body]; entry < m_rowOuter[body + 1]; ++entry)
+		for(int entry = first; entry < end; ++entry)
+		{
+			const int block = m_rowEntries[entry];
+			const Vec6 solved = loadVector<6>(solution + 6 * m_blockColumns[block]);
+			subtractFloatMatrixVector6(current.data(), m_blocks[block].data(), solved.data());
+		}
+		storeVector<6>(solution + 6 * body, current);
+	}
+
+	// Solves a body whose row's blocks before first have been subtracted.
+	void solveForwardBody(double* solution, int body, int first) const
+	{
+		Vec6 current = loadVector<6>(solution + 6 * body);
+		for(int entry = first; entry < m_rowOuter[body + 1]; ++entry)
 		{
 			const int block = m_rowEntries[entry];
 			const Vec6 solved = loadVector<6>(solution + 6 * m_blockColumns[block]);
@@ -555,7 +725,7 @@ private:
 			const Block& factor = m_blocks[block];
 			for(int axis = 0; axis < 6; ++axis)
 			{
-				current[axis] -= dotFloat6(factor.data() + 8 * axis, solved.data());
+				current[axis] -= dotFloat6(factor.data(), axis, solved.data());
 			}
 		}
 		const Block& diagonal = m_blocks[m_blockOuter[body]];
@@ -578,7 +748,7 @@ private:
 		const int bodies = int(m_blockOuter.size()) - 1;
 		for(int body = 0; body < bodies; ++body)
 		{
-			solveForwardBody(solution, body);
+			solveForwardBody(solution, body, m_rowOuter[body]);
 		}
 		for(int body = bodies - 1; body >= 0; --body)
 		{
@@ -586,18 +756,57 @@ private:
 		}
 	}
 
-	static void solveForwardParallel(void* context, int index)
+	static void gatherForwardBodies(void* context, int index)
 	{
 		ParallelSolve& solve = *static_cast<ParallelSolve*>(context);
-		const int body = solve.factor->m_solveBodies[solve.first + index];
-		solve.factor->solveForwardBody(solve.solution, body);
+		const BlockCholesky& factor = *solve.factor;
+		const int task = solve.first + index;
+		for(int entry = factor.m_gatherTasks[task]; entry < factor.m_gatherTasks[task + 1]; ++entry)
+		{
+			const int body = factor.m_stageBodies[entry];
+			factor.gatherForwardBody(solve.solution, body, factor.m_rowOuter[body], factor.m_solveRowSplit[body]);
+		}
 	}
 
-	static void solveBackwardParallel(void* context, int index)
+	// The bodies of the task's groups, which follow one another in ascending order.
+	static void solveForwardGroups(void* context, int index)
 	{
 		ParallelSolve& solve = *static_cast<ParallelSolve*>(context);
-		const int body = solve.factor->m_solveBodies[solve.first + index];
-		solve.factor->solveBackwardBody(solve.solution, body);
+		const BlockCholesky& factor = *solve.factor;
+		const int task = solve.first + index;
+		const int end = factor.m_groupOuter[factor.m_groupTasks[task + 1]];
+		for(int entry = factor.m_groupOuter[factor.m_groupTasks[task]]; entry < end; ++entry)
+		{
+			const int body = factor.m_groupBodies[entry];
+			factor.solveForwardBody(solve.solution, body, factor.m_solveRowSplit[body]);
+		}
+	}
+
+	static void solveBackwardGroups(void* context, int index)
+	{
+		ParallelSolve& solve = *static_cast<ParallelSolve*>(context);
+		const BlockCholesky& factor = *solve.factor;
+		const int task = solve.first + index;
+		const int first = factor.m_groupOuter[factor.m_groupTasks[task]];
+		for(int entry = factor.m_groupOuter[factor.m_groupTasks[task + 1]] - 1; entry >= first; --entry)
+		{
+			factor.solveBackwardBody(solve.solution, factor.m_groupBodies[entry]);
+		}
+	}
+
+	// Runs a stage's tasks; a single task needs no helpers.
+	void solveTasks(ParallelSolve& solve, const std::vector<int>& taskOuter, int stage, ParallelFunction function)
+	{
+		solve.first = taskOuter[stage];
+		const int tasks = taskOuter[stage + 1] - solve.first;
+		if(tasks > 1)
+		{
+			m_parallelExecutor->parallelFor(tasks, function, &solve);
+		}
+		else if(tasks == 1)
+		{
+			function(&solve, 0);
+		}
 	}
 
 	int findBlock(int column, int row) const
@@ -650,10 +859,8 @@ private:
 			}
 			for(int block = m_blockOuter[body] + 1; block < m_blockOuter[body + 1]; ++block)
 			{
-				for(int row = 0; row < 6; ++row)
-				{
-					values[entry++] = m_blocks[block](row, axis);
-				}
+				promoteColumnFloat6(values + entry, m_blocks[block].data(), axis);
+				entry += 6;
 			}
 		}
 	}
@@ -869,13 +1076,12 @@ private:
 			const float pivot = float(std::sqrt(diagonal));
 			const double inverse = 1.0 / double(pivot);
 			inverseDiagonal[column] = inverse;
-			float* stored = output.data() + 8 * column;
 			ANVIL_UNROLL
 			for(int row = 0; row < column; ++row)
 			{
-				stored[row] = 0.0f;
+				output(row, column) = 0.0f;
 			}
-			stored[column] = pivot;
+			output(column, column) = pivot;
 			ANVIL_UNROLL
 			for(int row = column + 1; row < 6; ++row)
 			{
@@ -886,9 +1092,9 @@ private:
 					value -= lower[inner][row] * lower[inner][column];
 				}
 				lower[column][row] = value * inverse;
-				stored[row] = float(lower[column][row]);
+				output(row, column) = float(lower[column][row]);
 			}
-			stored[6] = stored[7] = 0.0f;
+			output.clearPadding(column);
 		}
 		return true;
 	}
@@ -976,7 +1182,12 @@ private:
 	std::vector<int> m_parent, m_tags, m_counts, m_pattern;
 	std::vector<int> m_blockOuter, m_blockRows, m_blockColumns, m_rowOuter, m_rowEntries, m_inputCoordinates;
 	std::vector<double> m_inverseDiagonal;
-	std::vector<int> m_solveLevels, m_solveLevelOuter, m_solveBodies;
+	// Staged solves: groups by stage, bodies by group and by chain stage, and each body's first
+	// row entry of its own group. m_stageGroupOuter is empty for factors that solve serially.
+	std::vector<int> m_stageGroupOuter, m_groupOuter, m_groupBodies, m_stageBodyOuter, m_stageBodies, m_solveRowSplit;
+	std::vector<int> m_solveGroups, m_groupStages;
+	// Tasks by stage and the first body or group of each task, with the total count last.
+	std::vector<int> m_gatherTaskOuter, m_gatherTasks, m_groupTaskOuter, m_groupTasks, m_gatherWork, m_groupWork;
 	std::vector<int> m_updateOuter, m_updateTargets, m_inputBlocks, m_blockInputOuter;
 	std::vector<BlockInput> m_blockInputs;
 	std::vector<int> m_panelOuter, m_panelTaskOuter, m_panelTaskItemOuter;

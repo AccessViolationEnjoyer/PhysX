@@ -74,6 +74,7 @@ void Ext::CpuWorkerThread::execute()
 		{
 			PX_ASSERT(PxDefaultCpuDispatcherWaitForWorkMode::eWAIT_FOR_WORK == ownerWaitForWorkMode);
 			waitForWake();
+			mOwner->finishWait(*this);
 		}
 	}
 

@@ -79,6 +79,8 @@ namespace Ext
 						// for jobs again: a job submitted before the announcement did not wake it.
 						void											prepareToWait(CpuWorkerThread& worker);
 						void											cancelWait(CpuWorkerThread& worker);
+						// A worker that woke leaves the sleepers, whether or not a submitter claimed it.
+						void											finishWait(CpuWorkerThread& worker);
 						void											wakeSleepingThread();
 
 		static			void											getAffinityMasks(PxU32* affinityMasks, PxU32 threadCount);
