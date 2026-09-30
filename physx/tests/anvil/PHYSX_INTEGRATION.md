@@ -7,7 +7,7 @@ adaptive PGS-to-Anvil handoff are unchanged.
 ```cpp
 PxSceneDesc desc(physics->getTolerancesScale());
 desc.solverType = PxSolverType::eANVIL;
-desc.anvilMaxIterations = 100;
+desc.anvilMaxIterations = 1000;
 desc.anvilTolerance = 1e-8f;
 desc.anvilRegularization = 1e-4f;
 ```
@@ -46,6 +46,20 @@ freeSpeed - initialSpeed + timestep *
 ```
 
 The shape's contact offset slop is not applied to Anvil rows.
+
+Contact points whose gap cannot close within the step are left out of the problem: a point is
+kept within 1 mm of its rest distance, or when its approach over the step (which already holds
+this step's gravity), with a margin of one half for pushes from other contacts, covers the gap
+(`ANVIL_SPECULATIVE_KEEP_GAP`, `ANVIL_SPECULATIVE_APPROACH_MARGIN`). This matters with
+`PxRigidBodyFlag::eENABLE_SPECULATIVE_CCD`, which inflates a body's contact reach by its motion
+per step: contacts then exist a step before surfaces meet, and a body arriving at 1 m/s is
+stopped at the surface instead of embedding a centimetre and bouncing. On a 125-box pile with a
+layer dropped from 5 cm every 0.2 s, the flag takes the landing step from 8-20 ms to 3-7 ms and
+the twenty steps of re-settling after it from 3-7 ms to about 2 ms, against 1.3 ms at rest;
+the same holds at 1,000 boxes. The price is PhysX's: every moving body's pairs within its
+inflation are generated each step, and a scene of 2,000 totes riding a belt at 0.5 m/s, each
+box 8 mm from its wall, spends 55% more per step (PGS pays the same), most of it in the narrow
+phase before the filter discards the points. The test scenes set the flag on every body.
 
 Hard joint rows use the same reference policy. Native spring rows retain their exact implicit
 stiffness and damping law. Positive restitution, compliant contacts, contact modification,
@@ -107,6 +121,82 @@ them a single body, with half of the forward solve in the rows of the 100-body t
 took as long with eight workers as without helpers. With 14 regions per solve, WebAssembly steps
 of the 1,000-box pile take 5% less time and those of the 500-box pile 6% less.
 
+A large island refactors on nearly every step, and in a large irregular island most of that
+work is lost: a staggered stack of 1,000 boxes of random size and density takes 23 steps and 17
+factorizations per timestep after settling (a heap of 1,800 randomly oriented boxes 81 and 51,
+against the regular pile's 1.2 and 1.3), and every other step or so the line search stops after
+a few percent of the direction because some rows change between sticking and sliding or contact
+and separation. Once a solve has taken its first step, a factor with at least 60,000 block
+updates (the size from which the factor uses helpers; about 180 stacked boxes) is refactored
+only when it must be. Where the cost model would refactor, the solve instead runs conjugate
+gradients on the new Hessian, preconditioned by the factor it has, and takes the iterate as its
+direction once the residual has fallen to 60% of the gradient, or after three iterations; a step
+that took all three is followed by a refactorization, since the factor has fallen too far behind.
+An iteration is a solve and two passes over the rows, and a factorization of such an island costs
+eleven to twenty of them. Every iterate is a descent direction, so the exact line search applies
+unchanged, with the current curvature rather than the factor's. This is an inexact step in the
+sense of Dembo, Eisenstat and Steihaug, Inexact Newton methods, SIAM Journal on Numerical
+Analysis 19 (1982); reusing a factor as the preconditioner of later systems, and choosing
+between it and a new factor by their costs, follows Wang and O'Leary, Adaptive use of iterative
+methods in predictor-corrector interior point methods for linear programming, Numerical
+Algorithms 25 (2000). Looser directions cost more steps than they save: the retained factor's own
+direction, one iteration, takes 80% more steps and 60-100% more time. Rows that change status
+are always listed against the retained factor's curvature, so a later update or refactorization
+covers everything that changed since it was made.
+
+The same iterations decide convergence for an island near rest, whose second factorization
+would only confirm that the next direction is within the displacement tolerance. The iterates
+grow towards the direction, and one whose residual has not fallen can be far too short, so
+convergence is declared only if the retained factor's own direction is within ten tolerances,
+and once the residual has fallen to 7%, two successive iterates are below nine tenths of the
+tolerances and the last grew by less than 3% of them, within ten iterations. On piles of 500 to
+1,800 boxes of ten shapes this accepted 2,770 of 2,932 directions within tolerance and four
+beyond it, by at most 6%. Conjugate-gradient error estimates from the energy norm (Meurant and
+Tichý) bound the largest body velocity some 250 times too loosely to serve here.
+
+The threshold was measured on regular piles of 27 to 1,000 boxes, staggered stacks of 125 to
+1,000 boxes of random size and density, and the pallet scenes. Below about 30,000 block updates
+the method costs time: a factorization of a 65-body pallet costs about as much as two or three
+iterations, so steps on the retained factor make the platform scene 17% slower and the pallet
+scene 5%, and irregular stacks of 200 to 300 boxes are neutral to 6% slower. From 60,000 updates
+every scene measured gains: WebAssembly steps with eight workers take 20-30% less time on the
+500- and 1,000-box piles and 15-20% less on piles of 180 to 343 boxes, and where an irregular
+stack is large enough (1,000 boxes at 0.5 mm contact offsets; 343 at the 2 cm default) its
+mean falls 11-28% and its 95th and 99th percentile steps by 15-36%, because the steps that
+refactored most now refactor least. Results differ from those of the exact steps, as any change
+of step does, but not systematically: settled heights, speeds and penetrations agree within their
+noise. Results are bit-identical across worker counts, as before.
+
+An exact line search often stops a step where a row reaches its kink, and rounding then puts the
+row on either side of it. A row the step was pushing into contact, or into its friction bound,
+that lands within a millionth of that step of its kink takes the curved branch of the Hessian
+(`KINK_STEP_FRACTION`); the next direction otherwise pushes it straight through the kink and the
+line search returns almost nothing, at the price of a factor update and a full line search. The
+objective, impulses and gradient are the same on both branches, so this is a choice of
+generalized Hessian at the kink, in the sense of semismooth Newton methods. A row the step was
+carrying out of contact keeps the flat branch: giving every resting contact the curved branch
+was tried and made a disturbed pile 40% slower, since unloaded touching contacts separate as
+often as they close. On a 1,000-box pile with a layer of 100 dropped on it every 0.2 s the rule
+takes 31% off the mean step (81 to 56 ms), and the worst 30 steps from 383 to 185 ms; the regular
+pile, the pallet scenes and the irregular stacks are unchanged.
+
+Steps in which many contacts are made or broken at once remain several times dearer than steps
+at rest: a layer landing on the 125-box pile costs 3-7 ms against 1.3 ms settled, and on the
+1,000-box pile up to 500 ms against 13 ms. The trace of such a solve shows thousands of rows
+changing state in each of its first iterations and a handful in each of the next twenty, every
+one with a factor update and a line search. An interior-point phase for bounded rows (a
+two-sided extension of the unilateral one below) was tried and made these steps 60-75% slower,
+as it needs 15-20 steps from a cold start and each is a fresh factorization with no rank updates;
+so was taking the full step whenever it still lowered the objective, as a primal-dual active set
+method does, at +15%. What does remove most of the disturbance is speculative contacts (above):
+with them a landing is resolved before the surfaces meet and the pile below is hardly disturbed.
+
+The default iteration limit is 1,000. A solve cut short by the limit hands its unconverged
+velocities to the integrator, and an island of many colliding bodies can need several hundred
+iterations: at 100, a staggered stack of 1,000 boxes of random size and density collapsing at
+0.5 mm contact offsets reached 80-500 m/s, where PGS peaks at 3 m/s; at 1,000 it peaks at 3 m/s
+too, for the same mean step time, since steps that converge never approach either limit.
+
 The block factor stores its 6x6 blocks in single precision. Builds with 256-bit vectors pad each
 column to eight floats, so one block column is one AVX register. Builds with 128-bit vectors,
 WebAssembly among them, store 36 floats without padding, rows 0-3 of the six columns and then
@@ -128,6 +218,14 @@ between refactoring and rank updates assumes eight workers for every factor larg
 helpers, whatever the machine has. Parallel evaluation, assembly and row preparation keep the
 serial order. The pile benchmark's `state_hash` column hashes every pose and velocity bit; all
 benchmark scenes give identical outputs with one, three and eight workers.
+
+The body ordering of islands of 192 bodies or more comes from METIS, whose nested dissection
+draws random numbers, reseeded at every call. The vendored GKlib is built with `USE_GKRAND`
+and its Mersenne Twister state is thread-local: with the C library's `rand` instead, MSVC's
+per-thread state was repeatable but musl's single unlocked state was not, so two large islands
+ordered at the same time in WebAssembly (a falling heap; never the pile or the standard scenes)
+interleaved on it, their orderings varied from run to run, and rounding followed. Six runs of
+1,800 randomly oriented falling boxes now give one hash at one, three and eight workers.
 
 `PxDefaultCpuDispatcher` workers in wait-for-work mode sleep on their own wake signal. A
 submitted job wakes one sleeping worker, the one that slept most recently, instead of every

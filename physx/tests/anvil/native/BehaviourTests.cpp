@@ -109,6 +109,8 @@ struct Context
 	PxRigidDynamic* dynamicBody(PxScene& scene, const PxTransform& pose)
 	{
 		PxRigidDynamic* actor = physics->createRigidDynamic(pose);
+		// Contacts a step ahead of fast bodies: the offset stays the resting precision.
+		actor->setRigidBodyFlag(PxRigidBodyFlag::eENABLE_SPECULATIVE_CCD, true);
 		actor->setLinearDamping(0.0f);
 		actor->setAngularDamping(0.0f);
 		actor->setSleepThreshold(0.0f);

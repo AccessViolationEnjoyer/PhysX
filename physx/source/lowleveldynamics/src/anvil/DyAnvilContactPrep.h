@@ -120,6 +120,11 @@ static const double ANVIL_SLIP_STIFFNESS = 2.0;
 // change between sticking and sliding, and penetrate further (pallet slipsheets 9.3 um at 1/8,
 // 10.6 um at 1/4, 13.8 um at 1); stiffer ones take more on resting stacks.
 static const double ANVIL_FRICTION_NORMAL_REGULARIZATION = 0.125;
+// A speculative contact point (offsets inflated by a body's motion) is kept within this gap, or
+// when its approach over the step, scaled by this margin, covers the gap; otherwise its rows
+// could never become active and would only cost preparation and factorization.
+static const PxReal ANVIL_SPECULATIVE_KEEP_GAP = 1.0e-3f;
+static const PxReal ANVIL_SPECULATIVE_APPROACH_MARGIN = 1.5f;
 
 struct AnvilContactPair
 {

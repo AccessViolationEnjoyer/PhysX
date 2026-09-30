@@ -74,7 +74,7 @@ the shared PGS task pipeline and a possible future adaptive handoff. Adaptive PG
 switching is not implemented.
 
 Native Anvil uses the existing island startup and completion tasks, with its own constraint
-preparation and solve between them. Scene settings default to `anvilMaxIterations = 100`,
+preparation and solve between them. Scene settings default to `anvilMaxIterations = 1000`,
 `anvilTolerance = 1e-8` and `anvilRegularization = 1e-4`, with contacts softened to 1e-2 at
 first touch (see below). Contacts use MuJoCo's four-edge
 pyramidal formulation and reference-acceleration equation. Hard joint rows use the same reference

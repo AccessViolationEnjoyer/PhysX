@@ -93,6 +93,8 @@ int main(int argc, const char* const* argv)
 		cases::casePosition(i, position);
 		PxRigidDynamic* actor = PxCreateDynamic(*physics, PxTransform(PxVec3(PxReal(position[0]), PxReal(position[1]), PxReal(position[2]))),
 			PxBoxGeometry(PxVec3(PxReal(0.5 * cases::caseSize))), *material, 1.0f);
+		// Contacts a step ahead of fast bodies: the offset stays the resting precision.
+		actor->setRigidBodyFlag(PxRigidBodyFlag::eENABLE_SPECULATIVE_CCD, true);
 		PxRigidBodyExt::setMassAndUpdateInertia(*actor, PxReal(cases::caseMass));
 		actor->setSolverIterationCounts(positionIterations, velocityIterations);
 		actor->setSleepThreshold(0.0f);

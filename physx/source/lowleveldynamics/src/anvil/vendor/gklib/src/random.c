@@ -63,10 +63,11 @@ GK_MKRANDOM(gk_zu,  size_t, size_t)
 #define LM 0x7FFFFFFFULL /* Least significant 31 bits */
 
 
-/* The array for the state vector */
-static uint64_t mt[NN]; 
+/* The array for the state vector. Per thread: METIS reseeds it on every call, and
+   concurrent orderings must each see their own sequence. */
+static __thread uint64_t mt[NN]; 
 /* mti==NN+1 means mt[NN] is not initialized */
-static int mti=NN+1; 
+static __thread int mti=NN+1; 
 #endif /* USE_GKRAND */
 
 /* initializes mt[NN] with a seed */

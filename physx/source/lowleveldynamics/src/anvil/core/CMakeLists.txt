@@ -50,10 +50,13 @@ add_library(PhysXAnvilCore OBJECT
 	${ANVIL_GKLIB_SOURCES} ${ANVIL_METIS_SOURCES})
 target_include_directories(PhysXAnvilCore PRIVATE
 	"${ANVIL_GKLIB_DIR}/include" "${ANVIL_METIS_DIR}/include" "${ANVIL_METIS_DIR}/libmetis")
+# GKlib's own generator, with per-thread state, rather than the C library's: musl's rand shares
+# one unlocked state between threads, so concurrent orderings of large islands were not
+# repeatable in WebAssembly, and its sequence differs between C libraries.
 set_source_files_properties(${ANVIL_GKLIB_SOURCES} PROPERTIES
-	COMPILE_DEFINITIONS "NDEBUG;NDEBUG2")
+	COMPILE_DEFINITIONS "NDEBUG;NDEBUG2;USE_GKRAND")
 set_source_files_properties(${ANVIL_METIS_SOURCES} PROPERTIES
-	COMPILE_DEFINITIONS "METIS_NodeND=Anvil_METIS_NodeND;METIS_SetDefaultOptions=Anvil_METIS_SetDefaultOptions")
+	COMPILE_DEFINITIONS "METIS_NodeND=Anvil_METIS_NodeND;METIS_SetDefaultOptions=Anvil_METIS_SetDefaultOptions;USE_GKRAND")
 if(MSVC)
 	set_property(SOURCE ${ANVIL_GKLIB_SOURCES} ${ANVIL_METIS_SOURCES} APPEND PROPERTY
 		COMPILE_DEFINITIONS "__thread=__declspec(thread)")

@@ -68,6 +68,8 @@ PxSceneDesc descriptor(PxPhysics& physics, PxDefaultCpuDispatcher& dispatcher)
 PxRigidDynamic* body(PxPhysics& physics, PxMaterial& material, PxReal x)
 {
 	PxRigidDynamic* result = PxCreateDynamic(physics, PxTransform(PxVec3(x, 10.0f, 0.0f)), PxBoxGeometry(PxVec3(0.25f)), material, 1.0f);
+	// Contacts a step ahead of fast bodies: the offset stays the resting precision.
+	result->setRigidBodyFlag(PxRigidBodyFlag::eENABLE_SPECULATIVE_CCD, true);
 	check(result != NULL, "rigid fixture created");
 	if(result)
 	{

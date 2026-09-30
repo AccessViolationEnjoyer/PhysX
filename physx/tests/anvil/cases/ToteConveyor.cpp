@@ -110,6 +110,8 @@ int main(int argc, const char* const* argv)
 		double position[3];
 		totes::totePosition(i, position);
 		PxRigidDynamic* tote = physics->createRigidDynamic(PxTransform(vector(position)));
+		// Contacts a step ahead of fast bodies: the offset stays the resting precision.
+		tote->setRigidBodyFlag(PxRigidBodyFlag::eENABLE_SPECULATIVE_CCD, true);
 		for(int part = 0; part < 5; ++part)
 		{
 			PxShape* shape = physics->createShape(PxBoxGeometry(vector(parts[part].halfExtents)), *material);
@@ -127,6 +129,8 @@ int main(int argc, const char* const* argv)
 			const PxVec3 centre = vector(position) + vector(offset);
 			PxRigidDynamic* actor = PxCreateDynamic(*physics, PxTransform(centre), PxBoxGeometry(PxReal(0.5 * totes::boxLength),
 				PxReal(0.5 * totes::boxHeight), PxReal(0.5 * totes::boxWidth)), *material, 1.0f);
+			// Contacts a step ahead of fast bodies: the offset stays the resting precision.
+			actor->setRigidBodyFlag(PxRigidBodyFlag::eENABLE_SPECULATIVE_CCD, true);
 			PxRigidBodyExt::setMassAndUpdateInertia(*actor, PxReal(totes::boxMass));
 			actors.push_back(actor);
 		}

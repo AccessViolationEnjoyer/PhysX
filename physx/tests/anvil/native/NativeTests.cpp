@@ -58,6 +58,8 @@ struct TestContext
 	PxRigidDynamic* box(PxScene& scene, PxMaterial& material, const PxTransform& pose, PxVec3 halfSize = PxVec3(0.5f), PxReal mass = 1.0f)
 	{
 		PxRigidDynamic* body = PxCreateDynamic(physics, pose, PxBoxGeometry(halfSize), material, 1.0f);
+		// Contacts a step ahead of fast bodies: the offset stays the resting precision.
+		body->setRigidBodyFlag(PxRigidBodyFlag::eENABLE_SPECULATIVE_CCD, true);
 		PxRigidBodyExt::setMassAndUpdateInertia(*body, mass);
 		body->setLinearDamping(0.0f);
 		body->setAngularDamping(0.0f);
@@ -216,6 +218,8 @@ static void cable(TestContext& context, PxMaterial& material)
 	{
 		PxRigidDynamic* body = PxCreateDynamic(context.physics, PxTransform(PxVec3(.05f * i, 2.0f, 0.0f)),
 			PxSphereGeometry(.025f), material, 1.0f);
+		// Contacts a step ahead of fast bodies: the offset stays the resting precision.
+		body->setRigidBodyFlag(PxRigidBodyFlag::eENABLE_SPECULATIVE_CCD, true);
 		PxRigidBodyExt::setMassAndUpdateInertia(*body, .1f);
 		body->setAngularDamping(0.0f);
 		body->setSleepThreshold(0.0f);

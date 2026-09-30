@@ -538,8 +538,25 @@ void prepareAnvilContacts(PxsContactManager& manager, PxsContactManagerOutput& c
 		frictionState->twist = twist;
 		frictionState->normalImpulse = 0.0f;
 	}
-	// Friction takes the previous normal impulse, shared equally by the pair's current points.
-	const PxReal normalShare = previous && frictionState ? previous->normalImpulse / PxReal(contactCount) : 0.0f;
+	// Points whose gap cannot close in this step are left out. The approach already includes
+	// this step's gravity; the margin allows for pushes from other contacts.
+	bool keep[PxContactBuffer::MAX_CONTACTS];
+	PxU32 keptCount = 0;
+	for(PxU32 i = 0; i < contactCount; ++i)
+	{
+		const PxContactPoint& contact = buffer.contacts[i];
+		const PxReal gap = contact.separation - unit.mRestDistance;
+		bool kept = gap <= ANVIL_SPECULATIVE_KEEP_GAP;
+		if(!kept)
+		{
+			const PxVec3 initialVelocity = initialPointVelocity(body0, body1, bodyIndex0, bodyIndex1, contact.point - frame0.p, contact.point - frame1.p, settings);
+			kept = gap <= ANVIL_SPECULATIVE_APPROACH_MARGIN * PxMax(0.0f, -contact.normal.dot(initialVelocity)) * settings.timestep;
+		}
+		keep[i] = kept;
+		keptCount += kept;
+	}
+	// Friction takes the previous normal impulse, shared equally by the pair's kept points.
+	const PxReal normalShare = previous && frictionState && keptCount ? previous->normalImpulse / PxReal(keptCount) : 0.0f;
 	pair.firstPoint = output.points.size();
 	pair.reportThreshold = (unit.mFlags & PxcNpWorkUnitFlag::eFORCE_THRESHOLD) && (body0.reportThreshold < PX_MAX_F32 || body1.reportThreshold < PX_MAX_F32);
 	pair.threshold.shapeInteraction = reinterpret_cast<Sc::ShapeInteraction*>(manager.getShapeInteraction());
@@ -559,9 +576,13 @@ void prepareAnvilContacts(PxsContactManager& manager, PxsContactManagerOutput& c
 	prepareJacobianBody(jacobianBodies[1], body1, bodyIndex1, rootInverseMass1, -1.0, settings.bodyLockFlags);
 	for(PxU32 i = 0; i < contactCount; ++i)
 	{
+		if(!keep[i])
+		{
+			continue;
+		}
 		// Each point's slip adds the twist's displacement about the centre.
 		const PxVec3 pointSlip = twist != 0.0f ? slip + normal.cross(buffer.contacts[i].point - centre) * twist : slip;
-		appendAnvilContact(buffer.contacts[i], unit.mRestDistance, ccdMaxSeparation, body0, body1, bodyIndex0, bodyIndex1, frame0, frame1, jacobianBodies, translationResponse, settings, sliding, pointSlip, normalShare, 1.0f / PxReal(contactCount), contactOutput.contactForces ? contactOutput.contactForces + originalIndices[i] : NULL, problem, output);
+		appendAnvilContact(buffer.contacts[i], unit.mRestDistance, ccdMaxSeparation, body0, body1, bodyIndex0, bodyIndex1, frame0, frame1, jacobianBodies, translationResponse, settings, sliding, pointSlip, normalShare, 1.0f / PxReal(keptCount), contactOutput.contactForces ? contactOutput.contactForces + originalIndices[i] : NULL, problem, output);
 	}
 	pair.pointCount = output.points.size() - pair.firstPoint;
 	output.pairs.pushBack(pair);

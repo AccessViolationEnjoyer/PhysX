@@ -725,10 +725,13 @@ public:
 	\brief Maximum iterations of each Anvil solve.
 
 	Only used by PxSolverType::eANVIL. Most steps need very few iterations; the limit bounds the
-	cost of difficult ones. Rigid-body PGS position/velocity iteration counts do not control this
-	solver. Must be in [1, 2147483647].
+	cost of difficult ones. A solve cut short by the limit hands its unconverged velocities to
+	the integrator, and an island of many colliding bodies can need several hundred iterations
+	to converge, so a low limit shows as bodies gaining speed rather than as a slow step.
+	Rigid-body PGS position/velocity iteration counts do not control this solver. Must be in
+	[1, 2147483647].
 
-	<b>Default:</b> 100
+	<b>Default:</b> 1000
 	*/
 	PxU32 anvilMaxIterations;
 
@@ -1171,7 +1174,7 @@ PX_INLINE PxSceneDesc::PxSceneDesc(const PxTolerancesScale& scale):
 
 	frictionType					(PxFrictionType::ePATCH),
 	solverType						(PxSolverType::ePGS),
-	anvilMaxIterations				(100),
+	anvilMaxIterations				(1000),
 	anvilTolerance					(1e-8f),
 	anvilDisplacementTolerance			(1e-7f * scale.length),
 	anvilRegularization				(1e-4f),

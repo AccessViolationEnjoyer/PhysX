@@ -197,6 +197,8 @@ struct ComparisonContext
 	PxRigidDynamic* body(PxScene& targetScene, PxMaterial& material, const PxGeometry& geometry, const PxTransform& pose, PxReal mass)
 	{
 		PxRigidDynamic* actor = PxCreateDynamic(physics, pose, geometry, material, 1.0f);
+		// Contacts a step ahead of fast bodies: the offset stays the resting precision.
+		actor->setRigidBodyFlag(PxRigidBodyFlag::eENABLE_SPECULATIVE_CCD, true);
 		if(!actor)
 		{
 			return NULL;

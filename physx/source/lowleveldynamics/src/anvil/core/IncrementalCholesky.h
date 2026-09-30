@@ -44,9 +44,14 @@ public:
 		m_factor.setParallelExecutor(parallelExecutor);
 	}
 
+	// Whether a refactorization is costly enough to take steps on the retained factor instead.
+	bool retainedStepSized() const { return m_size != 0 && !m_dense && m_factor.retainedStepSized(); }
+
 	// changedRows optionally lists every diagonal row whose weight differs from
 	// m_weights; otherwise the complete diagonal is compared.
-	bool factor(const Problem& problem, Curvature& weights, Result& result, const int* changedRows = NULL, int changedCount = 0)
+	// With deferred given, a factor that would be refactored is left as it is, with its
+	// weights, and deferred is set; the caller refactors with factorFresh when it needs to.
+	bool factor(const Problem& problem, Curvature& weights, Result& result, const int* changedRows = NULL, int changedCount = 0, bool* deferred = NULL)
 	{
 		reserveStorage(m_updates, std::uint32_t(problem.rowCount()));
 		if(m_size == 0)
@@ -178,6 +183,11 @@ public:
 			if(updateWork > refactorWork)
 			{
 				result.updateMs += profileElapsed(m_profile, start);
+				if(deferred)
+				{
+					*deferred = true;
+					return true;
+				}
 				return refactor(problem, weights, result);
 			}
 		}

@@ -107,6 +107,8 @@ static GripResult simulate(PxPhysics& physics, PxCpuDispatcher& dispatcher, bool
 	{
 		const PxReal x = (i - 0.5f * (boxCount - 1)) * boxSize;
 		PxRigidDynamic* box = PxCreateDynamic(physics, PxTransform(PxVec3(x, 0.5f * boxSize, 0.0f)), PxBoxGeometry(PxVec3(0.5f * boxSize)), *material, 1.0f);
+		// Contacts a step ahead of fast bodies: the offset stays the resting precision.
+		box->setRigidBodyFlag(PxRigidBodyFlag::eENABLE_SPECULATIVE_CCD, true);
 		PxRigidBodyExt::setMassAndUpdateInertia(*box, boxMass);
 		box->setSleepThreshold(0.0f);
 		box->setSolverIterationCounts(positionIterations, 2);
@@ -117,6 +119,8 @@ static GripResult simulate(PxPhysics& physics, PxCpuDispatcher& dispatcher, bool
 
 	// The arm has no shape; the fingers hang from it at the boxes' mid-height.
 	PxRigidDynamic* arm = physics.createRigidDynamic(PxTransform(PxVec3(0.0f, armHeight, 0.0f)));
+	// Contacts a step ahead of fast bodies: the offset stays the resting precision.
+	arm->setRigidBodyFlag(PxRigidBodyFlag::eENABLE_SPECULATIVE_CCD, true);
 	arm->setRigidBodyFlag(PxRigidBodyFlag::eKINEMATIC, true);
 	scene->addActor(*arm);
 	PxRigidDynamic* fingers[2];
@@ -127,6 +131,8 @@ static GripResult simulate(PxPhysics& physics, PxCpuDispatcher& dispatcher, bool
 		const PxReal sign = side ? 1.0f : -1.0f;
 		const PxVec3 position(sign * fingerX, 0.5f * boxSize, 0.0f);
 		fingers[side] = PxCreateDynamic(physics, PxTransform(position), PxBoxGeometry(PxVec3(fingerHalf[0], fingerHalf[1], fingerHalf[2])), *material, 1.0f);
+		// Contacts a step ahead of fast bodies: the offset stays the resting precision.
+		fingers[side]->setRigidBodyFlag(PxRigidBodyFlag::eENABLE_SPECULATIVE_CCD, true);
 		PxRigidBodyExt::setMassAndUpdateInertia(*fingers[side], fingerMass);
 		fingers[side]->setSleepThreshold(0.0f);
 		fingers[side]->setSolverIterationCounts(positionIterations, 2);

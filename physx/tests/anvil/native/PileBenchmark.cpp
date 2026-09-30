@@ -9,6 +9,13 @@
 
 using namespace physx;
 
+static void setContactOffset(PxRigidActor& actor, PxReal offset)
+{
+	PxShape* shape = NULL;
+	for(PxU32 i = 0; actor.getShapes(&shape, 1, i); ++i)
+		shape->setContactOffset(offset);
+}
+
 int main(int argc, char** argv)
 {
 	if(argc < 2)
@@ -43,7 +50,11 @@ int main(int argc, char** argv)
 	if(!scene)
 		return 1;
 	PxMaterial* material = physics->createMaterial(.5f, .5f, 0.0f);
-	scene->addActor(*PxCreatePlane(*physics, PxPlane(0.0f, 1.0f, 0.0f, 0.0f), *material));
+	// The 0.5 mm contact offset of the other scenes, on every shape, in place of PhysX's 2 cm.
+	const PxReal contactOffset = 5e-4f;
+	PxRigidStatic* ground = PxCreatePlane(*physics, PxPlane(0.0f, 1.0f, 0.0f, 0.0f), *material);
+	setContactOffset(*ground, contactOffset);
+	scene->addActor(*ground);
 	std::vector<PxRigidDynamic*> bodies;
 	for(int layer = 0; layer < layers; ++layer)
 	{
@@ -56,6 +67,9 @@ int main(int argc, char** argv)
 				const PxVec3 position(PxReal((x - (width - 1) * .5) * .3) + shift,
 					.15f + PxReal(layer) * .3f, PxReal((z - (depth - 1) * .5) * .3) + shift);
 				PxRigidDynamic* body = PxCreateDynamic(*physics, PxTransform(position), PxBoxGeometry(PxVec3(.15f)), *material, 1.0f);
+				// Contacts a step ahead of fast bodies: the offset stays the resting precision.
+				body->setRigidBodyFlag(PxRigidBodyFlag::eENABLE_SPECULATIVE_CCD, true);
+				setContactOffset(*body, contactOffset);
 				PxRigidBodyExt::setMassAndUpdateInertia(*body, 1.0f);
 				body->setAngularDamping(0.0f);
 				body->setSleepThreshold(0.0f);

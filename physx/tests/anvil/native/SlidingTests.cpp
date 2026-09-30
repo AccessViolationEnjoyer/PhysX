@@ -119,6 +119,8 @@ struct Context
 	PxRigidDynamic* box(PxScene& scene, PxMaterial& material, const PxVec3& halfExtents, const PxTransform& pose, PxReal mass)
 	{
 		PxRigidDynamic* actor = PxCreateDynamic(physics, pose, PxBoxGeometry(halfExtents), material, 1.0f);
+		// Contacts a step ahead of fast bodies: the offset stays the resting precision.
+		actor->setRigidBodyFlag(PxRigidBodyFlag::eENABLE_SPECULATIVE_CCD, true);
 		PxRigidBodyExt::setMassAndUpdateInertia(*actor, mass);
 		actor->setLinearDamping(0.0f);
 		actor->setAngularDamping(0.0f);
@@ -144,6 +146,8 @@ Container createContainer(Context& context, PxScene& scene, PxMaterial& material
 	Container container;
 	container.baseHalf = PxVec3(inner.x + 2.0f * wall, wall, inner.z + 2.0f * wall);
 	container.body = context.physics.createRigidDynamic(pose);
+	// Contacts a step ahead of fast bodies: the offset stays the resting precision.
+	container.body->setRigidBodyFlag(PxRigidBodyFlag::eENABLE_SPECULATIVE_CCD, true);
 	const auto attach = [&](const PxVec3& half, const PxVec3& offset)
 	{
 		PxShape* shape = context.physics.createShape(PxBoxGeometry(half), material);
@@ -332,6 +336,8 @@ void pushedContainer(Context& context)
 	const PxVec3 pusherHalf(0.05f, 0.15f, 0.3f);
 	const PxReal pusherStart = -container.baseHalf.x - pusherHalf.x - 0.01f;
 	PxRigidDynamic* pusher = context.physics.createRigidDynamic(PxTransform(PxVec3(pusherStart, pusherHalf.y + 0.01f, 0.0f)));
+	// Contacts a step ahead of fast bodies: the offset stays the resting precision.
+	pusher->setRigidBodyFlag(PxRigidBodyFlag::eENABLE_SPECULATIVE_CCD, true);
 	PxShape* shape = context.physics.createShape(PxBoxGeometry(pusherHalf), *material);
 	pusher->attachShape(*shape);
 	shape->release();

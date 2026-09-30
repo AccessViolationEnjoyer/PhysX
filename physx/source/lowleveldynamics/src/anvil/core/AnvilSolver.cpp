@@ -1626,6 +1626,14 @@ static void evaluateUnilateralImpulses(ConstVector contactVelocity, ConstVector 
 	}
 }
 
+// An exact line search often stops where a row the step was pushing into its curved branch
+// reaches its kink, and rounding then puts the row on either side. Such a row, within this
+// fraction of the step it just took of its kink, takes the curved branch: the next direction
+// otherwise pushes it through the kink and the line search returns almost nothing. A row the
+// step was carrying out of its curved branch keeps the flat one. The objective, impulses and
+// gradient are the same on both branches; only the Hessian at the kink changes.
+static const double KINK_STEP_FRACTION = 1.0e-6;
+
 // After a line search, advance the contact velocity along the accepted step
 // and reevaluate unilateral impulses and curvature in the same pass. Rows whose
 // curvature differs from the retained factor are listed for its next update.
@@ -1640,6 +1648,7 @@ static double evaluateUnilateralStep(int rowCount, double alpha, bool advance, d
 #if defined(ANVIL_AVX2_FMA)
 	const __m256d zero = _mm256_setzero_pd();
 	const __m256d step = _mm256_set1_pd(advance ? alpha : 0.0);
+	const __m256d fraction = _mm256_set1_pd(KINK_STEP_FRACTION);
 	__m256d quadraticSum = zero;
 	for(; row + 4 <= rowCount; row += 4)
 	{
@@ -1650,7 +1659,8 @@ static double evaluateUnilateralStep(int rowCount, double alpha, bool advance, d
 			_mm256_storeu_pd(contactVelocity + row, velocity);
 		}
 		const __m256d root = _mm256_loadu_pd(inverseRoot + row);
-		const __m256d active = _mm256_cmp_pd(velocity, zero, _CMP_LT_OQ);
+		const __m256d kink = _mm256_mul_pd(fraction, _mm256_max_pd(zero, _mm256_mul_pd(_mm256_sub_pd(zero, step), _mm256_loadu_pd(contactDirection + row))));
+		const __m256d active = _mm256_cmp_pd(velocity, kink, _CMP_LT_OQ);
 		const __m256d drive = _mm256_max_pd(zero, _mm256_mul_pd(_mm256_sub_pd(zero, root), velocity));
 		_mm256_storeu_pd(impulse + row, _mm256_mul_pd(root, drive));
 		const __m256d weight = _mm256_and_pd(active, _mm256_mul_pd(root, root));
@@ -1669,6 +1679,7 @@ static double evaluateUnilateralStep(int rowCount, double alpha, bool advance, d
 #elif defined(ANVIL_SIMD128)
 	const simd::Double2 zero = simd::zero();
 	const simd::Double2 step = simd::splat(advance ? alpha : 0.0);
+	const simd::Double2 fraction = simd::splat(KINK_STEP_FRACTION);
 	simd::Double2 quadraticSum = zero;
 	for(; row + 2 <= rowCount; row += 2)
 	{
@@ -1681,7 +1692,8 @@ static double evaluateUnilateralStep(int rowCount, double alpha, bool advance, d
 		const simd::Double2 root = simd::load(inverseRoot + row);
 		const simd::Double2 drive = simd::maximum(zero, simd::multiply(simd::subtract(zero, root), velocity));
 		simd::store(impulse + row, simd::multiply(root, drive));
-		const simd::Double2 weight = simd::bitAnd(simd::less(velocity, zero), simd::multiply(root, root));
+		const simd::Double2 kink = simd::multiply(fraction, simd::maximum(zero, simd::multiply(simd::subtract(zero, step), simd::load(contactDirection + row))));
+		const simd::Double2 weight = simd::bitAnd(simd::less(velocity, kink), simd::multiply(root, root));
 		simd::store(diagonal + row, weight);
 		quadraticSum = simd::multiplyAdd(drive, drive, quadraticSum);
 		const int changed = simd::mask(simd::notEqual(weight, simd::load(factorDiagonal + row)));
@@ -1705,7 +1717,8 @@ static double evaluateUnilateralStep(int rowCount, double alpha, bool advance, d
 		const double velocity = contactVelocity[row];
 		const double drive = std::max(0.0, -inverseRoot[row] * velocity);
 		impulse[row] = inverseRoot[row] * drive;
-		diagonal[row] = velocity < 0.0 ? inverseRoot[row] * inverseRoot[row] : 0.0;
+		const double kink = KINK_STEP_FRACTION * std::max(0.0, -(advance ? alpha : 0.0) * contactDirection[row]);
+		diagonal[row] = velocity < kink ? inverseRoot[row] * inverseRoot[row] : 0.0;
 		quadratic += drive * drive;
 		if(diagonal[row] != factorDiagonal[row])
 		{
@@ -1777,6 +1790,7 @@ static double evaluateBoundedStep(int rowCount, double alpha, bool advance, doub
 	const __m256d zero = _mm256_setzero_pd();
 	const __m256d two = _mm256_set1_pd(2.0);
 	const __m256d step = _mm256_set1_pd(advance ? alpha : 0.0);
+	const __m256d fraction = _mm256_set1_pd(KINK_STEP_FRACTION);
 	__m256d quadraticSum = zero;
 	for(; row + 4 <= rowCount; row += 4)
 	{
@@ -1792,7 +1806,8 @@ static double evaluateBoundedStep(int rowCount, double alpha, bool advance, doub
 		const __m256d low = _mm256_loadu_pd(lower + row), high = _mm256_loadu_pd(upper + row);
 		const __m256d value = _mm256_min_pd(_mm256_max_pd(unconstrained, low), high);
 		_mm256_storeu_pd(impulse + row, value);
-		const __m256d inside = _mm256_and_pd(_mm256_cmp_pd(unconstrained, low, _CMP_GT_OQ), _mm256_cmp_pd(unconstrained, high, _CMP_LT_OQ));
+		const __m256d travel = _mm256_mul_pd(_mm256_mul_pd(fraction, _mm256_mul_pd(step, _mm256_loadu_pd(contactDirection + row))), inverseCompliance);
+		const __m256d inside = _mm256_and_pd(_mm256_cmp_pd(unconstrained, _mm256_add_pd(low, _mm256_min_pd(zero, travel)), _CMP_GT_OQ), _mm256_cmp_pd(unconstrained, _mm256_add_pd(high, _mm256_max_pd(zero, travel)), _CMP_LT_OQ));
 		const __m256d weight = _mm256_and_pd(inside, inverseCompliance);
 		_mm256_storeu_pd(diagonal + row, weight);
 		// -2 s lambda - R lambda^2 = -lambda (2 s + R lambda)
@@ -1812,6 +1827,7 @@ static double evaluateBoundedStep(int rowCount, double alpha, bool advance, doub
 	const simd::Double2 zero = simd::zero();
 	const simd::Double2 two = simd::splat(2.0);
 	const simd::Double2 step = simd::splat(advance ? alpha : 0.0);
+	const simd::Double2 fraction = simd::splat(KINK_STEP_FRACTION);
 	simd::Double2 quadraticSum = zero;
 	for(; row + 2 <= rowCount; row += 2)
 	{
@@ -1827,7 +1843,8 @@ static double evaluateBoundedStep(int rowCount, double alpha, bool advance, doub
 		const simd::Double2 low = simd::load(lower + row), high = simd::load(upper + row);
 		const simd::Double2 value = simd::minimum(simd::maximum(unconstrained, low), high);
 		simd::store(impulse + row, value);
-		const simd::Double2 weight = simd::bitAnd(simd::bitAnd(simd::greater(unconstrained, low), simd::less(unconstrained, high)), inverseCompliance);
+		const simd::Double2 travel = simd::multiply(simd::multiply(fraction, simd::multiply(step, simd::load(contactDirection + row))), inverseCompliance);
+		const simd::Double2 weight = simd::bitAnd(simd::bitAnd(simd::greater(unconstrained, simd::add(low, simd::minimum(zero, travel))), simd::less(unconstrained, simd::add(high, simd::maximum(zero, travel)))), inverseCompliance);
 		simd::store(diagonal + row, weight);
 		const simd::Double2 term = simd::multiplyAdd(simd::load(compliance + row), value, simd::multiply(two, velocity));
 		quadraticSum = simd::negativeMultiplyAdd(value, term, quadraticSum);
@@ -1854,7 +1871,8 @@ static double evaluateBoundedStep(int rowCount, double alpha, bool advance, doub
 		const double unconstrained = -velocity * inverseCompliance;
 		const double value = std::min(std::max(unconstrained, lower[row]), upper[row]);
 		impulse[row] = value;
-		diagonal[row] = unconstrained > lower[row] && unconstrained < upper[row] ? inverseCompliance : 0.0;
+		const double travel = KINK_STEP_FRACTION * (advance ? alpha : 0.0) * contactDirection[row] * inverseCompliance;
+		diagonal[row] = unconstrained > lower[row] + std::min(0.0, travel) && unconstrained < upper[row] + std::max(0.0, travel) ? inverseCompliance : 0.0;
 		quadratic -= value * (compliance[row] * value + 2.0 * velocity);
 		if(diagonal[row] != factorDiagonal[row])
 		{
@@ -3428,9 +3446,163 @@ static int solveInteriorPoint(const Problem& problem, const Settings& settings, 
 	return steps;
 }
 
+// Vectors of a solve on a retained factor.
+struct RetainedSolveData
+{
+	VectorStorage solution, residual, preconditioned, search, product, negative, contactSearch, scaled;
+};
+
+struct RetainedSolve
+{
+	enum Enum
+	{
+		// The direction is within the velocity tolerances: the solve has converged.
+		eCONVERGED,
+		// data.solution is a direction to step along.
+		eSTEP,
+		// Neither could be established; the caller refactors.
+		eFAILED
+	};
+};
+
+// The direction of the given curvature from the factor of an earlier one: conjugate gradients on
+// the new Hessian, preconditioned by the retained factor. An iteration is a solve and two passes
+// over the rows; a factorization of a large island costs eleven to twenty of them.
+//
+// A solve that needs many steps spends most of its time refactoring, and much of that is lost:
+// every other step or so, the line search stops after a few percent of the direction because
+// some rows change between sticking and sliding or contact and separation. A direction whose
+// residual has fallen to RETAINED_STEP_RESIDUAL serves such steps; after one that took
+// RETAINED_STEP_ITERATIONS the solve refactors, since the retained factor has fallen too far
+// behind. Looser directions cost more steps than they save: the retained factor's own direction,
+// one iteration, takes 80% more. This is an inexact step in the sense of Dembo, Eisenstat and
+// Steihaug, Inexact Newton methods, SIAM Journal on Numerical Analysis 19 (1982); reusing a
+// factor as the preconditioner of later systems, and choosing between it and a new factor by
+// their costs, follows Wang and O'Leary, Adaptive use of iterative methods in
+// predictor-corrector interior point methods for linear programming, Numerical Algorithms 25
+// (2000).
+//
+// An island near rest takes one step per timestep, and its second factorization would only
+// confirm that the next direction is within tolerance. The iterates show that instead, but they
+// grow towards the direction, and one of a residual that has not fallen can be far too short.
+// Convergence is therefore declared only
+// - if the retained factor's own direction is within RETAINED_TEST_FIRST_DIRECTION tolerances,
+//   which excludes islands that are not near rest;
+// - once the residual has fallen to RETAINED_TEST_RESIDUAL of its first value, two successive
+//   iterates are below RETAINED_TEST_MARGIN of the tolerances and the last grew by less than
+//   RETAINED_TEST_GROWTH of them;
+// - within RETAINED_TEST_ITERATIONS, fewer than a factorization costs.
+// On piles of 500 to 1,800 boxes of ten shapes this accepted 2,770 of 2,932 directions within
+// tolerance and four beyond it, by at most 6%. Error estimates from the energy norm, which the
+// iteration gives exactly, bound the largest body velocity some 250 times too loosely to serve.
+static const double RETAINED_STEP_RESIDUAL = 0.6;
+static const int RETAINED_STEP_ITERATIONS = 3;
+static const int RETAINED_TEST_ITERATIONS = 10;
+static const double RETAINED_TEST_FIRST_DIRECTION = 10.0;
+static const double RETAINED_TEST_RESIDUAL = 0.07;
+static const double RETAINED_TEST_MARGIN = 0.9;
+static const double RETAINED_TEST_GROWTH = 0.03;
+
+// The largest body velocity of a direction as a multiple of the velocity tolerances.
+static double velocityToleranceRatio(ConstVector direction, ConstVector inverseMassDiagonal, double linear, double angular)
+{
+	const double scales[2] = { 1.0 / (linear * linear), 1.0 / (angular * angular) };
+	double largest = 0.0;
+	const int count = direction.size();
+	for(int row = 0; row < count; ++row)
+	{
+		largest = std::max(largest, direction[row] * direction[row] * inverseMassDiagonal[row] * scales[row % 6 / 3]);
+	}
+	return std::sqrt(largest);
+}
+
+static RetainedSolve::Enum solveOnRetainedFactor(const Problem& problem, const Settings& settings, IncrementalCholesky& factor, const Curvature& weights, ConstVector gradient, RetainedSolveData& data, int& iterations)
+{
+	const int bodies = problem.bodyCount() * 6, rows = problem.rowCount();
+	iterations = 0;
+	data.preconditioned.resize(bodies);
+	// The factor solves H x = -g, so the first preconditioned residual is its direction.
+	factor.solveDirection(gradient, data.preconditioned);
+	const bool nearRest = velocityToleranceRatio(data.preconditioned, problem.inverseMassDiagonal, settings.velocityTolerance, settings.angularVelocityTolerance) < RETAINED_TEST_FIRST_DIRECTION;
+	data.solution.setZero(bodies);
+	data.residual.resize(bodies);
+	data.search.resize(bodies);
+	data.product.resize(bodies);
+	data.negative.resize(bodies);
+	data.contactSearch.resize(rows);
+	data.scaled.resize(rows);
+	double* ANVIL_RESTRICT solution = data.solution.data();
+	double* ANVIL_RESTRICT residual = data.residual.data();
+	double* ANVIL_RESTRICT search = data.search.data();
+	const double* ANVIL_RESTRICT diagonal = weights.diagonal.data();
+	double firstNorm = 0.0;
+	for(int i = 0; i < bodies; ++i)
+	{
+		residual[i] = -gradient[i];
+		search[i] = data.preconditioned[i];
+		firstNorm += gradient[i] * gradient[i];
+	}
+	double slope = data.residual.dot(data.preconditioned);
+	double previousRatio = 1.0;
+	for(int iteration = 0; iteration < RETAINED_TEST_ITERATIONS; ++iteration)
+	{
+		// product = (I + J' W J) search
+		multiplyJacobianCsc(problem, data.search, data.contactSearch, settings.parallelExecutor);
+		for(int row = 0; row < rows; ++row)
+		{
+			data.scaled[row] = -diagonal[row] * data.contactSearch[row];
+		}
+		evaluatePrimalGradientCsc(problem, data.search, data.scaled, data.product, settings.parallelExecutor);
+		const double curvature = data.search.dot(data.product);
+		if(curvature <= 0.0)
+		{
+			return RetainedSolve::eFAILED;
+		}
+		const double step = slope / curvature;
+		double norm = 0.0;
+		for(int i = 0; i < bodies; ++i)
+		{
+			solution[i] += step * search[i];
+			residual[i] -= step * data.product[i];
+			norm += residual[i] * residual[i];
+		}
+		iterations = iteration + 1;
+		const double ratio = velocityToleranceRatio(data.solution, problem.inverseMassDiagonal, settings.velocityTolerance, settings.angularVelocityTolerance);
+		if(nearRest && norm < RETAINED_TEST_RESIDUAL * RETAINED_TEST_RESIDUAL * firstNorm && ratio < RETAINED_TEST_MARGIN && previousRatio < RETAINED_TEST_MARGIN && ratio - previousRatio < RETAINED_TEST_GROWTH)
+		{
+			return RetainedSolve::eCONVERGED;
+		}
+		// A direction beyond the tolerances is a step once its residual has fallen enough or the
+		// iterations a step may take are spent; every iterate is a descent direction.
+		if(ratio >= 1.0 && (norm < RETAINED_STEP_RESIDUAL * RETAINED_STEP_RESIDUAL * firstNorm || iteration + 1 >= RETAINED_STEP_ITERATIONS))
+		{
+			return RetainedSolve::eSTEP;
+		}
+		if(iteration + 1 == RETAINED_TEST_ITERATIONS)
+		{
+			break;
+		}
+		previousRatio = ratio;
+		for(int i = 0; i < bodies; ++i)
+		{
+			data.negative[i] = -residual[i];
+		}
+		factor.solveDirection(data.negative, data.preconditioned);
+		const double nextSlope = data.residual.dot(data.preconditioned);
+		const double conjugacy = nextSlope / slope;
+		slope = nextSlope;
+		for(int i = 0; i < bodies; ++i)
+		{
+			search[i] = data.preconditioned[i] + conjugacy * search[i];
+		}
+	}
+	return RetainedSolve::eFAILED;
+}
+
 struct WorkspaceData
 {
 	VectorStorage velocity, impulse, gradient, contactVelocity, inverseRoot, coldImpulse, nextVelocity, direction, contactDirection;
+	RetainedSolveData retainedSolve;
 	Curvature weights;
 	PatchScratch patchScratch;
 	IncrementalCholesky factor;
@@ -3585,6 +3757,8 @@ static SolveStatus::Enum solveAnvilInternal(const Problem& problem, const Settin
 	bool interiorPointUsed = false;
 	// Consecutive short line-search steps indicate Anvil crossing kinks slowly.
 	int shortSteps = 0;
+	// A step on the retained factor that took all its iterations is followed by a refactorization.
+	bool refreshFactor = false;
 	for(int iteration = 0; iteration < settings.iterations; ++iteration)
 	{
 		result.scaledGradient = stopping.gradientNorm(problem, gradient);
@@ -3618,12 +3792,48 @@ static SolveStatus::Enum solveAnvilInternal(const Problem& problem, const Settin
 			result.iterations = iteration + 1;
 			continue;
 		}
-		if(!factor.factor(problem, weights, result, changedCount >= 0 ? changedRows.data() : NULL, changedCount))
+		// After the first step, a costly refactorization gives way to a solve on the factor the
+		// solve already has, which still holds the curvature it was made for.
+		bool deferred = false;
+		const bool mayDefer = scalarRows && iteration > 0 && settings.retainedSteps && settings.velocityTolerance > 0.0 && !refreshFactor && factor.retainedStepSized();
+		refreshFactor = false;
+		if(!factor.factor(problem, weights, result, changedCount >= 0 ? changedRows.data() : NULL, changedCount, mayDefer ? &deferred : NULL))
 		{
 			return SolveStatus::eFACTORIZATION_FAILED;
 		}
 		const Clock::time_point solveStart = profileStart(settings.profile);
-		factor.solveDirection(gradient, direction);
+		// An inexact step leaves the factor behind: `weights` is then the current curvature.
+		bool inexact = false;
+		if(deferred)
+		{
+			int inner;
+			const RetainedSolve::Enum outcome = solveOnRetainedFactor(problem, settings, factor, weights, gradient, workspace.retainedSolve, inner);
+			result.retainedIterations += inner;
+			if(outcome == RetainedSolve::eCONVERGED)
+			{
+				result.backsolveMs += profileElapsed(settings.profile, solveStart);
+				result.stopReason = 7;
+				break;
+			}
+			inexact = outcome == RetainedSolve::eSTEP;
+			refreshFactor = inner >= RETAINED_STEP_ITERATIONS;
+			if(inexact)
+			{
+				++result.retainedSteps;
+				for(int row = 0; row < bodies; ++row)
+				{
+					direction[row] = workspace.retainedSolve.solution[row];
+				}
+			}
+			else if(!factor.factorFresh(problem, weights, result))
+			{
+				return SolveStatus::eFACTORIZATION_FAILED;
+			}
+		}
+		if(!inexact)
+		{
+			factor.solveDirection(gradient, direction);
+		}
 		result.backsolveMs += profileElapsed(settings.profile, solveStart);
 		if(settings.checkFactor)
 		{
@@ -3672,7 +3882,7 @@ static SolveStatus::Enum solveAnvilInternal(const Problem& problem, const Settin
 		const Clock::time_point lineStart = profileStart(settings.profile);
 		double alpha;
 		const double lineThreshold = stopping.tolerance * stopping.lineTolerance * problem.timestep * stopping.inertiaSum * std::sqrt(directionMetrics.weightedNorm);
-		if(!searchConvex(problem, direction, contactVelocity, impulse, factor.currentWeights(), inverseRoot, workspace.contactDirection, result.lineSearchEvaluations, workspace.patchScratch, settings.parallelExecutor, directionMetrics.velocity, directionMetrics.squaredNorm, lineThreshold, alpha))
+		if(!searchConvex(problem, direction, contactVelocity, impulse, inexact ? weights : factor.currentWeights(), inverseRoot, workspace.contactDirection, result.lineSearchEvaluations, workspace.patchScratch, settings.parallelExecutor, directionMetrics.velocity, directionMetrics.squaredNorm, lineThreshold, alpha))
 		{
 			return SolveStatus::eNUMERICAL_FAILURE;
 		}

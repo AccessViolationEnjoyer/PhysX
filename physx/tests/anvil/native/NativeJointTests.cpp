@@ -36,6 +36,8 @@ struct SceneFixture
 	PxRigidDynamic* body(const PxTransform& pose = PxTransform(PxIdentity))
 	{
 		PxRigidDynamic* result = physics.createRigidDynamic(pose);
+		// Contacts a step ahead of fast bodies: the offset stays the resting precision.
+		result->setRigidBodyFlag(PxRigidBodyFlag::eENABLE_SPECULATIVE_CCD, true);
 		result->setMass(1.0f);
 		result->setMassSpaceInertiaTensor(PxVec3(1.0f));
 		result->setLinearDamping(0.0f);

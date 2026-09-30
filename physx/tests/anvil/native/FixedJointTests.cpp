@@ -63,6 +63,8 @@ struct Rod
 		for(int i = 0; i < count; ++i)
 		{
 			PxRigidDynamic* cube = PxCreateDynamic(physics, PxTransform(PxVec3(i * cubeSize, rodHeight, 0.0f)), box, material, 1.0f);
+			// Contacts a step ahead of fast bodies: the offset stays the resting precision.
+			cube->setRigidBodyFlag(PxRigidBodyFlag::eENABLE_SPECULATIVE_CCD, true);
 			PxRigidBodyExt::setMassAndUpdateInertia(*cube, 0.1f * std::pow(2.0f, PxReal(i)));
 			cube->setRigidBodyFlag(PxRigidBodyFlag::eKINEMATIC, i == 0);
 			cube->setSleepThreshold(0.0f);
@@ -169,6 +171,8 @@ static void testDrop(PxPhysics& physics, PxCpuDispatcher& dispatcher, PxMaterial
 	const PxReal dropHeight = 0.5f;
 	PxRigidDynamic* weight = PxCreateDynamic(physics, PxTransform(tip + PxVec3(0.0f, cubeSize + dropHeight, 0.0f)),
 		PxBoxGeometry(PxVec3(0.5f * cubeSize)), material, 1.0f);
+	// Contacts a step ahead of fast bodies: the offset stays the resting precision.
+	weight->setRigidBodyFlag(PxRigidBodyFlag::eENABLE_SPECULATIVE_CCD, true);
 	PxRigidBodyExt::setMassAndUpdateInertia(*weight, 100.0f);
 	weight->setSleepThreshold(0.0f);
 	weight->setSolverIterationCounts(16, 2);

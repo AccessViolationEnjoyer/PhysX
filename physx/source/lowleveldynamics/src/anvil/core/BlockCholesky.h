@@ -47,12 +47,17 @@ class BlockCholesky : public StorageCholesky
 		// A stage's work is split into at most this many tasks, of at least this many blocks,
 		// so helpers claim a few tasks of similar size rather than one for every body.
 		SOLVE_TASKS = 16,
-		SOLVE_TASK_BLOCKS = 256
+		SOLVE_TASK_BLOCKS = 256,
+		// A factor with this many block updates costs many solves with passes over the rows, so
+		// a solve takes steps on the factor it has before it refactors.
+		MIN_RETAINED_STEP_UPDATES = 60000
 	};
 public:
 	bool usesBlocks() const { return m_useBlocks; }
 	bool hasCurrentBlocks() const { return m_blocksCurrent; }
 	void swapInverseDiagonal(std::vector<double>& inverseDiagonal) { m_inverseDiagonal.swap(inverseDiagonal); }
+	// Whether a refactorization costs enough to take steps on the retained factor instead.
+	bool retainedStepSized() const { return m_useBlocks && m_blocksCurrent && m_updateOuter.back() >= MIN_RETAINED_STEP_UPDATES; }
 	// Whether the factor has enough block updates to use helpers, on any machine.
 	bool parallelSized() const { return m_useBlocks && m_updateOuter.back() >= MIN_PARALLEL_FACTOR_UPDATES; }
 	void setParallelExecutor(ParallelExecutor* executor) { m_parallelExecutor = executor; m_parallelWorkers = 0; }

@@ -318,6 +318,9 @@ struct SolverStatistics
 	int symbolicAnalyses = 0;
 	int lineSearchEvaluations = 0;
 	int rankUpdates = 0;
+	// Steps taken on a retained factor, and the conjugate-gradient iterations of all solves on one.
+	int retainedSteps = 0;
+	int retainedIterations = 0;
 	int reusedFactors = 0;
 	int factorFallbacks = 0;
 	int interiorPointSteps = 0;
@@ -374,6 +377,9 @@ struct Settings
 	// Continuations of an interior-point solve warm start with multipliers shifted by
 	// this fraction of their mean (negative restarts with Anvil).
 	double interiorPointWarmShift = 1.0e-1;
+	// After its first step, a solve with a large factor takes its directions from conjugate
+	// gradients preconditioned by the factor it has, and refactors only when they converge slowly.
+	bool retainedSteps = true;
 	bool checkFactor = false;
 	bool profile = false; // Detailed phase timers.
 	// Measures Result::elapsedMs. Clock reads leave WebAssembly, so callers that do not

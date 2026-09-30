@@ -59,6 +59,8 @@ static void createScene(PxPhysics& physics, PxScene& scene, PxMaterial& material
 		const pallet::Body& body = bodies[i];
 		PxRigidDynamic* actor = physics.createRigidDynamic(PxTransform(PxVec3(PxReal(body.position[0]),
 			PxReal(body.position[1]), PxReal(body.position[2]))));
+		// Contacts a step ahead of fast bodies: the offset stays the resting precision.
+		actor->setRigidBodyFlag(PxRigidBodyFlag::eENABLE_SPECULATIVE_CCD, true);
 		PxShape* shape = physics.createShape(PxBoxGeometry(PxReal(body.halfSize[0]), PxReal(body.halfSize[1]),
 			PxReal(body.halfSize[2])), material);
 		actor->attachShape(*shape);

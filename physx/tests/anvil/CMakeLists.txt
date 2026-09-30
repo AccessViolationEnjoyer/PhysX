@@ -35,7 +35,7 @@ if(MSVC)
 	add_library(AnvilAllocationMetis STATIC ${ANVIL_CORE_SOURCES})
 	target_include_directories(AnvilAllocationMetis PRIVATE "${ANVIL_CORE}/../vendor/gklib/include"
 		"${ANVIL_CORE}/../vendor/metis/include" "${ANVIL_CORE}/../vendor/metis/libmetis")
-	target_compile_definitions(AnvilAllocationMetis PRIVATE NDEBUG NDEBUG2
+	target_compile_definitions(AnvilAllocationMetis PRIVATE NDEBUG NDEBUG2 USE_GKRAND
 		METIS_NodeND=Anvil_METIS_NodeND METIS_SetDefaultOptions=Anvil_METIS_SetDefaultOptions
 		__thread=__declspec\(thread\))
 	target_compile_options(AnvilAllocationMetis PRIVATE /O2 /W0)

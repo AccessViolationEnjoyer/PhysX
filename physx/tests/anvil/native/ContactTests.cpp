@@ -172,6 +172,8 @@ struct ContactContext
 		check(geometry.getType() != PxGeometryType::eBOX || static_cast<const PxBoxGeometry&>(geometry).isValid(),
 			"box fixture has three positive half extents");
 		PxRigidDynamic* actor = PxCreateDynamic(physics, pose, geometry, material, 1.0f);
+		// Contacts a step ahead of fast bodies: the offset stays the resting precision.
+		actor->setRigidBodyFlag(PxRigidBodyFlag::eENABLE_SPECULATIVE_CCD, true);
 		PxRigidBodyExt::setMassAndUpdateInertia(*actor, mass);
 		actor->setLinearDamping(0.0f);
 		actor->setAngularDamping(0.0f);

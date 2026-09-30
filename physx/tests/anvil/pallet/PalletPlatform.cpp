@@ -48,6 +48,8 @@ int main(int argc, const char* const* argv)
 	// The platform's contacts take its velocity from its kinematic target each step.
 	const PxReal platformY = PxReal(platform::top - platform::halfExtents[1]);
 	PxRigidDynamic* platformActor = physics->createRigidDynamic(PxTransform(PxVec3(PxReal(platform::startX), platformY, 0.0f)));
+	// Contacts a step ahead of fast bodies: the offset stays the resting precision.
+	platformActor->setRigidBodyFlag(PxRigidBodyFlag::eENABLE_SPECULATIVE_CCD, true);
 	platformActor->setRigidBodyFlag(PxRigidBodyFlag::eKINEMATIC, true);
 	PxShape* platformShape = physics->createShape(PxBoxGeometry(PxReal(platform::halfExtents[0]), PxReal(platform::halfExtents[1]),
 		PxReal(platform::halfExtents[2])), *material);
@@ -62,6 +64,8 @@ int main(int argc, const char* const* argv)
 	{
 		const pallet::Body& body = bodies[i];
 		PxRigidDynamic* actor = physics->createRigidDynamic(PxTransform(PxVec3(PxReal(body.position[0]), PxReal(body.position[1]), PxReal(body.position[2]))));
+		// Contacts a step ahead of fast bodies: the offset stays the resting precision.
+		actor->setRigidBodyFlag(PxRigidBodyFlag::eENABLE_SPECULATIVE_CCD, true);
 		PxShape* shape = physics->createShape(PxBoxGeometry(PxReal(body.halfSize[0]), PxReal(body.halfSize[1]), PxReal(body.halfSize[2])), *material);
 		shape->setContactOffset(contactOffset);
 		actor->attachShape(*shape);
