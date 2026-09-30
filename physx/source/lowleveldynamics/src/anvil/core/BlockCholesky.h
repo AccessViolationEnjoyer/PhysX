@@ -441,6 +441,18 @@ private:
 	bool factorizeSerial(const SparseStorage* ap, const Mat6* hessian)
 	{
 		const int bodies = int(m_blockOuter.size()) - 1;
+		// Plain pointers: MSVC leaves the vectors' operator[] out of line in this loop, which
+		// cost 4% of a single-threaded pile step.
+		Block* ANVIL_RESTRICT blocks = m_blocks.data();
+		Block* ANVIL_RESTRICT work = m_work.data();
+		unsigned char* ANVIL_RESTRICT blockNonzero = m_blockNonzero.data();
+		unsigned char* ANVIL_RESTRICT workNonzero = m_workNonzero.data();
+		const int* ANVIL_RESTRICT blockOuter = m_blockOuter.data();
+		const int* ANVIL_RESTRICT blockRows = m_blockRows.data();
+		const int* ANVIL_RESTRICT blockColumns = m_blockColumns.data();
+		const int* ANVIL_RESTRICT rowOuter = m_rowOuter.data();
+		const int* ANVIL_RESTRICT rowEntries = m_rowEntries.data();
+		double* ANVIL_RESTRICT inverseDiagonal = m_inverseDiagonal.data();
 		for(int k = 0; k < bodies; ++k)
 		{
 			if(hessian)
@@ -451,41 +463,41 @@ private:
 			{
 				scatterInputRow(*ap, k);
 			}
-			Block& diagonal = m_work[k];
-			for(int rowEntry = m_rowOuter[k]; rowEntry < m_rowOuter[k + 1]; ++rowEntry)
+			Block& diagonal = work[k];
+			for(int rowEntry = rowOuter[k]; rowEntry < rowOuter[k + 1]; ++rowEntry)
 			{
-				const int address = m_rowEntries[rowEntry];
-				const int i = m_blockColumns[address];
+				const int address = rowEntries[rowEntry];
+				const int i = blockColumns[address];
 				// A block that received no input and no update is a zero factor block: it
 				// contributes nothing to later blocks of this row or to the diagonal.
-				if(!m_workNonzero[i])
+				if(!workNonzero[i])
 				{
-					m_blocks[address].setZero();
-					m_blockNonzero[address] = 0;
+					blocks[address].setZero();
+					blockNonzero[address] = 0;
 					continue;
 				}
-				m_workNonzero[i] = 0;
-				m_blockNonzero[address] = 1;
-				Block& value = m_work[i];
+				workNonzero[i] = 0;
+				blockNonzero[address] = 1;
+				Block& value = work[i];
 				// Solve value * L' = work using contiguous columns.
 				// These fixed blocks need neither packed GEMM panels nor a transpose.
-				solveTransposedLowerFloat6(value.data(), m_blocks[m_blockOuter[i]].data(), &m_inverseDiagonal[6 * i]);
-				for(int previous = m_blockOuter[i] + 1; previous < address; ++previous)
+				solveTransposedLowerFloat6(value.data(), blocks[blockOuter[i]].data(), &inverseDiagonal[6 * i]);
+				for(int previous = blockOuter[i] + 1; previous < address; ++previous)
 				{
-					if(!m_blockNonzero[previous])
+					if(!blockNonzero[previous])
 					{
 						continue;
 					}
-					const int row = m_blockRows[previous];
-					subtractProductFloat6(m_work[row].data(), value.data(), m_blocks[previous].data());
-					m_workNonzero[row] = 1;
+					const int row = blockRows[previous];
+					subtractProductFloat6(work[row].data(), value.data(), blocks[previous].data());
+					workNonzero[row] = 1;
 				}
 				// The whole symmetric product costs no more than its lower half in these kernels.
 				subtractProductFloat6(diagonal.data(), value.data(), value.data());
-				m_blocks[address] = value;
+				blocks[address] = value;
 				value.setZero();
 			}
-			if(!factorDiagonal(diagonal, m_blocks[m_blockOuter[k]], &m_inverseDiagonal[6 * k]))
+			if(!factorDiagonal(diagonal, blocks[blockOuter[k]], &inverseDiagonal[6 * k]))
 			{
 				// Successful columns consume their work blocks. A failed pivot is
 				// the only path that leaves pending values for the next solve.
