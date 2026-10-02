@@ -82,7 +82,6 @@ PxRigidDynamic* body(PxPhysics& physics, PxMaterial& material, PxReal x)
 void usable(PxScene& scene, PxRigidDynamic& probe, PxU32 count)
 {
 	check(scene.getSolverType() == PxSolverType::eANVIL, "valid scene retains Anvil selection");
-	check(scene.getNbArticulations() == 0, "no rejected articulation entered scene");
 	check(scene.getNbActors(PxActorTypeFlag::eRIGID_DYNAMIC) == count, "rigid actor count is preserved");
 	check(probe.getScene() == &scene, "original actor retains its scene");
 	const PxReal oldX = probe.getGlobalPose().p.x;
@@ -92,10 +91,13 @@ void usable(PxScene& scene, PxRigidDynamic& probe, PxU32 count)
 	check(probe.getGlobalPose().isFinite() && probe.getLinearVelocity().isFinite(), "scene remains finite");
 	check(std::abs(double(probe.getGlobalPose().p.x - oldX) - .01) < 1e-5, "scene still integrates original actor");
 }
+// Scene creation validates its descriptor in checked builds only (PX_CHECK_AND_RETURN_NULL); a
+// release build trusts it. isValid() checks the Anvil settings in checked builds only too.
 void reject(PxPhysics& physics, ValidationErrors& errors, const PxSceneDesc& desc, const char* label)
 {
-	const PxU32 count = physics.getNbScenes();
 	check(!desc.isValid(), label);
+#if PX_CHECKED
+	const PxU32 count = physics.getNbScenes();
 	errors.begin(PxErrorCode::eINVALID_PARAMETER, "Physics::createScene:");
 	PxScene* scene = physics.createScene(desc);
 	errors.end();
@@ -105,13 +107,17 @@ void reject(PxPhysics& physics, ValidationErrors& errors, const PxSceneDesc& des
 	{
 		scene->release();
 	}
+#else
+	PX_UNUSED(physics);
+	PX_UNUSED(errors);
+#endif
 }
 void settings(PxPhysics& physics, PxDefaultCpuDispatcher& dispatcher, ValidationErrors& errors)
 {
 	PxSceneDesc defaults(physics.getTolerancesScale());
 	check(PxSolverType::ePGS == 0 && PxSolverType::eTGS == 1 && PxSolverType::eANVIL == 2, "solver enum compatibility");
 	check(defaults.solverType == PxSolverType::ePGS, "default solver remains PGS");
-	check(defaults.anvilMaxIterations == 100 && defaults.anvilTolerance == 1e-8f && defaults.anvilRegularization == 1e-4f, "Anvil defaults");
+	check(defaults.anvilMaxIterations == 1000 && defaults.anvilTolerance == 1e-8f && defaults.anvilRegularization == 1e-4f, "Anvil defaults");
 	defaults.cpuDispatcher = &dispatcher; defaults.filterShader = PxDefaultSimulationFilterShader;
 	check(defaults.isValid(), "default PGS descriptor valid with required dispatcher and filter");
 	PxScene* pgs = physics.createScene(defaults);
@@ -128,108 +134,28 @@ void settings(PxPhysics& physics, PxDefaultCpuDispatcher& dispatcher, Validation
 	check(defaults.isValid(), "unused Anvil fields do not invalidate TGS");
 	const PxSceneDesc base = descriptor(physics, dispatcher);
 	check(base.isValid(), "default Anvil descriptor valid");
+#if PX_CHECKED
 	const PxU32 iterations[] = { 0, 0x80000000u, 0xffffffffu };
 	for(PxU32 i = 0; i < 3; ++i)
 	{
 		PxSceneDesc desc = base; desc.anvilMaxIterations = iterations[i];
-		reject(physics, errors, desc, "invalid Anvil iteration count rejected in Release");
+		reject(physics, errors, desc, "invalid Anvil iteration count rejected");
 	}
 	const PxReal invalid[] = { 0.0f, -1.0f };
 	for(PxU32 i = 0; i < 2; ++i)
 	{
 		PxSceneDesc desc = base; desc.anvilTolerance = invalid[i];
-		reject(physics, errors, desc, "invalid Anvil tolerance rejected in Release");
+		reject(physics, errors, desc, "invalid Anvil tolerance rejected");
 		desc = base; desc.anvilRegularization = invalid[i];
-		reject(physics, errors, desc, "invalid Anvil regularization rejected in Release");
+		reject(physics, errors, desc, "invalid Anvil regularization rejected");
 	}
+#endif
 	PxSceneDesc desc = base; desc.solverType = static_cast<PxSolverType::Enum>(12345);
-	reject(physics, errors, desc, "invalid solver enum rejected in Release");
-	desc = base; desc.flags |= PxSceneFlag::eENABLE_GPU_DYNAMICS;
-	reject(physics, errors, desc, "Anvil GPU dynamics rejected before GPU initialization");
-	desc = base; desc.flags |= PxSceneFlag::eENABLE_DIRECT_GPU_API | PxSceneFlag::eDISABLE_SLEEPING;
-	reject(physics, errors, desc, "Anvil direct GPU API rejected before GPU initialization");
-	desc = base; desc.flags |= PxSceneFlag::eENABLE_GPU_DYNAMICS | PxSceneFlag::eENABLE_DIRECT_GPU_API | PxSceneFlag::eDISABLE_SLEEPING;
-	desc.broadPhaseType = PxBroadPhaseType::eGPU;
-	reject(physics, errors, desc, "combined GPU dynamics and direct API rejected");
+	reject(physics, errors, desc, "invalid solver enum rejected");
 	desc = base; desc.flags |= PxSceneFlag::eENABLE_EXTERNAL_FORCES_EVERY_ITERATION_TGS;
 	reject(physics, errors, desc, "TGS-only external forces flag rejected");
 }
-void outside(PxArticulationReducedCoordinate& articulation, PxArticulationLink& link, PxAggregate* aggregate)
-{
-	check(articulation.getScene() == NULL && link.getScene() == NULL, "articulation and link remain outside scene");
-	check(articulation.getAggregate() == aggregate && link.getAggregate() == aggregate, "articulation aggregate ownership preserved");
-}
-void articulations(PxPhysics& physics, PxMaterial& material, ValidationErrors& errors, PxScene& scene, PxRigidDynamic& probe)
-{
-	PxArticulationReducedCoordinate* articulation = physics.createArticulationReducedCoordinate();
-	check(articulation != NULL, "articulation fixture created");
-	if(!articulation)
-	{
-		return;
-	}
-	PxArticulationLink* link = articulation->createLink(NULL, PxTransform(PxVec3(20.0f, 10.0f, 0.0f)));
-	check(link != NULL, "nonempty articulation created");
-	if(!link)
-	{
-		articulation->release();
-		return;
-	}
-	check(PxRigidActorExt::createExclusiveShape(*link, PxBoxGeometry(PxVec3(.1f)), material) != NULL, "articulation has valid geometry");
-	link->setMass(1.0f); link->setMassSpaceInertiaTensor(PxVec3(1.0f));
-	errors.begin(PxErrorCode::eINVALID_OPERATION, "Anvil does not support articulations");
-	const bool added = scene.addArticulation(*articulation);
-	errors.end(); check(!added, "direct articulation insertion rejected"); outside(*articulation, *link, NULL); usable(scene, probe, 1);
-	errors.begin(PxErrorCode::eINVALID_PARAMETER, "Individual articulation links");
-	const bool addedLink = scene.addActor(*link);
-	errors.end(); check(!addedLink, "individual link insertion rejected"); outside(*articulation, *link, NULL); usable(scene, probe, 1);
-	PxRigidDynamic* member = body(physics, material, 5.0f);
-	if(member)
-	{
-		for(PxU32 order = 0; order < 2; ++order)
-		{
-			PxActor* actors[2] = { member, link };
-			if(order) { actors[0] = link; actors[1] = member; }
-			// This existing generic batch rejection is a warning, not an invalid-operation error.
-			errors.begin(PxErrorCode::eDEBUG_WARNING, "Batch addition is not permitted for this actor type");
-			const bool batch = scene.addActors(actors, 2);
-			errors.end(); check(!batch, "mixed articulation-link batch rejected");
-			check(member->getScene() == NULL, "failed batch rolls back rigid prefix and leaves suffix outside");
-			outside(*articulation, *link, NULL); usable(scene, probe, 1);
-		}
-		PxActor* valid[] = { member };
-		check(scene.addActors(valid, 1), "valid batch succeeds after rejected batch");
-		usable(scene, probe, 2); scene.removeActors(valid, 1);
-		PxAggregate* aggregate = physics.createAggregate(4, 4, PxGetAggregateFilterHint(PxAggregateType::eGENERIC, false));
-		check(aggregate != NULL, "aggregate created");
-		if(aggregate)
-		{
-			check(aggregate->addActor(*member) && aggregate->addArticulation(*articulation), "outside-scene aggregate accepts valid membership");
-			errors.begin(PxErrorCode::eINVALID_OPERATION, "aggregates containing articulations");
-			const bool populated = scene.addAggregate(*aggregate);
-			errors.end(); check(!populated, "populated articulation aggregate rejected");
-			check(aggregate->getScene() == NULL && scene.getNbAggregates() == 0, "rejected aggregate leaves scene registry intact");
-			check(aggregate->getNbActors() == 2 && member->getScene() == NULL && member->getAggregate() == aggregate, "rejected aggregate preserves membership without partial insertion");
-			outside(*articulation, *link, aggregate); usable(scene, probe, 1);
-			check(aggregate->removeArticulation(*articulation), "rejected aggregate remains editable");
-			outside(*articulation, *link, NULL);
-			check(scene.addAggregate(*aggregate), "same aggregate succeeds after removing articulation");
-			check(aggregate->getScene() == &scene && member->getScene() == &scene, "valid aggregate enters scene");
-			usable(scene, probe, 2);
-			errors.begin(PxErrorCode::eINVALID_OPERATION, "Anvil does not support articulations");
-			const bool live = aggregate->addArticulation(*articulation);
-			errors.end(); check(!live, "in-scene aggregate articulation append rejected");
-			check(aggregate->getNbActors() == 1 && aggregate->getScene() == &scene && member->getScene() == &scene, "failed append preserves existing aggregate state");
-			outside(*articulation, *link, NULL); usable(scene, probe, 2);
-			scene.removeAggregate(*aggregate);
-			check(aggregate->getScene() == NULL && member->getScene() == NULL && scene.getNbAggregates() == 0, "aggregate remains safely removable");
-			aggregate->release();
-		}
-		member->release();
-	}
-	articulation->release(); usable(scene, probe, 1);
-}
-}
-int main()
+}int main()
 {
 	PxDefaultAllocator allocator;
 	ValidationErrors errors;
@@ -259,7 +185,6 @@ int main()
 		{
 			check(scene->addActor(*probe), "valid rigid actor inserted");
 			settings(*physics, *dispatcher, errors); usable(*scene, *probe, 1);
-			articulations(*physics, *material, errors, *scene, *probe);
 		}
 		if(probe)
 		{

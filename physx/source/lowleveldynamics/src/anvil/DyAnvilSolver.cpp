@@ -810,8 +810,6 @@ static bool solveAnvilRows(AnvilSolver& solver, AnvilIslandWorkspace& workspace,
 		while(addClosedAnvilContacts(workspace.contacts, workspace.problem, workspace.result, contactSettings, bodyData, bodyCount, threadContext.mContactBuffer, context))
 		{
 			PX_PROFILE_ZONE("Dynamics.anvilClosedContacts", context.getContextId());
-			extern int gAnvilDebugStep, gAnvilDebugFrom, gAnvilDebugTo; // EXPERIMENT (temporary)
-			if(gAnvilDebugStep >= gAnvilDebugFrom && gAnvilDebugStep <= gAnvilDebugTo) { printf("  [%d] re-solve: late points %u\n", gAnvilDebugStep, workspace.contacts.latePairs.size()); } // EXPERIMENT (temporary)
 			anvil::prepareCompactProblemFromColumnCounts(workspace.problem);
 			settings.keepOrdering = true;
 			if(!solveAnvilSystem(settings, workspace, &workspace.result))

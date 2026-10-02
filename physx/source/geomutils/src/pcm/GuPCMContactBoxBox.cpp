@@ -321,7 +321,16 @@ static void calculateContacts(const FloatVArg extentX_, const FloatVArg extentY_
 	}
 }
 
-static PxU32 doBoxBoxGenerateContacts(const Vec3VArg box0Extent, const Vec3VArg box1Extent, const PxMatTransformV& transform0, const PxMatTransformV& transform1, const FloatVArg contactDist, PersistentContact* manifoldContacts, PxU8* anchors, PxU32& numContacts)
+// previousNormal, when given, is the manifold's normal in world space before this regeneration.
+// Two thin boxes leaning against each other along an edge, as two cards at the apex of a tent,
+// have nearly equal overlap along either box's face axis: "this edge in that face" and "that
+// edge in this face" are both valid, and the smallest overlap alone chose between them by the
+// rounding of the moment, turning the normal by the angle between the faces (52 degrees for a
+// card house) at regenerations of a resting contact. The previous axis is kept while it still
+// interpenetrates and by no more than twice the smallest, the bound on how far the kept
+// description can be from the closest one; a feature that separates or penetrates much less
+// elsewhere still changes the axis.
+static PxU32 doBoxBoxGenerateContacts(const Vec3VArg box0Extent, const Vec3VArg box1Extent, const PxMatTransformV& transform0, const PxMatTransformV& transform1, const FloatVArg contactDist, PersistentContact* manifoldContacts, PxU8* anchors, PxU32& numContacts, const Vec3V* previousNormal)
 {
 	const FloatV ea0 = V3GetX(box0Extent);
 	const FloatV ea1 = V3GetY(box0Extent);
@@ -630,6 +639,31 @@ static PxU32 doBoxBoxGenerateContacts(const Vec3VArg box0Extent, const Vec3VArg 
 	const Vec3V axis10 = transform1.getCol0();
 	const Vec3V axis11 = transform1.getCol1();
 	const Vec3V axis12 = transform1.getCol2();
+
+	if(previousNormal)
+	{
+		// The previous normal was one of the face axes, up to the rounding of the transforms;
+		// a normal from the penetration fallback is not and keeps the smallest overlap.
+		const Vec3V axes[6] = { axis00, axis01, axis02, axis10, axis11, axis12 };
+		PxU32 previous = 6;
+		for(PxU32 i = 0; i < 6; ++i)
+		{
+			if(FAllGrtr(FAbs(V3Dot(axes[i], *previousNormal)), FLoad(0.9999f)))
+			{
+				previous = i;
+			}
+		}
+		if(previous < 6 && previous != feature)
+		{
+			const FloatV previousPenetration = FSub(overlap[previous], contactDist);
+			const FloatV minPenetration = FSub(overlap[feature], contactDist);
+			if(FAllGrtr(previousPenetration, zero) && FAllGrtr(minPenetration, zero) && FAllGrtrOrEq(FAdd(minPenetration, minPenetration), previousPenetration))
+			{
+				feature = previous;
+				minOverlap = overlap[previous];
+			}
+		}
+	}
 
 	Vec3V incidentFaceNormalInNew;
 	Vec3V pts[4];
@@ -965,8 +999,10 @@ bool Gu::pcmContactBoxBox(GU_CONTACT_METHOD_ARGS)
 		PersistentContact* manifoldContacts = PX_CP_TO_PCP(contactBuffer.contacts);
 		PxU8 anchors[PxContactBuffer::MAX_CONTACTS];
 		PxU32 numContacts = 0;
-	
-		if(doBoxBoxGenerateContacts(boxExtents0, boxExtents1, transfV0, transfV1, contactDist, manifoldContacts, anchors, numContacts)) 
+		// The normal of the points that survived the refresh, for the axis choice's continuity.
+		const Vec3V previousNormal = newContacts ? transfV1.rotate(Vec3V_From_Vec4V(manifold.mContactPoints[0].mLocalNormalPen)) : V3Zero();
+
+		if(doBoxBoxGenerateContacts(boxExtents0, boxExtents1, transfV0, transfV1, contactDist, manifoldContacts, anchors, numContacts, newContacts ? &previousNormal : NULL))
 		{
 			if(numContacts > 0)
 			{

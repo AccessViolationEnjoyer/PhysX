@@ -1,5 +1,6 @@
 #include "PxPhysicsAPI.h"
 #include "CardHouseScene.h"
+#include "MasonryArchScene.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -9,17 +10,22 @@
 #include <vector>
 
 using namespace physx;
-namespace physx { namespace Dy { extern int gAnvilDebugStep, gAnvilDebugFrom, gAnvilDebugTo; } } // EXPERIMENT (temporary)
 
 // Physical behaviour checks against analytic expectations:
 // - bouncing_balls: restitution sets the rebound speed and height.
 // - split_conveyors: a case straddling two belts at different speeds turns at the rate Coulomb
 //   friction predicts for its contact points and does not drift sideways.
 // - sheet_stack: 100 sheets of 1 mm and 1 g stay stacked without penetration or drift.
+// - paper_drop: 100 A4 sheets of 0.1 mm dropped one at a time from 10 cm stack without overlap,
+//   sliding or turning.
 // - card_house: the FBF paper's house of 40 cards, at its scale and with real playing cards,
 //   stands still once it has settled.
 // - rolling: a sphere and a cylinder roll down a ramp at the rolling acceleration, without slip.
-// usage: BehaviourTests [all|bouncing_balls|split_conveyors|sheet_stack|card_house|rolling] [anvil|pgs] [threads=1]
+// - backspin_ball: a ball thrown with backspin slides, stops, and rolls back at the Coulomb rates.
+// - painleve_box: a tall box thrown along the floor slides upright below the critical friction w / h
+//   and topples onto its side above it.
+// - masonry_arch: the FBF paper's arch of 25 stones closes its joints and stands still.
+// usage: BehaviourTests [all|bouncing_balls|split_conveyors|sheet_stack|paper_drop|card_house|rolling|backspin_ball|painleve_box|masonry_arch] [anvil|pgs] [threads=1]
 namespace
 {
 const PxReal TIMESTEP = 0.01f;
@@ -59,40 +65,6 @@ public:
 	}
 };
 
-// EXPERIMENT (temporary): contact reports of one actor's pairs over a step range.
-static bool gReportContacts = false;
-static int gReportStep = 0, gReportFrom = -1, gReportTo = -2;
-static PxRigidActor* gReportActor = NULL;
-class ContactReport : public PxSimulationEventCallback
-{
-public:
-	virtual void onContact(const PxContactPairHeader& header, const PxContactPair* pairs, PxU32 count) PX_OVERRIDE
-	{
-		if(gReportStep < gReportFrom || gReportStep > gReportTo || (header.actors[0] != gReportActor && header.actors[1] != gReportActor))
-			return;
-		const PxActor* other = header.actors[0] == gReportActor ? header.actors[1] : header.actors[0];
-		const PxTransform frame = gReportActor->getGlobalPose();
-		for(PxU32 i = 0; i < count; ++i)
-		{
-			PxContactPairPoint points[64];
-			const PxU32 n = pairs[i].extractContacts(points, 64);
-			std::printf("    step %d bridge/card %zu: %u points\n", gReportStep, size_t(other->userData), n);
-			for(PxU32 j = 0; j < n; ++j)
-			{
-				const PxVec3 p = frame.transformInv(points[j].position);
-				std::printf("      at (%8.3f,%8.3f,%8.3f) mm sep %7.2f um impulse (%9.3f,%9.3f,%9.3f) uNs\n", p.x * 1e3f, p.y * 1e3f, p.z * 1e3f, points[j].separation * 1e6f,
-					points[j].impulse.x * 1e6f, points[j].impulse.y * 1e6f, points[j].impulse.z * 1e6f);
-			}
-		}
-	}
-	virtual void onConstraintBreak(PxConstraintInfo*, PxU32) PX_OVERRIDE {}
-	virtual void onWake(PxActor**, PxU32) PX_OVERRIDE {}
-	virtual void onSleep(PxActor**, PxU32) PX_OVERRIDE {}
-	virtual void onTrigger(PxTriggerPair*, PxU32) PX_OVERRIDE {}
-	virtual void onAdvance(const PxRigidBody* const*, const PxTransform*, const PxU32) PX_OVERRIDE {}
-};
-static ContactReport gContactReport;
-
 PxFilterFlags filterShader(PxFilterObjectAttributes, PxFilterData data0, PxFilterObjectAttributes, PxFilterData data1, PxPairFlags& flags, const void*, PxU32)
 {
 	flags = PxPairFlag::eCONTACT_DEFAULT;
@@ -100,8 +72,6 @@ PxFilterFlags filterShader(PxFilterObjectAttributes, PxFilterData data0, PxFilte
 	{
 		flags |= PxPairFlag::eMODIFY_CONTACTS;
 	}
-	if(gReportContacts) // EXPERIMENT (temporary)
-		flags |= PxPairFlag::eNOTIFY_TOUCH_PERSISTS | PxPairFlag::eNOTIFY_TOUCH_FOUND | PxPairFlag::eNOTIFY_CONTACT_POINTS;
 	return PxFilterFlag::eDEFAULT;
 }
 
@@ -119,9 +89,6 @@ struct Context
 		desc.cpuDispatcher = dispatcher;
 		desc.filterShader = filterShader;
 		desc.contactModifyCallback = &belts;
-		gReportContacts = getenv("ANVIL_EXP_REPORT") != NULL; // EXPERIMENT (temporary)
-		if(gReportContacts)
-			desc.simulationEventCallback = &gContactReport;
 		desc.gravity = PxVec3(0.0f, -GRAVITY, 0.0f);
 		desc.solverType = anvil ? PxSolverType::eANVIL : PxSolverType::ePGS;
 		desc.flags |= PxSceneFlag::eENABLE_FRICTION_EVERY_ITERATION;
@@ -536,11 +503,96 @@ void sheetStack(Context& context)
 	material->release();
 }
 
+// One hundred A4 sheets (210 x 297 x 0.1 mm, 80 g/m^2, 5 g) dropped flat one at a time, each
+// released at rest 10 cm above the stack it lands on and every 0.25 s: it falls for 0.14 s and lands
+// at 1.4 m/s, 14 mm a step, 140 times its thickness. Square landings push no sheet sideways or turn
+// it, so the limits are those of the sheet stack: overlap and floor penetration below 20 um, no sheet
+// moving more than 0.1 mm sideways or turning or tilting more than 0.1 degree, and the stack at rest.
+void paperDrop(Context& context)
+{
+	PxScene* scene = context.createScene();
+	PxMaterial* material = context.physics->createMaterial(0.5f, 0.5f, 0.0f);
+	context.staticBox(*scene, *material, PxVec3(0.0f, -0.5f, 0.0f), PxVec3(1.0f, 0.5f, 1.0f));
+	const int sheetCount = 100, releaseFrames = 25, settleFrames = 100;
+	const int frames = sheetCount * releaseFrames + settleFrames;
+	const PxVec3 half(0.105f, 0.00005f, 0.1485f);
+	const PxReal dropHeight = 0.1f, mass = 0.08f * 4.0f * half.x * half.z;
+	std::vector<PxRigidDynamic*> sheets;
+	double maximumOverlap = 0.0, maximumFloorPenetration = 0.0, maximumDrift = 0.0, maximumTurn = 0.0, maximumTilt = 0.0;
+	std::vector<double> stepTimes;
+	for(int frame = 0; frame < frames; ++frame)
+	{
+		if(frame % releaseFrames == 0 && int(sheets.size()) < sheetCount)
+		{
+			const PxReal bottom = 2.0f * half.y * PxReal(sheets.size()) + dropHeight;
+			PxRigidDynamic* sheet = context.dynamicBody(*scene, PxTransform(PxVec3(0.0f, bottom + half.y, 0.0f)));
+			PxShape* shape = context.shape(PxBoxGeometry(half), *material);
+			sheet->attachShape(*shape);
+			shape->release();
+			PxRigidBodyExt::setMassAndUpdateInertia(*sheet, mass);
+			sheets.push_back(sheet);
+		}
+		const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+		step(*scene);
+		stepTimes.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+		// Overlap: a sheet's lowest corner below the highest corner of the sheet under it; a falling
+		// sheet is above it.
+		double previousTop = 0.0;
+		for(size_t i = 0; i < sheets.size(); ++i)
+		{
+			const PxTransform pose = sheets[i]->getGlobalPose();
+			double bottom = PX_MAX_F64, top = -PX_MAX_F64;
+			for(int corner = 0; corner < 8; ++corner)
+			{
+				const PxVec3 local((corner & 1 ? 1.0f : -1.0f) * half.x, (corner & 2 ? 1.0f : -1.0f) * half.y, (corner & 4 ? 1.0f : -1.0f) * half.z);
+				const double y = pose.transform(local).y;
+				bottom = std::min(bottom, y);
+				top = std::max(top, y);
+			}
+			if(i == 0)
+				maximumFloorPenetration = std::max(maximumFloorPenetration, -bottom);
+			else
+				maximumOverlap = std::max(maximumOverlap, previousTop - bottom);
+			previousTop = top;
+			const PxVec3 across = pose.q.rotate(PxVec3(1.0f, 0.0f, 0.0f));
+			maximumDrift = std::max(maximumDrift, double(PxVec2(pose.p.x, pose.p.z).magnitude()));
+			maximumTurn = std::max(maximumTurn, std::abs(std::atan2(double(across.z), double(across.x))));
+			maximumTilt = std::max(maximumTilt, double(PxAcos(PxClamp(pose.q.rotate(PxVec3(0.0f, 1.0f, 0.0f)).y, -1.0f, 1.0f))));
+		}
+	}
+	double finalDrift = 0.0, finalTurn = 0.0, finalSpeed = 0.0;
+	for(size_t i = 0; i < sheets.size(); ++i)
+	{
+		const PxTransform pose = sheets[i]->getGlobalPose();
+		const PxVec3 across = pose.q.rotate(PxVec3(1.0f, 0.0f, 0.0f));
+		finalDrift = std::max(finalDrift, double(PxVec2(pose.p.x, pose.p.z).magnitude()));
+		finalTurn = std::max(finalTurn, std::abs(std::atan2(double(across.z), double(across.x))));
+		finalSpeed = std::max(finalSpeed, double(sheets[i]->getLinearVelocity().magnitude()));
+	}
+	const double compression = 2.0 * half.y * sheetCount - (sheets.back()->getGlobalPose().p.y + half.y);
+	double total = 0.0;
+	for(double time : stepTimes)
+		total += time;
+	std::sort(stepTimes.begin(), stepTimes.end());
+	std::printf("paper_drop sheets=%d max_overlap_um=%.3f floor_penetration_um=%.3f compression_um=%.3f max_drift_mm=%.5f final_drift_mm=%.5f max_turn_deg=%.5f final_turn_deg=%.5f max_tilt_deg=%.5f final_max_speed_mm_s=%.5f step_total_ms=%.1f p95_ms=%.3f peak_ms=%.3f\n",
+		sheetCount, maximumOverlap * 1e6, maximumFloorPenetration * 1e6, compression * 1e6, maximumDrift * 1e3, finalDrift * 1e3, maximumTurn * 180.0 / PxPi, finalTurn * 180.0 / PxPi,
+		maximumTilt * 180.0 / PxPi, finalSpeed * 1e3, total, stepTimes[stepTimes.size() * 95 / 100], stepTimes.back());
+	check(maximumOverlap < 20.0e-6, "paper_drop: sheets overlap by less than 20 um");
+	check(maximumFloorPenetration < 20.0e-6, "paper_drop: bottom sheet sinks less than 20 um into the floor");
+	check(maximumDrift < 0.1e-3, "paper_drop: no sheet moves more than 0.1 mm sideways");
+	check(maximumTurn < 0.1 * PxPi / 180.0, "paper_drop: no sheet turns more than 0.1 degree");
+	check(maximumTilt < 0.1 * PxPi / 180.0, "paper_drop: no sheet tilts more than 0.1 degree");
+	check(finalSpeed < 1.0e-3, "paper_drop: stack is at rest (below 1 mm/s)");
+	scene->release();
+	material->release();
+}
+
 // The FBF paper's card house (CardHouseScene.h): five levels of tents of two cards leaning together
 // at 65 degrees, with bridge cards across neighbouring tents, 40 cards, friction 0.8. At the paper's
 // scale (2.5 m cards, 40 mm thick, 25 kg) and with real playing cards (88 x 63 x 0.3 mm, 1.8 g). The
 // cards start slightly apart and fall into place over the first two seconds; then the house should
-// stand still. The limits on movement are 0.25% of the card's length. A house that collapsed while
+// stand still. The limits on movement are 0.25% of the card's length, and 0.25% of a radian for a
+// card's turn. A house that collapsed while
 // settling would lie still too, so settling is checked separately.
 void standingCardHouse(Context& context, const cardHouse::Scale& scale)
 {
@@ -561,16 +613,10 @@ void standingCardHouse(Context& context, const cardHouse::Scale& scale)
 		body->attachShape(*shape);
 		shape->release();
 		PxRigidBodyExt::setMassAndUpdateInertia(*body, PxReal(scale.mass));
-		body->userData = reinterpret_cast<void*>(i); // EXPERIMENT (temporary)
-		if(layout[i].level == cardHouse::levels - 1 && layout[i].role == 'B' && scale.halfThickness < 0.001) // EXPERIMENT (temporary)
-			gReportActor = body;
 		cards.push_back(body);
 		halves.push_back(half);
 	}
-	if(getenv("ANVIL_EXP_STEPS")) // EXPERIMENT (temporary)
-		std::sscanf(getenv("ANVIL_EXP_STEPS"), "%d,%d", &gReportFrom, &gReportTo);
-	const int frames = getenv("ANVIL_EXP_FRAMES") ? std::atoi(getenv("ANVIL_EXP_FRAMES")) : 1000, settleFrames = 200; // EXPERIMENT (temporary)
-	const bool trace = getenv("ANVIL_EXP_TRACE") != NULL; // EXPERIMENT (temporary)
+	const int frames = 1000, settleFrames = 200;
 	const double length = 2.0 * scale.halfLength;
 	std::vector<PxTransform> settled(cards.size());
 	double maximumDisplacement = 0.0, maximumRotation = 0.0, maximumFloorPenetration = 0.0, lowestTop = PX_MAX_F64;
@@ -578,8 +624,6 @@ void standingCardHouse(Context& context, const cardHouse::Scale& scale)
 	for(int frame = 0; frame < frames; ++frame)
 	{
 		const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
-		gReportStep = frame + 1; // EXPERIMENT (temporary)
-		physx::Dy::gAnvilDebugStep = scale.halfThickness < 0.001 ? frame + 1 : 0; physx::Dy::gAnvilDebugFrom = gReportFrom; physx::Dy::gAnvilDebugTo = gReportTo; // EXPERIMENT (temporary)
 		step(*scene);
 		totalMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 		for(size_t i = 0; i < cards.size(); ++i)
@@ -609,39 +653,6 @@ void standingCardHouse(Context& context, const cardHouse::Scale& scale)
 		{
 			lowestTop = std::min(lowestTop, double(cards.back()->getGlobalPose().p.y));
 		}
-		// EXPERIMENT (temporary): per step, the top level's cards between ANVIL_EXP_STEPS "from,to".
-		static int traceFrom = -1, traceTo = -2;
-		if(traceFrom < 0 && getenv("ANVIL_EXP_STEPS"))
-			std::sscanf(getenv("ANVIL_EXP_STEPS"), "%d,%d", &traceFrom, &traceTo);
-		if(frame + 1 >= traceFrom && frame + 1 <= traceTo && scale.halfThickness < 0.001)
-		{
-			std::printf("  step %d", frame + 1);
-			for(size_t i = 0; i < cards.size(); ++i)
-			{
-				if(layout[i].level != cardHouse::levels - 1)
-					continue;
-				const PxVec3 offset = cards[i]->getGlobalPose().p - settled[i].p;
-				const PxVec3 v = cards[i]->getLinearVelocity(), w = cards[i]->getAngularVelocity();
-				std::printf(" | %c d(%6.1f,%6.1f,%6.1f) um v(%6.2f,%6.2f,%6.2f) mm/s w(%6.2f,%6.2f,%6.2f) deg/s", layout[i].role, offset.x * 1e6f, offset.y * 1e6f, offset.z * 1e6f, v.x * 1e3f, v.y * 1e3f, v.z * 1e3f,
-					w.x * 180.0f / PxPi, w.y * 180.0f / PxPi, w.z * 180.0f / PxPi);
-			}
-			std::printf("\n");
-		}
-		// EXPERIMENT (temporary): each second, the card furthest from its settled pose and the fastest.
-		if(trace && frame + 1 > settleFrames && (frame + 1) % 100 == 0)
-		{
-			size_t furthest = 0, fastest = 0;
-			double distance = 0.0, speed = 0.0;
-			for(size_t i = 0; i < cards.size(); ++i)
-			{
-				const double d = double((cards[i]->getGlobalPose().p - settled[i].p).magnitude());
-				const double v = double(cards[i]->getLinearVelocity().magnitude());
-				if(d > distance) { distance = d; furthest = i; }
-				if(v > speed) { speed = v; fastest = i; }
-			}
-			std::printf("  t=%4.1f s furthest card %2zu (level %d %c) %.4f mm from settled | fastest card %2zu (level %d %c) %.4f mm/s\n", (frame + 1) * TIMESTEP, furthest, layout[furthest].level, layout[furthest].role, distance * 1e3,
-				fastest, layout[fastest].level, layout[fastest].role, speed * 1e3);
-		}
 	}
 	double maximumSpeed = 0.0;
 	for(size_t i = 0; i < cards.size(); ++i)
@@ -664,13 +675,244 @@ void standingCardHouse(Context& context, const cardHouse::Scale& scale)
 		" mean_step_ms=%.4f total_s=%.3f\n", scale.name, cards.size(), maximumDisplacement * 1e3, maximumRotation * 180.0 / PxPi, topDrop * 1e3, maximumFloorPenetration * 1e6,
 		maximumSpeed * 1e3, totalMs / frames, totalMs * 1e-3);
 	check(maximumDisplacement < 0.0025 * length, "card_house: no card moves more than 0.25% of its length once the house has settled");
-	check(maximumRotation < 0.1 * PxPi / 180.0, "card_house: no card turns more than 0.1 degree once the house has settled");
+	// The displacement limit as a turn: 0.25% of a radian, 0.14 degrees. A card's one-off slip of
+	// a tenth of a millimetre while the house creeps turns it by about 0.1 degree, at a moment that
+	// moves between builds.
+	check(maximumRotation < 0.0025, "card_house: no card turns more than 0.25% of a radian once the house has settled");
 	check(maximumSpeed < 0.0025 * length, "card_house: house is at rest (below 0.25% of a card length per second)");
 	check(maximumFloorPenetration < 20.0e-6, "card_house: cards sink less than 20 um into the floor");
 	scene->release();
 	material->release();
 }
 
+// The FBF paper's backspin ball (github.com/matthcsong/fbf-sca-2026, paper_examples/backspin-ball):
+// a 1 kg ball of radius 0.25 m thrown along a floor at 4 m/s with 200 rad/s of backspin, friction
+// 0.5. Its contact slides forward at v + w r = 54 m/s, so friction mu m g slows the ball at mu g and
+// takes its spin down at 5 mu g / (2 r), and the slip falls at 7/2 mu g until, at
+// t = 2 (v0 + w0 r) / (7 mu g) = 3.145 s, the ball rolls, back the way it came, at
+// (5 v0 - 2 w0 r) / 7 = -11.43 m/s, and keeps rolling at that speed. A step's friction impulse
+// changes the velocity by up to mu g dt, which bounds how far a step's velocity can stand from
+// the analytic one and how far the switch to rolling can stand from its analytic time.
+void backspinBall(Context& context)
+{
+	const PxReal radius = 0.25f, friction = 0.5f, initialSpeed = 4.0f, initialSpin = 200.0f;
+	const int frames = 400;
+	PxScene* scene = context.createScene();
+	PxMaterial* material = context.physics->createMaterial(friction, friction, 0.0f);
+	context.staticBox(*scene, *material, PxVec3(0.0f, -0.5f, 0.0f), PxVec3(30.0f, 0.5f, 2.0f));
+	PxRigidDynamic* ball = context.dynamicBody(*scene, PxTransform(PxVec3(0.0f, radius, 0.0f)));
+	PxShape* shape = context.shape(PxSphereGeometry(radius), *material);
+	ball->attachShape(*shape);
+	shape->release();
+	PxRigidBodyExt::setMassAndUpdateInertia(*ball, 1.0f);
+	// PhysX caps a dynamic body's angular velocity at 100 rad/s by default.
+	ball->setMaxAngularVelocity(1000.0f);
+	// Moving along +x, a positive spin about z drives the contact point forward: backspin.
+	ball->setLinearVelocity(PxVec3(initialSpeed, 0.0f, 0.0f));
+	ball->setAngularVelocity(PxVec3(0.0f, 0.0f, initialSpin));
+	const double deceleration = double(friction) * GRAVITY;
+	const double slip0 = double(initialSpeed) + double(initialSpin) * radius;
+	const double rollTime = 2.0 * slip0 / (7.0 * deceleration);
+	const double rollSpeed = (5.0 * initialSpeed - 2.0 * initialSpin * radius) / 7.0;
+	const double stepChange = deceleration * TIMESTEP;
+	double maximumSpeedError = 0.0, maximumRollingSlip = 0.0, maximumPenetration = 0.0, measuredRollTime = -1.0;
+	for(int frame = 0; frame < frames; ++frame)
+	{
+		step(*scene);
+		const double time = (frame + 1) * double(TIMESTEP);
+		const PxVec3 linear = ball->getLinearVelocity(), angular = ball->getAngularVelocity();
+		const double expected = time < rollTime ? initialSpeed - deceleration * time : rollSpeed;
+		maximumSpeedError = std::max(maximumSpeedError, std::abs(double(linear.x) - expected));
+		// The contact point's velocity along the floor.
+		const double slip = double(linear.x) + double(angular.z) * radius;
+		if(measuredRollTime < 0.0 && std::abs(slip) < stepChange)
+		{
+			measuredRollTime = time;
+		}
+		if(time > rollTime + TIMESTEP)
+		{
+			maximumRollingSlip = std::max(maximumRollingSlip, std::abs(slip));
+		}
+		maximumPenetration = std::max(maximumPenetration, double(radius - ball->getGlobalPose().p.y));
+	}
+	const double finalSpeed = double(ball->getLinearVelocity().x);
+	std::printf("backspin_ball roll_time_s=%.4f expected_s=%.4f final_speed_m_s=%.5f expected_m_s=%.5f max_speed_error_m_s=%.5f max_rolling_slip_mm_s=%.4f max_penetration_um=%.3f final_x_m=%.4f\n",
+		measuredRollTime, rollTime, finalSpeed, rollSpeed, maximumSpeedError, maximumRollingSlip * 1e3, maximumPenetration * 1e6, double(ball->getGlobalPose().p.x));
+	check(maximumSpeedError <= stepChange, "backspin_ball: the velocity follows the analytic profile within a step's friction (mu g dt)");
+	check(measuredRollTime > 0.0 && std::abs(measuredRollTime - rollTime) <= TIMESTEP, "backspin_ball: the ball starts rolling within a step of the analytic time");
+	check(std::abs(finalSpeed - rollSpeed) <= stepChange, "backspin_ball: the ball rolls back at the analytic speed");
+	check(maximumRollingSlip < 1.0e-3, "backspin_ball: the rolling ball's contact does not slip (below 1 mm/s)");
+	check(maximumPenetration < 20.0e-6, "backspin_ball: the ball sinks less than 20 um into the floor");
+	scene->release();
+	material->release();
+}
+
+// The FBF paper's Painleve box (github.com/matthcsong/fbf-sca-2026, paper_examples/painleve): a box
+// 0.3 m wide, 0.6 m tall and 1.2 m deep, 43.2 kg (density 200), standing on the floor and thrown
+// across its narrow side at 4 m/s. Friction mu N acts at the floor, h / 2 below the centre of
+// mass, and the base can hold its moment only while mu <= w / h = 0.5. Below that the box slides
+// upright, slowing at mu g, and stops after v0 / (mu g) at v0^2 / (2 mu g); above it the box cannot
+// stay upright and tips forward onto its leading edge, toppling once it turns past atan(w / h).
+// It runs at 0.45 and at the paper's 0.55, either side of 0.5. A step's friction changes the
+// velocity by up to mu g dt and moves the box by up to v0 dt, which bound the sliding box's speed,
+// stopping time and distance; a box lying flat lifts an edge by its tilt times the face's width,
+// held to the contacts' 20 um.
+void painleveBox(Context& context, PxReal friction)
+{
+	const PxReal width = 0.3f, height = 0.6f, depth = 1.2f, initialSpeed = 4.0f;
+	const int frames = 300;
+	PxScene* scene = context.createScene();
+	PxMaterial* material = context.physics->createMaterial(friction, friction, 0.0f);
+	context.staticBox(*scene, *material, PxVec3(0.0f, -0.5f, 0.0f), PxVec3(10.0f, 0.5f, 2.0f));
+	PxRigidDynamic* box = context.dynamicBody(*scene, PxTransform(PxVec3(0.0f, 0.5f * height, 0.0f)));
+	PxShape* shape = context.shape(PxBoxGeometry(0.5f * width, 0.5f * height, 0.5f * depth), *material);
+	box->attachShape(*shape);
+	shape->release();
+	PxRigidBodyExt::setMassAndUpdateInertia(*box, width * height * depth * 200.0f);
+	box->setLinearVelocity(PxVec3(initialSpeed, 0.0f, 0.0f));
+	const double deceleration = double(friction) * GRAVITY;
+	const double stopTime = initialSpeed / deceleration, stopDistance = 0.5 * initialSpeed * initialSpeed / deceleration;
+	const double toppleAngle = std::atan(double(width) / double(height));
+	const double stepChange = deceleration * TIMESTEP;
+	double maximumSpeedError = 0.0, maximumTilt = 0.0, measuredStopTime = -1.0;
+	for(int frame = 0; frame < frames; ++frame)
+	{
+		step(*scene);
+		const double time = (frame + 1) * double(TIMESTEP);
+		const PxTransform pose = box->getGlobalPose();
+		// Tilt forward: the box's up axis turned toward +x (a negative turn about z).
+		const PxVec3 up = pose.q.rotate(PxVec3(0.0f, 1.0f, 0.0f));
+		const double tilt = std::atan2(double(up.x), double(up.y));
+		maximumTilt = std::max(maximumTilt, std::abs(tilt));
+		const double speed = double(box->getLinearVelocity().x);
+		if(time < stopTime)
+		{
+			maximumSpeedError = std::max(maximumSpeedError, std::abs(speed - (initialSpeed - deceleration * time)));
+		}
+		// Stopped once less than a step's friction of speed is left.
+		if(measuredStopTime < 0.0 && speed < stepChange)
+		{
+			measuredStopTime = time;
+		}
+	}
+	const PxTransform pose = box->getGlobalPose();
+	const PxVec3 up = pose.q.rotate(PxVec3(0.0f, 1.0f, 0.0f));
+	const double finalTilt = std::atan2(double(up.x), double(up.y));
+	std::printf("painleve_box mu=%.2f critical=%.2f stop_time_s=%.4f expected_s=%.4f final_x_m=%.4f expected_m=%.4f max_speed_error_m_s=%.5f max_tilt_deg=%.4f final_tilt_deg=%.3f topple_deg=%.2f final_speed_m_s=%.5f\n",
+		double(friction), double(width / height), measuredStopTime, stopTime, double(pose.p.x), stopDistance, maximumSpeedError, maximumTilt * 180.0 / PxPi, finalTilt * 180.0 / PxPi,
+		toppleAngle * 180.0 / PxPi, double(box->getLinearVelocity().magnitude()));
+	if(double(friction) <= double(width / height))
+	{
+		check(maximumSpeedError <= stepChange, "painleve_box: below the critical friction the box slows at mu g (within mu g dt)");
+		check(measuredStopTime > 0.0 && std::abs(measuredStopTime - stopTime) <= TIMESTEP, "painleve_box: the box stops within a step of v0 / (mu g)");
+		check(std::abs(double(pose.p.x) - stopDistance) <= initialSpeed * TIMESTEP, "painleve_box: the box stops within a step's travel of v0^2 / (2 mu g)");
+		check(maximumTilt * width < 20.0e-6, "painleve_box: below the critical friction the box slides upright (trailing edge lifts less than 20 um)");
+	}
+	else
+	{
+		check(maximumTilt > toppleAngle, "painleve_box: above the critical friction the box tips past its topple angle");
+		check(std::abs(std::abs(finalTilt) - 0.5 * PxPi) * height < 20.0e-6, "painleve_box: above the critical friction the box comes to rest flat on its side (edge lifts less than 20 um)");
+	}
+	check(box->getLinearVelocity().magnitude() < 1.0e-3f, "painleve_box: the box comes to rest (below 1 mm/s)");
+	scene->release();
+	material->release();
+}
+
+// The FBF paper's masonry arch (MasonryArchScene.h): 25 wedge-shaped stones, the ends fixed,
+// built with their joints 120-141 mm open. The free stones fall into place and the arch settles
+// under its own weight. Closing the joints lowers the crown by less than their summed openings
+// (3.1 m); a collapsing arch drops it to the floor, 60 m down. Each half closes into one block that
+// turns about its springing, the keystone hanging between their upper edges, so the arch has four
+// hinges: a mechanism, which sways the crown 32 mm sideways until a keystone joint closes and the
+// arch stands on three. Settled by 8 s, it then moves less than a mm over the last 2 s and comes to
+// rest (below 1 mm/s, as the Painleve box).
+void standingMasonryArch(Context& context)
+{
+	const int frames = 1000, restFrames = 200;
+	PxScene* scene = context.createScene();
+	PxMaterial* material = context.physics->createMaterial(PxReal(masonryArch::friction), PxReal(masonryArch::friction), 0.0f);
+	context.staticBox(*scene, *material, PxVec3(0.0f, -0.5f, 0.0f), PxVec3(60.0f, 0.5f, 20.0f));
+	std::vector<PxRigidActor*> stones;
+	for(int i = 0; i < masonryArch::stoneCount; ++i)
+	{
+		PxVec3 points[masonryArch::vertexCount];
+		for(int j = 0; j < masonryArch::vertexCount; ++j)
+			points[j] = PxVec3(PxReal(masonryArch::vertices[i][j][0]), PxReal(masonryArch::vertices[i][j][1]), PxReal(masonryArch::vertices[i][j][2]));
+		PxConvexMeshDesc description;
+		description.points.count = masonryArch::vertexCount;
+		description.points.stride = sizeof(PxVec3);
+		description.points.data = points;
+		description.flags = PxConvexFlag::eCOMPUTE_CONVEX;
+		PxConvexMesh* mesh = PxCreateConvexMesh(PxCookingParams(context.physics->getTolerancesScale()), description, context.physics->getPhysicsInsertionCallback());
+		const PxTransform pose = PxTransform(PxVec3(PxReal(masonryArch::positions[i][0]), PxReal(masonryArch::positions[i][1]), PxReal(masonryArch::positions[i][2])));
+		PxShape* shape = context.shape(PxConvexMeshGeometry(mesh), *material);
+		mesh->release();
+		if(masonryArch::fixed(i))
+		{
+			PxRigidStatic* abutment = context.physics->createRigidStatic(pose);
+			abutment->attachShape(*shape);
+			scene->addActor(*abutment);
+			stones.push_back(abutment);
+		}
+		else
+		{
+			PxRigidDynamic* stone = context.dynamicBody(*scene, pose);
+			stone->attachShape(*shape);
+			PxRigidBodyExt::updateMassAndInertia(*stone, PxReal(masonryArch::density));
+			stones.push_back(stone);
+		}
+		shape->release();
+	}
+	// The joints' openings as built: a stone's next face (vertices 2, 3 and 6) to the next stone's
+	// facing corner (vertex 0); the faces are parallel.
+	double openings = 0.0;
+	for(int i = 0; i + 1 < masonryArch::stoneCount; ++i)
+	{
+		const double* p = masonryArch::positions[i];
+		const double* q = masonryArch::positions[i + 1];
+		const double* a = masonryArch::vertices[i][2];
+		const double* b = masonryArch::vertices[i][3];
+		const double* c = masonryArch::vertices[i][6];
+		const double* d = masonryArch::vertices[i + 1][0];
+		const PxVec3 origin(PxReal(p[0] + a[0]), PxReal(p[1] + a[1]), PxReal(p[2] + a[2]));
+		const PxVec3 u = PxVec3(PxReal(b[0] - a[0]), PxReal(b[1] - a[1]), PxReal(b[2] - a[2]));
+		const PxVec3 v = PxVec3(PxReal(c[0] - a[0]), PxReal(c[1] - a[1]), PxReal(c[2] - a[2]));
+		const PxVec3 corner(PxReal(q[0] + d[0]), PxReal(q[1] + d[1]), PxReal(q[2] + d[2]));
+		openings += std::abs(double(u.cross(v).getNormalized().dot(corner - origin)));
+	}
+	const int keystone = masonryArch::stoneCount / 2;
+	std::vector<PxVec3> restStart(stones.size());
+	double maximumKeystoneDrop = 0.0;
+	for(int frame = 0; frame < frames; ++frame)
+	{
+		step(*scene);
+		maximumKeystoneDrop = std::max(maximumKeystoneDrop, masonryArch::positions[keystone][1] - double(stones[size_t(keystone)]->getGlobalPose().p.y));
+		if(frame == frames - restFrames - 1)
+		{
+			for(size_t i = 0; i < stones.size(); ++i)
+				restStart[i] = stones[i]->getGlobalPose().p;
+		}
+	}
+	double finalSpeed = 0.0, restMovement = 0.0;
+	for(int i = 0; i < masonryArch::stoneCount; ++i)
+	{
+		if(masonryArch::fixed(i))
+			continue;
+		const PxRigidDynamic* stone = static_cast<PxRigidDynamic*>(stones[size_t(i)]);
+		finalSpeed = std::max(finalSpeed, double(stone->getLinearVelocity().magnitude()));
+		restMovement = std::max(restMovement, double((stone->getGlobalPose().p - restStart[size_t(i)]).magnitude()));
+	}
+	const PxVec3 keystonePosition = stones[size_t(keystone)]->getGlobalPose().p;
+	const double keystoneDrop = masonryArch::positions[keystone][1] - double(keystonePosition.y);
+	std::printf("masonry_arch stones=%d joint_openings_m=%.4f keystone_drop_m=%.4f max_keystone_drop_m=%.4f keystone_sway_mm=%.3f last_%.0fs_movement_mm=%.4f final_max_speed_mm_s=%.4f\n",
+		masonryArch::stoneCount, openings, keystoneDrop, maximumKeystoneDrop, 1e3 * (double(keystonePosition.x) - masonryArch::positions[keystone][0]), restFrames * double(TIMESTEP),
+		restMovement * 1e3, finalSpeed * 1e3);
+	check(maximumKeystoneDrop < openings, "masonry_arch: the arch stands (the crown drops less than the joints' openings)");
+	check(restMovement < 1.0e-3, "masonry_arch: the settled arch stands still (each stone moves less than 1 mm over the last 2 s)");
+	check(finalSpeed < 1.0e-3, "masonry_arch: the stones come to rest (below 1 mm/s)");
+	scene->release();
+	material->release();
+}
 // A sphere and a cylinder (a 64-sided convex hull) roll from rest down a 5 degree ramp with
 // friction 0.5, far more than rolling without slipping needs (tan 5 / (1 + m r^2 / I) at most
 // 0.03). Rolling, the contact stays put on both surfaces while the bodies' material passes
@@ -786,6 +1028,10 @@ int main(int argc, char** argv)
 	{
 		sheetStack(context);
 	}
+	if(all || std::strcmp(selection, "paper_drop") == 0)
+	{
+		paperDrop(context);
+	}
 	if(all || std::strcmp(selection, "card_house") == 0)
 	{
 		standingCardHouse(context, cardHouse::paper);
@@ -794,6 +1040,19 @@ int main(int argc, char** argv)
 	if(all || std::strcmp(selection, "rolling") == 0)
 	{
 		rolling(context);
+	}
+	if(all || std::strcmp(selection, "backspin_ball") == 0)
+	{
+		backspinBall(context);
+	}
+	if(all || std::strcmp(selection, "painleve_box") == 0)
+	{
+		painleveBox(context, 0.45f);
+		painleveBox(context, 0.55f);
+	}
+	if(all || std::strcmp(selection, "masonry_arch") == 0)
+	{
+		standingMasonryArch(context);
 	}
 	dispatcher->release();
 	physics->release();

@@ -203,6 +203,32 @@ passes cost 15-24% more factor work; neither was kept. Wasm: pallet fall p95 1.8
 pile 1000 12.8 -> 12.6, the 125-box pile drop 2.49 -> 2.55, totes 3.99 ms (the per-point check
 was 4.24).
 
+The playing-card house creeps about 13 um/s and jolts by microns (`BehaviourTests card_house`
+with `ANVIL_EXP_FRAMES=3000`). Both come from pairs whose every loaded point saturates for one
+step: writeback marks them sliding, the next step prepares them sticking with their slip cleared,
+and the released elastic slip snaps the structure; 175 such one-step flips in 30 s. They
+saturate early because the pair's previous normal impulse is shared equally over its kept points,
+including points 0.1-0.4 mm off the surface, so a bridge resting on one corner has that corner
+capped at a quarter of the budget. Redistributing the budget by geometry (depth, touching points,
+the pair's penetration as a margin, a plateau within it) collapses the house or sets a card
+rattling: its tents are held by friction at points that do not touch (a card's top face is 0.3
+mm wide and tilted 25 degrees, so its far edge, 0.13 mm clear, braces the near edge against
+twisting, as a real card's crushed edge would), and shares that follow the gaps feed back through
+them. Keeping the slip through a sliding step (as a bristle model would) lets the saturated pairs
+slide instead. The remaining route is a contact margin in the normal law together with per-point
+lagged impulses, which the slowed rolling hulls argue against at that reach.
+
+PCM's box-box contact chose its reference axis by the smallest overlap alone. Two thin boxes
+leaning against each other along an edge, the two cards of a tent, overlap almost equally along
+either card's face axis, and each regeneration of the resting manifold could turn the normal by
+52 degrees, which lapses the pair's slip and jolts: 6 times on loaded pairs in 30 s. The
+generator now keeps the previous axis while it still interpenetrates and by no more than twice
+the smallest (`doBoxBoxGenerateContacts`); the paper house's drift over 30 s fell from 0.048 to
+0.012 mm and the playing cards' from 0.169 to 0.131 mm. The settling is chaotic, so the 10 s
+window's extremes move between builds (max rotation 0.079 to 0.112 degrees); the test's turn
+limit is the displacement limit as a turn, 0.25% of a radian. The creep stays, as a known
+limitation of the equal friction split, by decision.
+
 This matters with `PxRigidBodyFlag::eENABLE_SPECULATIVE_CCD`, which inflates a body's contact
 reach by its motion per step: contacts then exist a step before surfaces meet, and a body
 arriving at 1 m/s is stopped at the surface instead of embedding a centimetre and bouncing. On a
