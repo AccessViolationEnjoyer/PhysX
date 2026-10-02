@@ -3676,7 +3676,7 @@ static SolveStatus::Enum solveAnvilInternal(const Problem& problem, const Settin
 	{
 		inverseRoot[rootRow] = 1.0 / std::sqrt(compliance[rootRow]);
 	}
-	factor.beginSolve(settings.profile, continuation, settings.parallelExecutor);
+	factor.beginSolve(settings.profile, continuation, settings.keepOrdering, settings.parallelExecutor);
 	// Continuations of an interior-point solve restart the interior point from its
 	// previous multipliers instead of repeating the Anvil phase.
 	const bool warmInteriorPoint = continuation && workspace.interiorPoint.warm && settings.interiorPointWarmShift >= 0.0;

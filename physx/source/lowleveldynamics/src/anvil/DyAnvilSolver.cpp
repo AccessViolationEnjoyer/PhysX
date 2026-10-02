@@ -787,7 +787,6 @@ static bool solveAnvilRows(AnvilSolver& solver, AnvilIslandWorkspace& workspace,
 		prepareAnvilRows(solver, workspace, context, threadContext, motionVelocities, allBodyData, firstBodyIndex, bodyCount, descriptors, descriptorCount, parallelExecutor);
 		anvil::prepareCompactProblemFromColumnCounts(workspace.problem);
 	}
-	threadContext.mAxisConstraintCount += PxU32(workspace.problem.rowCount());
 	{
 		PX_PROFILE_ZONE("Dynamics.anvilSolve", context.getContextId());
 		anvil::Settings settings = solver.settings;
@@ -801,7 +800,27 @@ static bool solveAnvilRows(AnvilSolver& solver, AnvilIslandWorkspace& workspace,
 			return false;
 		}
 		profileAnvilSolve(workspace, context.getContextId());
+		// A deferred point joins when the solve closes its gap, as an impact turning a body into it
+		// does, and the problem is solved again from the solution so far, keeping the bodies'
+		// ordering. Each pass adds the points the last solution closes. The rows are added with the
+		// settings they were prepared with (prepareAnvilRows).
+		AnvilContactSettings contactSettings = solver.contactSettings;
+		contactSettings.bodyLockFlags = workspace.lockFlags.begin();
+		contactSettings.initialVelocities = motionVelocities;
+		while(addClosedAnvilContacts(workspace.contacts, workspace.problem, workspace.result, contactSettings, bodyData, bodyCount, threadContext.mContactBuffer, context))
+		{
+			PX_PROFILE_ZONE("Dynamics.anvilClosedContacts", context.getContextId());
+			anvil::prepareCompactProblemFromColumnCounts(workspace.problem);
+			settings.keepOrdering = true;
+			if(!solveAnvilSystem(settings, workspace, &workspace.result))
+			{
+				solver.report("Anvil solve failed.");
+				return false;
+			}
+			profileAnvilSolve(workspace, context.getContextId());
+		}
 	}
+	threadContext.mAxisConstraintCount += PxU32(workspace.problem.rowCount());
 	storeAnvilCorrection(workspace.result, bodyData, motionVelocities, bodies, bodyCount);
 	writebackAnvilJoints(workspace.joints, workspace.problem, workspace.result);
 	writebackAnvilContacts(workspace.contacts, workspace.problem, workspace.result, bodies, bodyData, context);

@@ -238,6 +238,22 @@ static PX_FORCE_INLINE PxVec3 initialPointVelocity(const PxSolverBodyData& body0
 	return linear0 + angular0.cross(arm0) - linear1 - angular1.cross(arm1);
 }
 
+// Whether a speculative contact point (offsets inflated by a body's motion) enters the first
+// solve: within ANVIL_SPECULATIVE_KEEP_GAP, or when the approach over the step of the motion at
+// the step's start (last step's solution, before this step's gravity, which the contacts that
+// hold a resting body cancel) toward the surface's target velocity covers the gap with
+// ANVIL_SPECULATIVE_APPROACH_MARGIN to spare for pushes from other contacts. Other points are
+// deferred: the solve decides whether they close.
+static PX_FORCE_INLINE bool speculativePointKept(const PxContactPoint& contact, PxReal gap, const PxSolverBodyData& body0, const PxSolverBodyData& body1, PxI32 bodyIndex0, PxI32 bodyIndex1, const PxTransform& frame0, const PxTransform& frame1, const AnvilContactSettings& settings)
+{
+	if(gap <= ANVIL_SPECULATIVE_KEEP_GAP)
+	{
+		return true;
+	}
+	const PxVec3 initialVelocity = initialPointVelocity(body0, body1, bodyIndex0, bodyIndex1, contact.point - frame0.p, contact.point - frame1.p, settings);
+	return gap <= ANVIL_SPECULATIVE_APPROACH_MARGIN * PxMax(0.0f, contact.normal.dot(contact.targetVel - initialVelocity)) * settings.timestep;
+}
+
 static void extractAnvilContacts(PxsContactManagerOutput& contactOutput, PxContactBuffer& buffer, PxU16* originalIndices, PxReal defaultMaxImpulse)
 {
 	buffer.count = 0;
@@ -547,8 +563,6 @@ void prepareAnvilContacts(PxsContactManager& manager, PxsContactManagerOutput& c
 			centre += buffer.contacts[i].point;
 		}
 		centre *= 1.0f / PxReal(contactCount);
-		pair.body[0] = bodyIndex0;
-		pair.body[1] = bodyIndex1;
 		pair.arm[0] = centre - frame0.p;
 		pair.arm[1] = centre - frame1.p;
 		pair.normal = normal;
@@ -588,23 +602,43 @@ void prepareAnvilContacts(PxsContactManager& manager, PxsContactManagerOutput& c
 		frictionState->twist = twist;
 		frictionState->normalImpulse = 0.0f;
 	}
-	// Points whose gap cannot close in this step are left out. The approach already includes
-	// this step's gravity; the margin allows for pushes from other contacts.
+	// Points whose gap is unlikely to close in this step are deferred: the solve decides.
 	bool keep[PxContactBuffer::MAX_CONTACTS];
 	PxU32 keptCount = 0;
+	pair.deferredLimit = -PX_MAX_F32;
+	pair.deferredReach[0] = pair.deferredReach[1] = 0.0f;
+	pair.deferredNormal = PxVec3(0.0f);
+	bool deferredNormalsAgree = true;
 	for(PxU32 i = 0; i < contactCount; ++i)
 	{
 		const PxContactPoint& contact = buffer.contacts[i];
 		const PxReal gap = contact.separation - unit.mRestDistance;
-		bool kept = gap <= ANVIL_SPECULATIVE_KEEP_GAP;
-		if(!kept)
-		{
-			const PxVec3 initialVelocity = initialPointVelocity(body0, body1, bodyIndex0, bodyIndex1, contact.point - frame0.p, contact.point - frame1.p, settings);
-			kept = gap <= ANVIL_SPECULATIVE_APPROACH_MARGIN * PxMax(0.0f, -contact.normal.dot(initialVelocity)) * settings.timestep;
-		}
+		const bool kept = speculativePointKept(contact, gap, body0, body1, bodyIndex0, bodyIndex1, frame0, frame1, settings);
 		keep[i] = kept;
 		keptCount += kept;
+		if(!kept)
+		{
+			if(pair.deferredLimit == -PX_MAX_F32)
+			{
+				pair.deferredNormal = contact.normal;
+			}
+			deferredNormalsAgree = deferredNormalsAgree && contact.normal == pair.deferredNormal;
+			pair.deferredLimit = PxMax(pair.deferredLimit, contact.normal.dot(contact.targetVel) - gap / settings.timestep);
+			pair.deferredReach[0] = PxMax(pair.deferredReach[0], (contact.point - frame0.p).magnitudeSquared());
+			pair.deferredReach[1] = PxMax(pair.deferredReach[1], (contact.point - frame1.p).magnitudeSquared());
+		}
 	}
+	if(!deferredNormalsAgree)
+	{
+		pair.deferredNormal = PxVec3(0.0f);
+	}
+	pair.deferredReach[0] = PxSqrt(pair.deferredReach[0]);
+	pair.deferredReach[1] = PxSqrt(pair.deferredReach[1]);
+	pair.manager = &manager;
+	pair.bodyData[0] = &body0;
+	pair.bodyData[1] = &body1;
+	pair.body[0] = bodyIndex0;
+	pair.body[1] = bodyIndex1;
 	// Friction takes the previous normal impulse, shared equally by the pair's kept points.
 	const PxReal normalShare = previous && frictionState && keptCount ? previous->normalImpulse / PxReal(keptCount) : 0.0f;
 	pair.firstPoint = output.points.size();
@@ -636,6 +670,132 @@ void prepareAnvilContacts(PxsContactManager& manager, PxsContactManagerOutput& c
 	}
 	pair.pointCount = output.points.size() - pair.firstPoint;
 	output.pairs.pushBack(pair);
+}
+
+// A body's velocity after the solve: its free velocity plus the solve's correction, as
+// integration applies them.
+static AnvilBodyVelocity solvedBodyVelocity(const PxSolverBodyData& body, PxU32 bodyIndex, const anvil::Result& result)
+{
+	const PxU32 offset = 6 * bodyIndex;
+	const PxReal rootInverseMass = PxSqrt(body.invMass);
+	const PxVec3 linearCorrection(PxReal(result.primal[offset]), PxReal(result.primal[offset + 1]), PxReal(result.primal[offset + 2]));
+	const PxVec3 angularState(PxReal(result.primal[offset + 3]), PxReal(result.primal[offset + 4]), PxReal(result.primal[offset + 5]));
+	const AnvilBodyVelocity velocity = { body.linearVelocity + linearCorrection * rootInverseMass, body.angularVelocity + body.sqrtInvInertia * angularState };
+	return velocity;
+}
+
+// Whether contact of pair joined the problem after an earlier solve.
+static bool isLateContact(const AnvilContactRows& rows, PxU32 pair, PxU32 contact)
+{
+	const PxU32 lateCount = rows.latePairs.size();
+	for(PxU32 i = 0; i < lateCount; ++i)
+	{
+		if(rows.latePairs[i] == pair && rows.lateContacts[i] == contact)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+bool addClosedAnvilContacts(AnvilContactRows& rows, anvil::Problem& problem, const anvil::Result& result, const AnvilContactSettings& settings, const PxSolverBodyData* bodyData, PxU32 bodyCount, PxContactBuffer& buffer, DynamicsContext& context)
+{
+	const PxReal timestep = settings.timestep;
+	rows.solvedVelocities.resize(bodyCount);
+	for(PxU32 i = 0; i < bodyCount; ++i)
+	{
+		rows.solvedVelocities[i] = solvedBodyVelocity(bodyData[i], i, result);
+	}
+	PxU16 originalIndices[PxContactBuffer::MAX_CONTACTS];
+	bool added = false;
+	const PxU32 pairCount = rows.pairs.size();
+	for(PxU32 pairIndex = 0; pairIndex < pairCount; ++pairIndex)
+	{
+		const AnvilContactPair& pair = rows.pairs[pairIndex];
+		if(pair.deferredLimit == -PX_MAX_F32)
+		{
+			continue;
+		}
+		// Bodies outside the island keep their velocity.
+		AnvilBodyVelocity velocity[2];
+		for(PxU32 end = 0; end < 2; ++end)
+		{
+			if(pair.body[end] >= 0)
+			{
+				velocity[end] = rows.solvedVelocities[PxU32(pair.body[end])];
+			}
+			else
+			{
+				velocity[end].linear = pair.bodyData[end]->linearVelocity;
+				velocity[end].angular = pair.bodyData[end]->angularVelocity;
+			}
+		}
+		const PxVec3 relative = velocity[0].linear - velocity[1].linear;
+		const PxReal least = (pair.deferredNormal.isZero() ? -relative.magnitude() : pair.deferredNormal.dot(relative)) -
+			velocity[0].angular.magnitude() * pair.deferredReach[0] - velocity[1].angular.magnitude() * pair.deferredReach[1];
+		if(least >= pair.deferredLimit)
+		{
+			continue;
+		}
+		// The bodies move fast enough to close a deferred point: test each exactly.
+		PxcNpWorkUnit& unit = pair.manager->getWorkUnit();
+		const PxSolverBodyData& body0 = *pair.bodyData[0];
+		const PxSolverBodyData& body1 = *pair.bodyData[1];
+		PxsContactManagerOutput& contactOutput = context.mOutputIterator.getContactManagerOutput(unit.mNpIndex);
+		extractAnvilContacts(contactOutput, buffer, originalIndices, PxMin(body0.maxContactImpulse, body1.maxContactImpulse));
+		const PxTransform& frame0 = unit.mRigidCore0->body2World;
+		const PxTransform identity(PxIdentity);
+		const PxTransform& frame1 = unit.mRigidCore1 ? unit.mRigidCore1->body2World : identity;
+		const PxU32 bodyFlags = PxU32(unit.mRigidCore0->mFlags) | (unit.mRigidCore1 ? PxU32(unit.mRigidCore1->mFlags) : 0);
+		const PxReal ccdMaxSeparation = bodyFlags & PxRigidBodyFlag::eENABLE_SPECULATIVE_CCD ? settings.ccdMaxSeparation : PX_MAX_F32;
+		const double rootInverseMass0 = pair.body[0] >= 0 ? std::sqrt(double(body0.invMass)) : 0.0;
+		const double rootInverseMass1 = pair.body[1] >= 0 ? std::sqrt(double(body1.invMass)) : 0.0;
+		const double translationResponse = rootInverseMass0 * rootInverseMass0 + rootInverseMass1 * rootInverseMass1;
+		AnvilJacobianBody jacobianBodies[2];
+		bool prepared = false;
+		const PxU32 contactCount = buffer.count;
+		for(PxU32 i = 0; i < contactCount; ++i)
+		{
+			PxContactPoint& contact = buffer.contacts[i];
+			const PxReal gap = contact.separation - unit.mRestDistance;
+			if(speculativePointKept(contact, gap, body0, body1, pair.body[0], pair.body[1], frame0, frame1, settings) || isLateContact(rows, pairIndex, i))
+			{
+				continue;
+			}
+			// The step closes the gap when the solved velocity leaves the surface's target by more
+			// than the gap per step: the bound a separated point's row enforces once it is added.
+			const PxVec3 pointVelocity = velocity[0].linear + velocity[0].angular.cross(contact.point - frame0.p) - velocity[1].linear - velocity[1].angular.cross(contact.point - frame1.p);
+			if(contact.normal.dot(pointVelocity) >= contact.normal.dot(contact.targetVel) - gap / timestep)
+			{
+				continue;
+			}
+			// The point joins without friction: lagged friction bounds a point by its share of the
+			// pair's normal impulse in the last step, and this point had none. Its normal impulse
+			// joins the pair's, which bounds the pair's friction from the next step. (Estimating the
+			// impulse that would stop it from the translational response alone overstates it many
+			// times for a turning body, and lets friction act at a point that carries almost no load.)
+			if(!prepared)
+			{
+				prepareJacobianBody(jacobianBodies[0], body0, pair.body[0], rootInverseMass0, 1.0, settings.bodyLockFlags);
+				prepareJacobianBody(jacobianBodies[1], body1, pair.body[1], rootInverseMass1, -1.0, settings.bodyLockFlags);
+				prepared = true;
+			}
+			if(rows.latePairs.empty())
+			{
+				rows.lateBegin = rows.points.size();
+			}
+			contact.materialFlags |= PxMaterialFlag::eDISABLE_FRICTION;
+			appendAnvilContact(contact, unit.mRestDistance, ccdMaxSeparation, body0, body1, pair.body[0], pair.body[1], frame0, frame1, jacobianBodies, translationResponse, settings,
+				false, PxVec3(0.0f), 0.0f, 1.0f, contactOutput.contactForces ? contactOutput.contactForces + originalIndices[i] : NULL, problem, rows);
+			while(rows.latePairs.size() < rows.points.size() - rows.lateBegin)
+			{
+				rows.latePairs.pushBack(pairIndex);
+				rows.lateContacts.pushBack(PxU16(i));
+			}
+			added = true;
+		}
+	}
+	return added;
 }
 
 static double normalImpulse(const AnvilContactPoint& point, const anvil::Problem& problem, const anvil::Result& result)
@@ -760,6 +920,16 @@ void writebackAnvilContacts(const AnvilContactRows& rows, const anvil::Problem& 
 		state->slip[2] += velocity.z * timestep;
 		state->twist += twistVelocity * timestep;
 	}
+	// Points that joined after a solve add their normal impulse to their pair's.
+	const PxU32 lateCount = rows.latePairs.size();
+	for(PxU32 i = 0; i < lateCount; ++i)
+	{
+		AnvilFrictionState* state = rows.pairs[rows.latePairs[i]].state;
+		if(state)
+		{
+			state->normalImpulse += PxReal(normalImpulse(rows.points[rows.lateBegin + i], problem, result));
+		}
+	}
 	const PxU32 pointCount = rows.points.size();
 	for(PxU32 i = 0; i < pointCount; ++i)
 	{
@@ -781,6 +951,13 @@ void writebackAnvilContacts(const AnvilContactRows& rows, const anvil::Problem& 
 		for(PxU32 j = pair.firstPoint; j < lastPoint; ++j)
 		{
 			element.normalForce += PxReal(normalImpulse(rows.points[j], problem, result));
+		}
+		for(PxU32 j = 0; j < lateCount; ++j)
+		{
+			if(rows.latePairs[j] == i)
+			{
+				element.normalForce += PxReal(normalImpulse(rows.points[rows.lateBegin + j], problem, result));
+			}
 		}
 		if(element.normalForce != 0.0f)
 		{

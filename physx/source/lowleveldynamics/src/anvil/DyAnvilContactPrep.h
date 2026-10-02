@@ -123,9 +123,15 @@ static const double ANVIL_SLIP_STIFFNESS = 2.0;
 // change between sticking and sliding, and penetrate further (pallet slipsheets 9.3 um at 1/8,
 // 10.6 um at 1/4, 13.8 um at 1); stiffer ones take more on resting stacks.
 static const double ANVIL_FRICTION_NORMAL_REGULARIZATION = 0.125;
-// A speculative contact point (offsets inflated by a body's motion) is kept within this gap, or
-// when its approach over the step, scaled by this margin, covers the gap; otherwise its rows
-// could never become active and would only cost preparation and factorization.
+// A speculative contact point (offsets inflated by a body's motion) enters the first solve within
+// this gap, or when its approach over the step, scaled by this margin, covers the gap. Others are
+// deferred: rows that stay inactive would only cost preparation and factorization. The solve
+// itself decides whether a deferred point's gap closes (an impact can turn a body into one), and
+// then the point joins the problem; these only choose the first solve's points. The approach is
+// toward the surface's target velocity: a pallet pivoting off a belt's end closes on the edge by
+// the belt speed's component along the slanted edge normal, and ignoring it re-solved every
+// fall-off step. It is taken before this step's gravity: with it, every hull of a resting pile
+// approached the points below it by the fall of one step, and their rows cost 16% of the step.
 static const PxReal ANVIL_SPECULATIVE_KEEP_GAP = 1.0e-3f;
 static const PxReal ANVIL_SPECULATIVE_APPROACH_MARGIN = 1.5f;
 
@@ -144,23 +150,60 @@ struct AnvilContactPair
 	// Relative velocity at the contact centre and about the normal before the solve.
 	PxVec3 freeSlipVelocity;
 	PxReal freeTwistVelocity;
+	// The pair's deferred points (speculative points left out of the first solve), summarized
+	// so the solved velocities can rule out closing any of them without reading the contacts
+	// again: a point closes when its relative normal velocity falls below the surface's target
+	// speed less its gap per step, and deferredLimit is the largest of those over the points
+	// (-PX_MAX_F32 without any). The relative velocity at a point is at least the bodies'
+	// relative velocity along deferredNormal, their common normal (zero when they differ, which
+	// bounds by the speed instead), less each body's angular speed times its reach, the longest
+	// arm from the body to one of the points.
+	PxReal deferredLimit;
+	PxReal deferredReach[2];
+	PxVec3 deferredNormal;
+	PxsContactManager* manager;
+	const PxSolverBodyData* bodyData[2];
+};
+
+struct AnvilBodyVelocity
+{
+	PxVec3 linear;
+	PxVec3 angular;
 };
 
 struct AnvilContactRows
 {
 	PxArray<AnvilContactPoint> points;
 	PxArray<AnvilContactPair> pairs;
+	// Points from lateBegin on joined after a solve closed their gaps; latePairs and
+	// lateContacts hold each one's pair and its index among the pair's contacts.
+	PxU32 lateBegin;
+	PxArray<PxU32> latePairs;
+	PxArray<PxU16> lateContacts;
+	// Scratch: the island's body velocities after a solve.
+	PxArray<AnvilBodyVelocity> solvedVelocities;
+
+	AnvilContactRows() : lateBegin(0) {}
 
 	void clear()
 	{
 		points.clear();
 		pairs.clear();
+		latePairs.clear();
+		lateContacts.clear();
+		lateBegin = 0;
 	}
 };
 
 // The pair's friction state comes from frictionStream when given, otherwise it is reservedState,
 // which may be NULL. buffer is scratch storage for the pair's contacts.
 void prepareAnvilContacts(PxsContactManager& manager, PxsContactManagerOutput& contactOutput, const PxSolverBodyData& body0, const PxSolverBodyData& body1, PxI32 bodyIndex0, PxI32 bodyIndex1, const AnvilContactSettings& settings, PxContactBuffer& buffer, FrictionPatchStreamPair* frictionStream, AnvilFrictionState* reservedState, anvil::Problem& problem, AnvilContactRows& output);
+
+// Adds the rows of deferred points whose gaps the solved velocities close within the step, and
+// returns whether it added any, so the problem must be prepared and solved again. settings must
+// be the ones the rows were prepared with; bodyData holds the island's bodyCount bodies; buffer
+// is scratch storage.
+bool addClosedAnvilContacts(AnvilContactRows& rows, anvil::Problem& problem, const anvil::Result& result, const AnvilContactSettings& settings, const PxSolverBodyData* bodyData, PxU32 bodyCount, PxContactBuffer& buffer, DynamicsContext& context);
 
 void writebackAnvilContacts(const AnvilContactRows& rows, const anvil::Problem& problem, const anvil::Result& result, const PxSolverBody* bodies, const PxSolverBodyData* bodyData, DynamicsContext& context);
 

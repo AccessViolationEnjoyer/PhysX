@@ -30,7 +30,9 @@ public:
 	IncrementalCholesky() : m_size(0), m_profile(false), m_updateInverseCurrent(false), m_dense(false) {}
 	const Curvature& currentWeights() const { return m_weights; }
 
-	void beginSolve(bool profile, bool continuation, ParallelExecutor* parallelExecutor)
+	// keepOrdering: the problem has the bodies of this workspace's last solve, so a changed sparse
+	// pattern keeps their ordering and only the pattern is analyzed (see Settings::keepOrdering).
+	void beginSolve(bool profile, bool continuation, bool keepOrdering, ParallelExecutor* parallelExecutor)
 	{
 		// Ordinary solves rebuild numerics. Explicit same-prepared-problem
 		// continuation compares fresh curvature against this factor's m_weights.
@@ -40,6 +42,7 @@ public:
 			m_updateInverseCurrent = false;
 		}
 		m_profile = profile;
+		m_keepOrdering = keepOrdering;
 		m_parallelExecutor = parallelExecutor;
 		m_factor.setParallelExecutor(parallelExecutor);
 	}
@@ -549,7 +552,12 @@ private:
 			{
 				changedPattern = true;
 				const Sparse& pattern = exportedHessian(problem, matrix);
-				orderBodies(pattern);
+				// An ordering found for the same bodies with fewer pairs is kept: a few added pairs
+				// change its fill little, and the ordering costs most of the analysis.
+				if(!m_keepOrdering || int(m_permutation.size()) != int(pattern.cols()))
+				{
+					orderBodies(pattern);
+				}
 				m_pairs = problem.hessianPairs;
 				preparePermutation(pattern);
 				m_factor.analyzePattern(m_permuted);
@@ -932,6 +940,7 @@ private:
 
 	int m_size;
 	bool m_profile;
+	bool m_keepOrdering = false;
 	BlockCholesky m_factor;
 	ParallelExecutor* m_parallelExecutor = NULL;
 	std::vector<BodyPair> m_bodyEdges;

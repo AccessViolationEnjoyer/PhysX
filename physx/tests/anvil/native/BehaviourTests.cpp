@@ -1,4 +1,5 @@
 #include "PxPhysicsAPI.h"
+#include "CardHouseScene.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -14,7 +15,8 @@ using namespace physx;
 // - split_conveyors: a case straddling two belts at different speeds turns at the rate Coulomb
 //   friction predicts for its contact points and does not drift sideways.
 // - sheet_stack: 100 sheets of 1 mm and 1 g stay stacked without penetration or drift.
-// - card_house: PEEL's house of 40 thin, light cards stands still once it has settled.
+// - card_house: the FBF paper's house of 40 cards, at its scale and with real playing cards,
+//   stands still once it has settled.
 // - rolling: a sphere and a cylinder roll down a ramp at the rolling acceleration, without slip.
 // usage: BehaviourTests [all|bouncing_balls|split_conveyors|sheet_stack|card_house|rolling] [anvil|pgs] [threads=1]
 namespace
@@ -494,51 +496,36 @@ void sheetStack(Context& context)
 	material->release();
 }
 
-// PEEL's CardHouse (Pierre Terdiman's PEEL, TestScenes_Behavior.cpp): five levels of 10 g cards,
-// 0.2 x 0.4 m and 2 mm thick, in pairs leaning 25 degrees against each other, with flat cards
-// across the tops of neighbouring pairs carrying the next level, 40 cards in all. The cards start
-// a few millimetres apart, so the house settles for a second; then it should stand still.
-// Friction is 0.8 rather than PEEL's 0.5: a pair is held at the top by one card's corner on the
-// other's face, whose normal is 25 degrees from horizontal, so it needs tan 25 = 0.47 to stand at
-// all, and at 0.5 the top pair folds after its 3 mm landing.
-void cardHouse(Context& context)
+// The FBF paper's card house (CardHouseScene.h): five levels of tents of two cards leaning together
+// at 65 degrees, with bridge cards across neighbouring tents, 40 cards, friction 0.8. At the paper's
+// scale (2.5 m cards, 40 mm thick, 25 kg) and with real playing cards (88 x 63 x 0.3 mm, 1.8 g). The
+// cards start slightly apart and fall into place over the first two seconds; then the house should
+// stand still. The limits on movement are 0.25% of the card's length. A house that collapsed while
+// settling would lie still too, so settling is checked separately.
+void standingCardHouse(Context& context, const cardHouse::Scale& scale)
 {
 	PxScene* scene = context.createScene();
-	PxMaterial* material = context.physics->createMaterial(0.8f, 0.8f, 0.0f);
-	context.staticBox(*scene, *material, PxVec3(0.0f, -0.5f, 0.0f), PxVec3(2.0f, 0.5f, 2.0f));
-	const PxReal cardWidth = 0.1f, cardHeight = 0.2f, cardThickness = 0.001f;
-	const PxVec3 half(cardWidth, cardHeight, cardThickness);
-	const PxQuat leanForward(25.0f * PxPi / 180.0f, PxVec3(1.0f, 0.0f, 0.0f));
-	const PxQuat leanBack(-25.0f * PxPi / 180.0f, PxVec3(1.0f, 0.0f, 0.0f));
-	const PxQuat flat(0.5f * PxPi, PxVec3(1.0f, 0.0f, 0.0f));
+	PxMaterial* material = context.physics->createMaterial(PxReal(cardHouse::friction), PxReal(cardHouse::friction), 0.0f);
+	const PxReal floorHalf = PxReal(10.0 * scale.layout);
+	context.staticBox(*scene, *material, PxVec3(0.0f, -0.5f, 0.0f), PxVec3(floorHalf, 0.5f, floorHalf));
+	const std::vector<cardHouse::Card> layout = cardHouse::build(scale);
 	std::vector<PxRigidDynamic*> cards;
-	// PEEL's construction, level by level: each pair leans together, and a flat card bridges it
-	// to the next pair.
-	PxU32 pairs = 5;
-	PxReal z0 = 0.0f, y = cardHeight - 0.02f;
-	while(pairs)
+	std::vector<PxVec3> halves;
+	for(size_t i = 0; i < layout.size(); ++i)
 	{
-		PxReal z = z0;
-		for(PxU32 i = 0; i < pairs; ++i)
-		{
-			const PxVec3 positions[3] = { PxVec3(0.0f, y + cardHeight - 0.015f, z + 0.25f), PxVec3(0.0f, y, z), PxVec3(0.0f, y, z + 0.175f) };
-			const PxQuat rotations[3] = { flat, leanForward, leanBack };
-			for(int card = i + 1 == pairs ? 1 : 0; card < 3; ++card)
-			{
-				PxRigidDynamic* body = context.dynamicBody(*scene, PxTransform(positions[card], rotations[card]));
-				PxShape* shape = context.shape(PxBoxGeometry(half), *material);
-				body->attachShape(*shape);
-				shape->release();
-				PxRigidBodyExt::setMassAndUpdateInertia(*body, 0.01f);
-				cards.push_back(body);
-			}
-			z += 0.35f;
-		}
-		y += 2.0f * cardHeight - 0.03f;
-		z0 += 0.175f;
-		--pairs;
+		const cardHouse::Card& card = layout[i];
+		const PxVec3 half(PxReal(card.halfExtents[0]), PxReal(card.halfExtents[1]), PxReal(card.halfExtents[2]));
+		const PxTransform pose(PxVec3(PxReal(card.position[0]), PxReal(card.position[1]), PxReal(card.position[2])), PxQuat(PxReal(card.angle), PxVec3(0.0f, 0.0f, 1.0f)));
+		PxRigidDynamic* body = context.dynamicBody(*scene, pose);
+		PxShape* shape = context.shape(PxBoxGeometry(half), *material);
+		body->attachShape(*shape);
+		shape->release();
+		PxRigidBodyExt::setMassAndUpdateInertia(*body, PxReal(scale.mass));
+		cards.push_back(body);
+		halves.push_back(half);
 	}
-	const int frames = 1000, settleFrames = 100;
+	const int frames = 1000, settleFrames = 200;
+	const double length = 2.0 * scale.halfLength;
 	std::vector<PxTransform> settled(cards.size());
 	double maximumDisplacement = 0.0, maximumRotation = 0.0, maximumFloorPenetration = 0.0, lowestTop = PX_MAX_F64;
 	double totalMs = 0.0;
@@ -564,6 +551,7 @@ void cardHouse(Context& context)
 			double bottom = PX_MAX_F64;
 			for(int corner = 0; corner < 8; ++corner)
 			{
+				const PxVec3& half = halves[i];
 				const PxVec3 local((corner & 1 ? 1.0f : -1.0f) * half.x, (corner & 2 ? 1.0f : -1.0f) * half.y, (corner & 4 ? 1.0f : -1.0f) * half.z);
 				bottom = std::min(bottom, double(pose.transform(local).y));
 			}
@@ -580,12 +568,23 @@ void cardHouse(Context& context)
 		maximumSpeed = std::max(maximumSpeed, double(cards[i]->getLinearVelocity().magnitude()));
 	}
 	const double topDrop = double(settled.back().p.y) - lowestTop;
-	std::printf("card_house cards=%zu max_displacement_mm=%.4f max_rotation_deg=%.4f top_drop_mm=%.4f floor_penetration_um=%.3f final_max_speed_mm_s=%.4f"
-		" mean_step_ms=%.4f total_s=%.3f\n", cards.size(), maximumDisplacement * 1e3, maximumRotation * 180.0 / PxPi, topDrop * 1e3, maximumFloorPenetration * 1e6,
+	// Settling, from the starting layout: how far each card turned and how far the top card fell.
+	double maximumSettleTurn = 0.0;
+	for(size_t i = 0; i < cards.size(); ++i)
+	{
+		const PxQuat start(PxReal(layout[i].angle), PxVec3(0.0f, 0.0f, 1.0f));
+		const PxQuat change = settled[i].q * start.getConjugate();
+		maximumSettleTurn = std::max(maximumSettleTurn, 2.0 * double(PxAcos(PxMin(1.0f, PxAbs(change.w)))));
+	}
+	const double settleFall = layout.back().position[1] - double(settled.back().p.y);
+	std::printf("card_house %s settle_turn_deg=%.3f top_settle_fall_mm=%.3f top_start_height_mm=%.3f\n", scale.name, maximumSettleTurn * 180.0 / PxPi, settleFall * 1e3, layout.back().position[1] * 1e3);
+	check(double(settled.back().p.y) > cardHouse::topLevelBase(scale), "card_house: the house stands (the top card stays on the top level while settling)");
+	std::printf("card_house %s cards=%zu max_displacement_mm=%.4f max_rotation_deg=%.4f top_drop_mm=%.4f floor_penetration_um=%.3f final_max_speed_mm_s=%.4f"
+		" mean_step_ms=%.4f total_s=%.3f\n", scale.name, cards.size(), maximumDisplacement * 1e3, maximumRotation * 180.0 / PxPi, topDrop * 1e3, maximumFloorPenetration * 1e6,
 		maximumSpeed * 1e3, totalMs / frames, totalMs * 1e-3);
-	check(maximumDisplacement < 1.0e-3, "card_house: no card moves more than 1 mm once the house has settled");
+	check(maximumDisplacement < 0.0025 * length, "card_house: no card moves more than 0.25% of its length once the house has settled");
 	check(maximumRotation < 0.1 * PxPi / 180.0, "card_house: no card turns more than 0.1 degree once the house has settled");
-	check(maximumSpeed < 1.0e-3, "card_house: house is at rest (below 1 mm/s)");
+	check(maximumSpeed < 0.0025 * length, "card_house: house is at rest (below 0.25% of a card length per second)");
 	check(maximumFloorPenetration < 20.0e-6, "card_house: cards sink less than 20 um into the floor");
 	scene->release();
 	material->release();
@@ -708,7 +707,8 @@ int main(int argc, char** argv)
 	}
 	if(all || std::strcmp(selection, "card_house") == 0)
 	{
-		cardHouse(context);
+		standingCardHouse(context, cardHouse::paper);
+		standingCardHouse(context, cardHouse::playingCards);
 	}
 	if(all || std::strcmp(selection, "rolling") == 0)
 	{

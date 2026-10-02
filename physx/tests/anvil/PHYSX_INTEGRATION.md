@@ -143,19 +143,59 @@ is 2-4% slower, p95 4% and the worst step 13% faster, p99 22% slower (landings n
 step at full speed; an earlier solver measured +73% on p99). The pallet fall-off is faster (native
 p95 2.5 -> 1.6 ms). A ball landing with speculative CCD penetrates 15-20 um instead of 4 um.
 
-Contact points whose gap cannot close within the step are left out of the problem: a point is
-kept within 1 mm of its rest distance, or when its approach over the step (which already holds
-this step's gravity), with a margin of one half for pushes from other contacts, covers the gap
-(`ANVIL_SPECULATIVE_KEEP_GAP`, `ANVIL_SPECULATIVE_APPROACH_MARGIN`). This matters with
-`PxRigidBodyFlag::eENABLE_SPECULATIVE_CCD`, which inflates a body's contact reach by its motion
-per step: contacts then exist a step before surfaces meet, and a body arriving at 1 m/s is
-stopped at the surface instead of embedding a centimetre and bouncing. On a 125-box pile with a
-layer dropped from 5 cm every 0.2 s, the flag takes the landing step from 8-20 ms to 3-7 ms and
-the twenty steps of re-settling after it from 3-7 ms to about 2 ms, against 1.3 ms at rest;
-the same holds at 1,000 boxes. The price is PhysX's: every moving body's pairs within its
-inflation are generated each step, and a scene of 2,000 totes riding a belt at 0.5 m/s, each
-box 8 mm from its wall, spends 55% more per step (PGS pays the same), most of it in the narrow
-phase before the filter discards the points. The test scenes set the flag on every body.
+Contact points whose gap is unlikely to close within the step are deferred, left out of the
+first solve: a point enters it within 1 mm of its rest distance, or when the approach over the
+step of the motion at the step's start (last step's solution) toward the surface's target
+velocity, with a margin of one half for pushes from other contacts, covers the gap
+(`ANVIL_SPECULATIVE_KEEP_GAP`, `ANVIL_SPECULATIVE_APPROACH_MARGIN`). The solve then decides
+the rest: after it, `addClosedAnvilContacts` tests the deferred points against the solved
+velocities, and a point the step would carry through its surface (relative normal velocity below
+the target speed less the gap per step, the bound its row enforces) joins the problem, which is
+prepared again and solved from the solution so far. Passes repeat until no point closes. A late
+point joins without friction rows: lagged friction bounds a point by its share of the pair's
+normal impulse in the last step, and it had none; its normal impulse joins the pair's total,
+which bounds the pair's friction from the next step. Without this, the FBF card house of real
+playing cards (88 x 63 x 0.3 mm, `BehaviourTests card_house`) collapsed: its third-level tent
+fell 14 mm with the stack onto a bridge, the landing spun both cards inward and their tops
+closed 4.6 mm within the step through a 1.2 mm gap that had been dropped because the cards were
+not approaching each other beforehand. Dropped points also let tumbling bodies sink 0.1-3 mm in
+impacts (the convex pile 7,600 times in 800 steps). The deferral is summarized per pair
+(`AnvilContactPair::deferredLimit`, the common normal and each body's reach to the farthest
+deferred point), so the check reads a pair's contacts again only when its bodies' solved
+velocities could close one; resting and sliding pairs pass in a few operations. The approach
+test must be taken toward the target velocity: an earlier form ignored it, so a pallet
+pivoting off a belt's end lost the edge contact, which closes by the belt speed's component
+along the slanted edge normal (1 mm per step) and carries 14 times the island's next largest
+impulse, and with the deferral in place every fall-off step re-solved. Taking the approach
+after this step's gravity instead (the free velocity the row would hold back) made every hull
+of a resting pile approach the points below it by one step's fall, and those inactive rows
+cost the convex pile 16% without saving a re-solve; the start-of-step velocity is the natural
+predictor of the solution for a body the contacts hold. Re-solves remain where impacts turn
+bodies: the convex pile re-solves about 500 islands in 800 steps, 13 rows and 4 iterations
+each against 113 for the first solve; the pallet and tote scenes none. A re-solve keeps the
+bodies' ordering (`Settings::keepOrdering`): a late point usually adds a body pair with no kept
+points, which changes the Hessian pattern, and finding a new ordering for 500 bodies cost 0.4 ms
+of a 1.34 ms re-solve; the pattern is still analyzed (0.55 ms) and the factor rebuilt. The
+re-solves took 12% of the pile's run before that and 9% after. The pile's collapse is chaotic
+(rounding changes alone move its final speed between 50 and 140 mm/s), so single trajectories do
+not compare its step totals; the per-island timing above and totals over ten pile sizes do.
+Against the filter that dropped the points (native, interleaved): pallet fall-off mean 0.75 ->
+0.66 ms, p95 1.59 -> 1.23, peak 2.36 -> 1.70 (the belt-edge contact now in the first solve);
+totes 3.79 -> 3.75; the 5x5x20 convex pile 7.50 -> 7.42 mean, settled 2.21 -> 1.84, final speed
+222 -> 53 mm/s. Ten convex pile sizes (3x3x20 to 6x6x20, 800 steps each) total 52.3 s dropping
+the points, 57.0 s re-solving, 55.4 s re-solving with the ordering kept: the re-solves of real
+impacts cost collapsing hull piles about 6%. Wasm: pallet fall p95 1.89 -> 1.41 ms, pile 1000
+12.8 -> 12.6, the 125-box pile drop 2.49 -> 2.55, totes 3.99 ms (the per-point check was 4.24).
+
+This matters with `PxRigidBodyFlag::eENABLE_SPECULATIVE_CCD`, which inflates a body's contact
+reach by its motion per step: contacts then exist a step before surfaces meet, and a body
+arriving at 1 m/s is stopped at the surface instead of embedding a centimetre and bouncing. On a
+125-box pile with a layer dropped from 5 cm every 0.2 s, the flag takes the landing step from
+8-20 ms to 3-7 ms and the twenty steps of re-settling after it from 3-7 ms to about 2 ms,
+against 1.3 ms at rest; the same holds at 1,000 boxes. The price is PhysX's: every moving body's
+pairs within its inflation are generated each step, and a scene of 2,000 totes riding a belt at
+0.5 m/s, each box 8 mm from its wall, spends 55% more per step (PGS pays the same), most of it in
+the narrow phase before the filter discards the points. The test scenes set the flag on every body.
 
 Hard joint rows use the same reference policy. Native spring rows retain their exact implicit
 stiffness and damping law. Positive restitution, compliant contacts, contact modification,

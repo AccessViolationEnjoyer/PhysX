@@ -380,6 +380,11 @@ struct Settings
 	// After its first step, a solve with a large factor takes its directions from conjugate
 	// gradients preconditioned by the factor it has, and refactors only when they converge slowly.
 	bool retainedSteps = true;
+	// The problem has the bodies of the workspace's last solve, with rows added to it (so its
+	// Hessian pairs include the last solve's): a changed sparse pattern keeps the bodies' ordering
+	// and only the pattern is analyzed. A deferred contact that joins an island after its solve
+	// usually adds a pair, and the ordering cost most of the re-solve.
+	bool keepOrdering = false;
 	bool checkFactor = false;
 	bool profile = false; // Detailed phase timers.
 	// Measures Result::elapsedMs. Clock reads leave WebAssembly, so callers that do not
