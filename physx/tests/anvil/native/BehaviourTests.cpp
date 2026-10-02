@@ -9,6 +9,7 @@
 #include <vector>
 
 using namespace physx;
+namespace physx { namespace Dy { extern int gAnvilDebugStep, gAnvilDebugFrom, gAnvilDebugTo; } } // EXPERIMENT (temporary)
 
 // Physical behaviour checks against analytic expectations:
 // - bouncing_balls: restitution sets the rebound speed and height.
@@ -58,6 +59,40 @@ public:
 	}
 };
 
+// EXPERIMENT (temporary): contact reports of one actor's pairs over a step range.
+static bool gReportContacts = false;
+static int gReportStep = 0, gReportFrom = -1, gReportTo = -2;
+static PxRigidActor* gReportActor = NULL;
+class ContactReport : public PxSimulationEventCallback
+{
+public:
+	virtual void onContact(const PxContactPairHeader& header, const PxContactPair* pairs, PxU32 count) PX_OVERRIDE
+	{
+		if(gReportStep < gReportFrom || gReportStep > gReportTo || (header.actors[0] != gReportActor && header.actors[1] != gReportActor))
+			return;
+		const PxActor* other = header.actors[0] == gReportActor ? header.actors[1] : header.actors[0];
+		const PxTransform frame = gReportActor->getGlobalPose();
+		for(PxU32 i = 0; i < count; ++i)
+		{
+			PxContactPairPoint points[64];
+			const PxU32 n = pairs[i].extractContacts(points, 64);
+			std::printf("    step %d bridge/card %zu: %u points\n", gReportStep, size_t(other->userData), n);
+			for(PxU32 j = 0; j < n; ++j)
+			{
+				const PxVec3 p = frame.transformInv(points[j].position);
+				std::printf("      at (%8.3f,%8.3f,%8.3f) mm sep %7.2f um impulse (%9.3f,%9.3f,%9.3f) uNs\n", p.x * 1e3f, p.y * 1e3f, p.z * 1e3f, points[j].separation * 1e6f,
+					points[j].impulse.x * 1e6f, points[j].impulse.y * 1e6f, points[j].impulse.z * 1e6f);
+			}
+		}
+	}
+	virtual void onConstraintBreak(PxConstraintInfo*, PxU32) PX_OVERRIDE {}
+	virtual void onWake(PxActor**, PxU32) PX_OVERRIDE {}
+	virtual void onSleep(PxActor**, PxU32) PX_OVERRIDE {}
+	virtual void onTrigger(PxTriggerPair*, PxU32) PX_OVERRIDE {}
+	virtual void onAdvance(const PxRigidBody* const*, const PxTransform*, const PxU32) PX_OVERRIDE {}
+};
+static ContactReport gContactReport;
+
 PxFilterFlags filterShader(PxFilterObjectAttributes, PxFilterData data0, PxFilterObjectAttributes, PxFilterData data1, PxPairFlags& flags, const void*, PxU32)
 {
 	flags = PxPairFlag::eCONTACT_DEFAULT;
@@ -65,6 +100,8 @@ PxFilterFlags filterShader(PxFilterObjectAttributes, PxFilterData data0, PxFilte
 	{
 		flags |= PxPairFlag::eMODIFY_CONTACTS;
 	}
+	if(gReportContacts) // EXPERIMENT (temporary)
+		flags |= PxPairFlag::eNOTIFY_TOUCH_PERSISTS | PxPairFlag::eNOTIFY_TOUCH_FOUND | PxPairFlag::eNOTIFY_CONTACT_POINTS;
 	return PxFilterFlag::eDEFAULT;
 }
 
@@ -82,6 +119,9 @@ struct Context
 		desc.cpuDispatcher = dispatcher;
 		desc.filterShader = filterShader;
 		desc.contactModifyCallback = &belts;
+		gReportContacts = getenv("ANVIL_EXP_REPORT") != NULL; // EXPERIMENT (temporary)
+		if(gReportContacts)
+			desc.simulationEventCallback = &gContactReport;
 		desc.gravity = PxVec3(0.0f, -GRAVITY, 0.0f);
 		desc.solverType = anvil ? PxSolverType::eANVIL : PxSolverType::ePGS;
 		desc.flags |= PxSceneFlag::eENABLE_FRICTION_EVERY_ITERATION;
@@ -521,10 +561,16 @@ void standingCardHouse(Context& context, const cardHouse::Scale& scale)
 		body->attachShape(*shape);
 		shape->release();
 		PxRigidBodyExt::setMassAndUpdateInertia(*body, PxReal(scale.mass));
+		body->userData = reinterpret_cast<void*>(i); // EXPERIMENT (temporary)
+		if(layout[i].level == cardHouse::levels - 1 && layout[i].role == 'B' && scale.halfThickness < 0.001) // EXPERIMENT (temporary)
+			gReportActor = body;
 		cards.push_back(body);
 		halves.push_back(half);
 	}
-	const int frames = 1000, settleFrames = 200;
+	if(getenv("ANVIL_EXP_STEPS")) // EXPERIMENT (temporary)
+		std::sscanf(getenv("ANVIL_EXP_STEPS"), "%d,%d", &gReportFrom, &gReportTo);
+	const int frames = getenv("ANVIL_EXP_FRAMES") ? std::atoi(getenv("ANVIL_EXP_FRAMES")) : 1000, settleFrames = 200; // EXPERIMENT (temporary)
+	const bool trace = getenv("ANVIL_EXP_TRACE") != NULL; // EXPERIMENT (temporary)
 	const double length = 2.0 * scale.halfLength;
 	std::vector<PxTransform> settled(cards.size());
 	double maximumDisplacement = 0.0, maximumRotation = 0.0, maximumFloorPenetration = 0.0, lowestTop = PX_MAX_F64;
@@ -532,6 +578,8 @@ void standingCardHouse(Context& context, const cardHouse::Scale& scale)
 	for(int frame = 0; frame < frames; ++frame)
 	{
 		const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+		gReportStep = frame + 1; // EXPERIMENT (temporary)
+		physx::Dy::gAnvilDebugStep = scale.halfThickness < 0.001 ? frame + 1 : 0; physx::Dy::gAnvilDebugFrom = gReportFrom; physx::Dy::gAnvilDebugTo = gReportTo; // EXPERIMENT (temporary)
 		step(*scene);
 		totalMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 		for(size_t i = 0; i < cards.size(); ++i)
@@ -560,6 +608,39 @@ void standingCardHouse(Context& context, const cardHouse::Scale& scale)
 		if(frame + 1 > settleFrames)
 		{
 			lowestTop = std::min(lowestTop, double(cards.back()->getGlobalPose().p.y));
+		}
+		// EXPERIMENT (temporary): per step, the top level's cards between ANVIL_EXP_STEPS "from,to".
+		static int traceFrom = -1, traceTo = -2;
+		if(traceFrom < 0 && getenv("ANVIL_EXP_STEPS"))
+			std::sscanf(getenv("ANVIL_EXP_STEPS"), "%d,%d", &traceFrom, &traceTo);
+		if(frame + 1 >= traceFrom && frame + 1 <= traceTo && scale.halfThickness < 0.001)
+		{
+			std::printf("  step %d", frame + 1);
+			for(size_t i = 0; i < cards.size(); ++i)
+			{
+				if(layout[i].level != cardHouse::levels - 1)
+					continue;
+				const PxVec3 offset = cards[i]->getGlobalPose().p - settled[i].p;
+				const PxVec3 v = cards[i]->getLinearVelocity(), w = cards[i]->getAngularVelocity();
+				std::printf(" | %c d(%6.1f,%6.1f,%6.1f) um v(%6.2f,%6.2f,%6.2f) mm/s w(%6.2f,%6.2f,%6.2f) deg/s", layout[i].role, offset.x * 1e6f, offset.y * 1e6f, offset.z * 1e6f, v.x * 1e3f, v.y * 1e3f, v.z * 1e3f,
+					w.x * 180.0f / PxPi, w.y * 180.0f / PxPi, w.z * 180.0f / PxPi);
+			}
+			std::printf("\n");
+		}
+		// EXPERIMENT (temporary): each second, the card furthest from its settled pose and the fastest.
+		if(trace && frame + 1 > settleFrames && (frame + 1) % 100 == 0)
+		{
+			size_t furthest = 0, fastest = 0;
+			double distance = 0.0, speed = 0.0;
+			for(size_t i = 0; i < cards.size(); ++i)
+			{
+				const double d = double((cards[i]->getGlobalPose().p - settled[i].p).magnitude());
+				const double v = double(cards[i]->getLinearVelocity().magnitude());
+				if(d > distance) { distance = d; furthest = i; }
+				if(v > speed) { speed = v; fastest = i; }
+			}
+			std::printf("  t=%4.1f s furthest card %2zu (level %d %c) %.4f mm from settled | fastest card %2zu (level %d %c) %.4f mm/s\n", (frame + 1) * TIMESTEP, furthest, layout[furthest].level, layout[furthest].role, distance * 1e3,
+				fastest, layout[fastest].level, layout[fastest].role, speed * 1e3);
 		}
 	}
 	double maximumSpeed = 0.0;

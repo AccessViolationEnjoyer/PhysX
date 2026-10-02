@@ -855,8 +855,31 @@ static AnvilPointFriction::Enum pointFriction(const AnvilContactPoint& point, co
 	return std::abs(friction0) >= limit || std::abs(friction1) >= limit ? AnvilPointFriction::eSATURATED : AnvilPointFriction::eHOLDING;
 }
 
+int gAnvilDebugStep = 0, gAnvilDebugFrom = -1, gAnvilDebugTo = -2; // EXPERIMENT (temporary)
+
 void writebackAnvilContacts(const AnvilContactRows& rows, const anvil::Problem& problem, const anvil::Result& result, const PxSolverBody* bodies, const PxSolverBodyData* bodyData, DynamicsContext& context)
 {
+	if(gAnvilDebugStep >= gAnvilDebugFrom && gAnvilDebugStep <= gAnvilDebugTo) // EXPERIMENT (temporary): top-level pairs' friction
+	{
+		for(PxU32 i = 0; i < rows.pairs.size(); ++i)
+		{
+			const AnvilContactPair& pair = rows.pairs[i];
+			const PxVec3 centre = pair.manager->getWorkUnit().mRigidCore0->body2World.p + pair.arm[0];
+			if(centre.y < 0.30f || !pair.state)
+				continue;
+			printf("  [%d] pair %u bodies %d,%d centre (%.1f,%.1f,%.1f) mm normal (%.3f,%.3f,%.3f) slip (%.2f,%.2f,%.2f) um twist %g N0 %.1f uNs\n", gAnvilDebugStep, i, pair.body[0], pair.body[1], centre.x * 1e3f, centre.y * 1e3f, centre.z * 1e3f,
+				pair.normal.x, pair.normal.y, pair.normal.z, pair.state->slip[0] * 1e6f, pair.state->slip[1] * 1e6f, pair.state->slip[2] * 1e6f, double(pair.state->twist), pair.state->normalImpulse * 1e6f);
+			for(PxU32 j = pair.firstPoint; j < pair.firstPoint + pair.pointCount; ++j)
+			{
+				const AnvilContactPoint& point = rows.points[j];
+				const double n = normalImpulse(point, problem, result);
+				const double f0 = point.contactCount == 3 ? result.impulse[problem.contacts[point.firstContact + 1].row] : 0.0;
+				const double f1 = point.contactCount == 3 ? result.impulse[problem.contacts[point.firstContact + 2].row] : 0.0;
+				printf("      point: normal %8.2f friction (%8.2f,%8.2f) limit %8.2f uNs -> %s\n", n * 1e6, f0 * 1e6, f1 * 1e6, double(point.frictionLimit) * 1e6,
+					pointFriction(point, problem, result) == AnvilPointFriction::eSATURATED ? "SATURATED" : pointFriction(point, problem, result) == AnvilPointFriction::eHOLDING ? "holding" : "unloaded");
+			}
+		}
+	}
 	// A sticking pair's slip grows by the step's tangential motion at the contact centre: the
 	// free relative velocity plus the solve's corrections, as body integration applies them.
 	// Slip does not relax, so a held load stays where friction caught it; it clears when the pair

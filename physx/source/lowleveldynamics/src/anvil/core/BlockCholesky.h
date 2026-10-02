@@ -95,30 +95,55 @@ public:
 		}
 	}
 
-	void analyzePattern(const SparseStorage& ap)
+	// Analyzes the pattern of the Hessian's sorted (first, second) body pairs under permutation,
+	// which maps a body's first coordinate to its factor coordinate. The pairs are the body
+	// graph: every allocated body pair is a full block. The scalar input maps are prepared only
+	// if the scalar fallback factors (prepareScalarInput).
+	void analyzePattern(int bodies, const std::vector<std::uint64_t>& pairs, const std::vector<int>& permutation)
 	{
-		const int bodies = int(ap.cols()) / 6;
 		m_parent.resize(bodies);
 		m_tags.resize(bodies);
 		m_counts.resize(bodies);
 		m_pattern.resize(bodies);
 		m_blockOuter.resize(bodies + 1);
 		m_rowOuter.resize(bodies + 1);
-		// Body-level elimination tree and column counts. Every allocated body
-		// pair is a full block, so the first scalar column supplies its graph.
+		m_scalarInputCurrent = false;
+		// Each factor column k's neighbours i < k, from the pairs.
+		const std::uint32_t pairCount = std::uint32_t(pairs.size());
+		m_adjacencyOuter.assign(bodies + 1, 0);
+		for(std::uint32_t pair = 0; pair < pairCount; ++pair)
+		{
+			const int first = permutation[6 * int(pairs[pair] >> 32)] / 6;
+			const int second = permutation[6 * int(std::uint32_t(pairs[pair]))] / 6;
+			if(first != second)
+			{
+				++m_adjacencyOuter[std::max(first, second) + 1];
+			}
+		}
+		for(int body = 0; body < bodies; ++body)
+		{
+			m_adjacencyOuter[body + 1] += m_adjacencyOuter[body];
+		}
+		m_adjacency.resize(m_adjacencyOuter[bodies]);
+		std::copy(m_adjacencyOuter.begin(), m_adjacencyOuter.end() - 1, m_counts.begin());
+		for(std::uint32_t pair = 0; pair < pairCount; ++pair)
+		{
+			const int first = permutation[6 * int(pairs[pair] >> 32)] / 6;
+			const int second = permutation[6 * int(std::uint32_t(pairs[pair]))] / 6;
+			if(first != second)
+			{
+				m_adjacency[m_counts[std::max(first, second)]++] = std::min(first, second);
+			}
+		}
+		// Body-level elimination tree and column counts.
 		for(int k = 0; k < bodies; ++k)
 		{
 			m_parent[k] = -1;
 			m_tags[k] = k;
 			m_counts[k] = 0;
-			for(Sparse::InnerIterator entry(ap, 6 * k); entry; ++entry)
+			for(int entry = m_adjacencyOuter[k]; entry < m_adjacencyOuter[k + 1]; ++entry)
 			{
-				int i = int(entry.row()) / 6;
-				if(i >= k)
-				{
-					continue;
-				}
-				for(; m_tags[i] != k; i = m_parent[i])
+				for(int i = m_adjacency[entry]; m_tags[i] != k; i = m_parent[i])
 				{
 					if(m_parent[i] == -1)
 					{
@@ -150,13 +175,6 @@ public:
 		{
 			m_work[body].setZero();
 		}
-		m_inputCoordinates.resize(ap.nonZeros());
-		const int* inputInner = ap.innerIndexPtr();
-		for(int entry = 0; entry < ap.nonZeros(); ++entry)
-		{
-			const int row = inputInner[entry];
-			m_inputCoordinates[entry] = (row / 6 << 3) | row % 6;
-		}
 		m_rowEntries.clear();
 		reserveStorage(m_rowEntries, std::uint32_t(blocks - bodies));
 		std::fill(m_tags.begin(), m_tags.end(), -1);
@@ -171,15 +189,10 @@ public:
 			const int diagonal = m_blockOuter[k];
 			m_blockRows[diagonal] = k;
 			m_blockColumns[diagonal] = k;
-			for(Sparse::InnerIterator entry(ap, 6 * k); entry; ++entry)
+			for(int entry = m_adjacencyOuter[k]; entry < m_adjacencyOuter[k + 1]; ++entry)
 			{
-				int i = int(entry.row()) / 6;
-				if(i >= k)
-				{
-					continue;
-				}
 				int length = 0;
-				for(; m_tags[i] != k; i = m_parent[i])
+				for(int i = m_adjacency[entry]; m_tags[i] != k; i = m_parent[i])
 				{
 					m_pattern[length++] = i;
 					m_tags[i] = k;
@@ -230,24 +243,10 @@ public:
 				}
 			}
 			preparePanels(bodies);
-			m_inputBlocks.resize(ap.nonZeros());
-			const int columnCount = ap.outerSize();
-			const int* inputOuter = ap.outerIndexPtr();
-			for(int column = 0; column < columnCount; ++column)
-			{
-				const int end = inputOuter[column + 1];
-				for(int entry = inputOuter[column]; entry < end; ++entry)
-				{
-					const int blockColumn = inputInner[entry] / 6;
-					const int blockRow = column / 6;
-					m_inputBlocks[entry] = blockColumn == blockRow ? m_blockOuter[blockRow] : findBlock(blockColumn, blockRow);
-				}
-			}
 		}
 		else
 		{
 			m_updateTargets.clear();
-			m_inputBlocks.clear();
 		}
 
 		// Scalar storage is an export view for signed rank updates; its
@@ -286,6 +285,44 @@ public:
 		}
 	}
 
+	// Maps the permuted upper scalar input's entries to the factor's blocks and coordinates.
+	// Only the scalar fallback reads the scalar input, so this waits for its first use after
+	// an analysis.
+	void prepareScalarInput(const SparseStorage& ap)
+	{
+		if(m_scalarInputCurrent)
+		{
+			return;
+		}
+		m_scalarInputCurrent = true;
+		const int nonzeroCount = ap.nonZeros();
+		const int* inputInner = ap.innerIndexPtr();
+		m_inputCoordinates.resize(nonzeroCount);
+		for(int entry = 0; entry < nonzeroCount; ++entry)
+		{
+			const int row = inputInner[entry];
+			m_inputCoordinates[entry] = (row / 6 << 3) | row % 6;
+		}
+		if(m_updateTargets.empty())
+		{
+			m_inputBlocks.clear();
+			return;
+		}
+		m_inputBlocks.resize(nonzeroCount);
+		const int columnCount = ap.outerSize();
+		const int* inputOuter = ap.outerIndexPtr();
+		for(int column = 0; column < columnCount; ++column)
+		{
+			const int end = inputOuter[column + 1];
+			for(int entry = inputOuter[column]; entry < end; ++entry)
+			{
+				const int blockColumn = inputInner[entry] / 6;
+				const int blockRow = column / 6;
+				m_inputBlocks[entry] = blockColumn == blockRow ? m_blockOuter[blockRow] : findBlock(blockColumn, blockRow);
+			}
+		}
+	}
+
 	bool factorize(const SparseStorage& ap)
 	{
 		if(!m_useBlocks)
@@ -294,6 +331,7 @@ public:
 			m_scalarCurrent = true;
 			return StorageCholesky::factorize(ap);
 		}
+		prepareScalarInput(ap);
 		if(parallel())
 		{
 			return factorizeParallel(&ap, NULL) || scalarFallback(ap);
@@ -1194,9 +1232,12 @@ private:
 	bool m_useBlocks = false;
 	bool m_blocksCurrent = false;
 	bool m_scalarCurrent = false;
+	bool m_scalarInputCurrent = false;
 	ParallelExecutor* m_parallelExecutor = NULL;
 	int m_parallelWorkers = 0;
 	std::vector<int> m_parent, m_tags, m_counts, m_pattern;
+	// Each factor column's neighbours before it, from the body pairs.
+	std::vector<int> m_adjacencyOuter, m_adjacency;
 	std::vector<int> m_blockOuter, m_blockRows, m_blockColumns, m_rowOuter, m_rowEntries, m_inputCoordinates;
 	std::vector<double> m_inverseDiagonal;
 	// Staged solves: groups by stage, bodies by group and by chain stage, and each body's first

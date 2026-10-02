@@ -40,6 +40,14 @@ public:
 		{
 			m_size = 0;
 			m_updateInverseCurrent = false;
+			// A kept ordering serves the solve that added the rows and no other: the ordering must
+			// stay a function of the pattern alone, as a workspace's history of islands depends on
+			// the scheduling, and a later solve of the same pattern finds it analyzed otherwise.
+			if(m_orderingKept && !keepOrdering)
+			{
+				m_pairs.clear();
+				m_orderingKept = false;
+			}
 		}
 		m_profile = profile;
 		m_keepOrdering = keepOrdering;
@@ -551,16 +559,20 @@ private:
 			if(m_pairs != problem.hessianPairs)
 			{
 				changedPattern = true;
-				const Sparse& pattern = exportedHessian(problem, matrix);
+				const int bodies = problem.bodyCount();
 				// An ordering found for the same bodies with fewer pairs is kept: a few added pairs
 				// change its fill little, and the ordering costs most of the analysis.
-				if(!m_keepOrdering || int(m_permutation.size()) != int(pattern.cols()))
+				if(!m_keepOrdering || int(m_permutation.size()) != 6 * bodies)
 				{
-					orderBodies(pattern);
+					orderBodies(bodies, problem.hessianPairs);
+				}
+				else
+				{
+					m_orderingKept = true;
 				}
 				m_pairs = problem.hessianPairs;
-				preparePermutation(pattern);
-				m_factor.analyzePattern(m_permuted);
+				m_permutedCurrent = false;
+				m_factor.analyzePattern(bodies, m_pairs, m_permutation);
 				m_factor.prepareBlockInput(m_pairs, m_permutation);
 				++result.symbolicAnalyses;
 			}
@@ -571,7 +583,14 @@ private:
 		m_solution.resize(m_size);
 		if(!m_factor.readsBlocks() || !m_factor.factorizeBlocks(m_hessian.blocks.data(), m_hessian.nonzero.data()))
 		{
+			// The scalar fallback reads the permuted scalar Hessian, prepared on its first use
+			// after an analysis.
 			const Sparse& values = exportedHessian(problem, matrix);
+			if(!m_permutedCurrent)
+			{
+				preparePermutation(values);
+				m_permutedCurrent = true;
+			}
 			const int nonzeroCount = values.nonZeros();
 			for(int entry = 0; entry < nonzeroCount; ++entry)
 			{
@@ -592,7 +611,8 @@ private:
 			{
 				const Sparse& lower = m_factor.m_matrix;
 				m_reachWork.resize(m_size);
-				m_factorWork = double(exportedHessian(problem, matrix).nonZeros());
+				// The exported scalar Hessian's entries: 21 per diagonal block, 36 per pair.
+				m_factorWork = 36.0 * double(m_pairs.size()) - 15.0 * problem.bodyCount();
 				for(int column = m_size - 1; column >= 0; --column)
 				{
 					const int begin = lower.outerIndexPtr()[column], end = lower.outerIndexPtr()[column + 1];
@@ -613,22 +633,19 @@ private:
 		return true;
 	}
 
-	void orderBodies(const Sparse& matrix)
+	// Orders the bodies from the Hessian's sorted (first, second) body pairs, the body graph.
+	void orderBodies(int bodies, const std::vector<std::uint64_t>& pairs)
 	{
-		const int bodies = int(matrix.cols()) / 6;
 		m_bodyEdges.clear();
-		for(int body = 0; body < bodies; ++body)
+		const std::uint32_t pairCount = std::uint32_t(pairs.size());
+		for(std::uint32_t pair = 0; pair < pairCount; ++pair)
 		{
-			int previous = -1;
-			for(Sparse::InnerIterator entry(matrix, 6 * body); entry; ++entry)
+			const int first = int(pairs[pair] >> 32);
+			const int second = int(std::uint32_t(pairs[pair]));
+			if(first != second)
 			{
-				const int row = int(entry.row()) / 6;
-				if(row != body && row != previous)
-				{
-					m_bodyEdges.emplace_back(body, row);
-					m_bodyEdges.emplace_back(row, body);
-				}
-				previous = row;
+				m_bodyEdges.emplace_back(first, second);
+				m_bodyEdges.emplace_back(second, first);
 			}
 		}
 		std::sort(m_bodyEdges.begin(), m_bodyEdges.end());
@@ -668,7 +685,7 @@ private:
 				}
 			}
 		}
-		m_permutation.resize(matrix.cols());
+		m_permutation.resize(6 * bodies);
 		for(int body = 0; body < bodies; ++body)
 		{
 			for(int axis = 0; axis < 6; ++axis)
@@ -941,6 +958,10 @@ private:
 	int m_size;
 	bool m_profile;
 	bool m_keepOrdering = false;
+	// Whether the analyzed pattern uses an ordering kept from a smaller pattern.
+	bool m_orderingKept = false;
+	// Whether m_permuted holds the current pattern; the scalar fallback alone needs it.
+	bool m_permutedCurrent = false;
 	BlockCholesky m_factor;
 	ParallelExecutor* m_parallelExecutor = NULL;
 	std::vector<BodyPair> m_bodyEdges;

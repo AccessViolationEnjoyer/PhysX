@@ -176,16 +176,32 @@ each against 113 for the first solve; the pallet and tote scenes none. A re-solv
 bodies' ordering (`Settings::keepOrdering`): a late point usually adds a body pair with no kept
 points, which changes the Hessian pattern, and finding a new ordering for 500 bodies cost 0.4 ms
 of a 1.34 ms re-solve; the pattern is still analyzed (0.55 ms) and the factor rebuilt. The
-re-solves took 12% of the pile's run before that and 9% after. The pile's collapse is chaotic
+re-solves took 12% of the pile's run before that and 9% after. The kept ordering serves only the
+solve that added the rows: the next ordinary solve in that workspace forgets the analyzed
+pattern, so the ordering stays a function of the pattern alone. (Without that, a workspace that
+next solved the same pattern reused the kept ordering, and which workspace an island gets
+depends on the scheduling: the convex pile differed between 1 and 8 workers and between runs.)
+The symbolic analysis itself works on the body pairs: ordering, elimination tree and block
+structure are built from the pairs and the permutation, and the permuted scalar Hessian with its
+input maps is built only when the block factorization fails and the scalar fallback runs. The
+scalar export, permutation and analysis had cost 0.3 ms of every pattern change on a 500-body
+island (METIS 0.43 ms more), and the pile's pattern changes nearly every step while it moves.
+The pile's collapse is chaotic
 (rounding changes alone move its final speed between 50 and 140 mm/s), so single trajectories do
 not compare its step totals; the per-island timing above and totals over ten pile sizes do.
 Against the filter that dropped the points (native, interleaved): pallet fall-off mean 0.75 ->
 0.66 ms, p95 1.59 -> 1.23, peak 2.36 -> 1.70 (the belt-edge contact now in the first solve);
 totes 3.79 -> 3.75; the 5x5x20 convex pile 7.50 -> 7.42 mean, settled 2.21 -> 1.84, final speed
-222 -> 53 mm/s. Ten convex pile sizes (3x3x20 to 6x6x20, 800 steps each) total 52.3 s dropping
-the points, 57.0 s re-solving, 55.4 s re-solving with the ordering kept: the re-solves of real
-impacts cost collapsing hull piles about 6%. Wasm: pallet fall p95 1.89 -> 1.41 ms, pile 1000
-12.8 -> 12.6, the 125-box pile drop 2.49 -> 2.55, totes 3.99 ms (the per-point check was 4.24).
+222 -> 53 mm/s. Ten convex pile sizes (3x3x20 to 6x6x20, 800 steps each) total 50.4 s dropping
+the points, 53.4 s re-solving with the ordering kept, 52.1 s with the body-pair symbolic
+analysis: the re-solves of real impacts cost collapsing hull piles about 3%. What remains of a
+re-solve on a 500-body island is 0.57 ms against 7 ms for the step's first solve: re-preparation
+0.06, pattern analysis 0.06, assembly 0.04, one factorization 0.12 and six iterations 0.35 ms,
+each at its floor for a changed pattern. METIS options were tried for the ordering that every
+pattern change pays (0.42 ms): no compression saves 7% of it at equal fill, fewer refinement
+passes cost 15-24% more factor work; neither was kept. Wasm: pallet fall p95 1.89 -> 1.41 ms,
+pile 1000 12.8 -> 12.6, the 125-box pile drop 2.49 -> 2.55, totes 3.99 ms (the per-point check
+was 4.24).
 
 This matters with `PxRigidBodyFlag::eENABLE_SPECULATIVE_CCD`, which inflates a body's contact
 reach by its motion per step: contacts then exist a step before surfaces meet, and a body
