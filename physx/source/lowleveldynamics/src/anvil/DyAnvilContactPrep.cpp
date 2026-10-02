@@ -288,7 +288,14 @@ static PX_FORCE_INLINE int rowNonzeroCount(const anvil::CompactContact& row)
 	return (row.body[0] >= 0 ? anvil::nonzeroCount6(row.jacobian[0].data()) : 0) + (row.body[1] >= 0 ? anvil::nonzeroCount6(row.jacobian[1].data()) : 0);
 }
 
-static PX_FORCE_INLINE void appendContactRow(const PxVec3& direction, const PxVec3& angular0, const PxVec3& angular1, double initialSpeed, double freeSpeed, double targetSpeed, double positionError, double stiffness, double damping, double impedance, double regularization, PxI32 bodyIndex0, PxI32 bodyIndex1, const AnvilJacobianBody* jacobianBodies, const AnvilContactSettings& settings, anvil::Problem& problem, double upperImpulse, double lowerImpulse = 0.0)
+// The speed a row's reference velocity lies below the free speed: the initial speed relaxes toward
+// the target and the position error closes over the settings' time constant.
+static PX_FORCE_INLINE double relaxedFreeVelocity(double initialSpeed, double freeSpeed, double targetSpeed, double positionError, double stiffness, double damping, double impedance, const AnvilContactSettings& settings)
+{
+	return freeSpeed - initialSpeed + settings.timestep * (damping * (initialSpeed - targetSpeed) + stiffness * impedance * positionError);
+}
+
+static PX_FORCE_INLINE void appendContactRow(const PxVec3& direction, const PxVec3& angular0, const PxVec3& angular1, double freeVelocity, double regularization, PxI32 bodyIndex0, PxI32 bodyIndex1, const AnvilJacobianBody* jacobianBodies, anvil::Problem& problem, double upperImpulse, double lowerImpulse = 0.0)
 {
 	anvil::CompactContact& row = problem.beginScalarContact();
 	row.body[0] = bodyIndex0;
@@ -301,8 +308,7 @@ static PX_FORCE_INLINE void appendContactRow(const PxVec3& direction, const PxVe
 		problem.cancelScalarContact();
 		return;
 	}
-	row.freeVelocity = freeSpeed - initialSpeed + settings.timestep *
-		(damping * (initialSpeed - targetSpeed) + stiffness * impedance * positionError);
+	row.freeVelocity = freeVelocity;
 	row.regularization = regularization;
 	problem.finishScalarContact(lowerImpulse, upperImpulse, nonzeroCount);
 }
@@ -422,8 +428,17 @@ static void appendAnvilContact(const PxContactPoint& contact, PxReal restDistanc
 	const double regularization = ratio * response;
 	const double upper = hasContactImpulseLimit(contact.maxImpulse) ? contact.maxImpulse : anvil::MAX_IMPULSE;
 	const bool friction = !hasContactImpulseLimit(contact.maxImpulse) && !(contact.materialFlags & PxMaterialFlag::eDISABLE_FRICTION) && frictionCoefficient > 0.0f;
-	appendContactRow(contact.normal, normalAngular0, normalAngular1, initialNormalSpeed, freeNormalSpeed, normalTarget, penetration, stiffness, damping, impedance,
-		friction ? ANVIL_FRICTION_NORMAL_REGULARIZATION * regularization : regularization, bodyIndex0, bodyIndex1, jacobianBodies, settings, problem, upper);
+	// A bounce leaves at the rebound speed within the step, as an impact does: relaxing toward it
+	// would lose part of it, and position correction would add to or take from it by the depth or
+	// gap at which the step finds the impact.
+	// A separated point pushes only to keep the step from carrying it through the surface: its
+	// gap may close within the step at any speed. The spring and damper act once the surfaces
+	// touch; damping a separated point would slow a body before it collides.
+	const bool separated = penetration > 0.0;
+	const double targetNormalSpeed = bounce ? normalTarget : separated ? normalTarget - penetrationSpeed : initialNormalSpeed - settings.timestep *
+		(damping * (initialNormalSpeed - normalTarget) + stiffness * impedance * penetration);
+	appendContactRow(contact.normal, normalAngular0, normalAngular1, freeNormalSpeed - targetNormalSpeed,
+		friction ? ANVIL_FRICTION_NORMAL_REGULARIZATION * regularization : regularization, bodyIndex0, bodyIndex1, jacobianBodies, problem, upper);
 	if(!friction || PxU32(problem.contacts.size()) == firstContact)
 	{
 		appendContactPoint(firstContact, forceDestination, 0.0f, 0.0f, problem, output);
@@ -432,22 +447,42 @@ static void appendAnvilContact(const PxContactPoint& contact, PxReal restDistanc
 	// Lagged Coulomb friction: tangent rows bounded by mu times the point's share of the pair's
 	// previous normal impulse, independent of this step's normal row, so sliding contacts do not
 	// separate. A point without a previous normal impulse takes the impulse that stops its approach.
-	const double targetNormalSpeed = initialNormalSpeed - settings.timestep *
-		(damping * (initialNormalSpeed - normalTarget) + stiffness * impedance * penetration);
 	const double normalImpulse = normalShare > 0.0f ? double(normalShare) :
 		std::max(0.0, targetNormalSpeed - freeNormalSpeed) / response * double(pointFraction);
 	const double limit = double(frictionCoefficient) * normalImpulse;
 	if(limit > 0.0)
 	{
+		// A sliding point's friction has magnitude mu N0 and opposes its slip, its velocity relative
+		// to the surface's target. Its first row lies along the slip at the start of the step. A
+		// slip s turned by a small velocity v across it turns the friction by v / |s|, so the
+		// friction across the slip is mu N0 v / |s|: the second row has that compliance, |s| /
+		// (mu N0), or the row compliance where that is smaller, as inside the friction limit. The
+		// rows reduce to sticking's two rows as the slip vanishes. Two stiff rows would let the row
+		// across the slip hold while the other slides, resisting motion that Coulomb friction does
+		// not, such as the turn of a case sliding on belts at different speeds.
 		PxVec3 tangents[2];
-		contactTangents(contact.normal, initialVelocity, tangents[0], tangents[1]);
+		double crossRegularization = regularization;
+		const PxVec3 slipVelocity = initialVelocity - contact.targetVel;
+		const PxVec3 tangentialSlip = slipVelocity - contact.normal * contact.normal.dot(slipVelocity);
+		const PxReal slipSquared = tangentialSlip.magnitudeSquared();
+		if(sliding && slipSquared > 0.0f)
+		{
+			const PxReal slipSpeed = PxSqrt(slipSquared);
+			tangents[0] = tangentialSlip * (1.0f / slipSpeed);
+			tangents[1] = contact.normal.cross(tangents[0]);
+			crossRegularization = std::max(regularization, double(slipSpeed) / limit);
+		}
+		else
+		{
+			contactTangents(contact.normal, initialVelocity, tangents[0], tangents[1]);
+		}
 		const PxU32 normalEnd = PxU32(problem.contacts.size());
 		for(PxU32 tangent = 0; tangent < 2; ++tangent)
 		{
 			const PxVec3& direction = tangents[tangent];
-			appendContactRow(direction, arm0.cross(direction), arm1.cross(direction), dotAnvilContact(direction, initialVelocity), dotAnvilContact(direction, freePointVelocity),
-				dotAnvilContact(contact.targetVel, direction), ANVIL_SLIP_STIFFNESS * dotAnvilContact(direction, slip), stiffness, damping, impedance, regularization,
-				bodyIndex0, bodyIndex1, jacobianBodies, settings, problem, limit, -limit);
+			const double freeVelocity = relaxedFreeVelocity(dotAnvilContact(direction, initialVelocity), dotAnvilContact(direction, freePointVelocity),
+				dotAnvilContact(contact.targetVel, direction), ANVIL_SLIP_STIFFNESS * dotAnvilContact(direction, slip), stiffness, damping, impedance, settings);
+			appendContactRow(direction, arm0.cross(direction), arm1.cross(direction), freeVelocity, tangent ? crossRegularization : regularization, bodyIndex0, bodyIndex1, jacobianBodies, problem, limit, -limit);
 		}
 		if(PxU32(problem.contacts.size()) == normalEnd + 2)
 		{
@@ -496,6 +531,10 @@ void prepareAnvilContacts(PxsContactManager& manager, PxsContactManagerOutput& c
 	const PxU32 contactCount = buffer.count;
 	// A sticking pair keeps the slip and twist accumulated up to the last step, which writeback
 	// extended by that step's motion at the contact centre, in the plane of the current normal.
+	// The slip belongs to the surfaces that were touching when it began. While a pair sticks, its
+	// normal stays fixed in body 0's frame; when body 0 turns against body 1, as a hull tipping onto
+	// another face does, the contact moves to other surfaces, and the slip lapses once that turn
+	// moves body 0's material at the contact by more than the slip limit.
 	AnvilContactPair pair;
 	pair.state = frictionState;
 	PxVec3 slip(0.0f), centre(0.0f);
@@ -515,6 +554,7 @@ void prepareAnvilContacts(PxsContactManager& manager, PxsContactManagerOutput& c
 		pair.normal = normal;
 		pair.freeSlipVelocity = body0.linearVelocity + body0.angularVelocity.cross(pair.arm[0]) - body1.linearVelocity - body1.angularVelocity.cross(pair.arm[1]) - buffer.contacts[0].targetVel;
 		pair.freeTwistVelocity = (body0.angularVelocity - body1.angularVelocity).dot(normal);
+		PxVec3 localNormal = frame0.q.rotateInv(normal);
 		if(previous && !sliding)
 		{
 			slip = PxVec3(previous->slip[0], previous->slip[1], previous->slip[2]);
@@ -526,12 +566,22 @@ void prepareAnvilContacts(PxsContactManager& manager, PxsContactManagerOutput& c
 				radius = PxMax(radius, (buffer.contacts[i].point - centre).magnitudeSquared());
 			}
 			const PxReal limit = settings.slipLimit;
-			if(slip.magnitudeSquared() > limit * limit || twist * twist * radius > limit * limit)
+			// The normal's turn in body 0's frame since the slip began, times body 0's arm to the contact.
+			const PxVec3 anchorNormal(previous->normal0[0], previous->normal0[1], previous->normal0[2]);
+			const PxReal turn = (localNormal - anchorNormal).magnitudeSquared() * pair.arm[0].magnitudeSquared();
+			if(slip.magnitudeSquared() > limit * limit || twist * twist * radius > limit * limit || turn > limit * limit)
 			{
 				slip = PxVec3(0.0f);
 				twist = 0.0f;
 			}
+			else
+			{
+				localNormal = anchorNormal;
+			}
 		}
+		frictionState->normal0[0] = localNormal.x;
+		frictionState->normal0[1] = localNormal.y;
+		frictionState->normal0[2] = localNormal.z;
 		frictionState->slip[0] = slip.x;
 		frictionState->slip[1] = slip.y;
 		frictionState->slip[2] = slip.z;
@@ -649,11 +699,9 @@ void writebackAnvilContacts(const AnvilContactRows& rows, const anvil::Problem& 
 {
 	// A sticking pair's slip grows by the step's tangential motion at the contact centre: the
 	// free relative velocity plus the solve's corrections, as body integration applies them.
-	// Slip relaxes over ANVIL_SLIP_RELAXATION_TIME. A sustained load keeps renewing the slip that
-	// holds it, but slip left by a transient would otherwise lock tangential forces into a stack,
-	// which other contacts then balance near their friction limits.
+	// Slip does not relax, so a held load stays where friction caught it; it clears when the pair
+	// slides or unloads, or beyond the slip limit.
 	const PxReal timestep = context.getDt();
-	const PxReal retention = PxMax(0.0f, 1.0f - timestep / ANVIL_SLIP_RELAXATION_TIME);
 	const PxU32 pairCount = rows.pairs.size();
 	for(PxU32 i = 0; i < pairCount; ++i)
 	{
@@ -707,10 +755,10 @@ void writebackAnvilContacts(const AnvilContactRows& rows, const anvil::Problem& 
 			twistVelocity += end ? -angular.dot(pair.normal) : angular.dot(pair.normal);
 		}
 		velocity -= pair.normal * pair.normal.dot(velocity);
-		state->slip[0] = state->slip[0] * retention + velocity.x * timestep;
-		state->slip[1] = state->slip[1] * retention + velocity.y * timestep;
-		state->slip[2] = state->slip[2] * retention + velocity.z * timestep;
-		state->twist = state->twist * retention + twistVelocity * timestep;
+		state->slip[0] += velocity.x * timestep;
+		state->slip[1] += velocity.y * timestep;
+		state->slip[2] += velocity.z * timestep;
+		state->twist += twistVelocity * timestep;
 	}
 	const PxU32 pointCount = rows.points.size();
 	for(PxU32 i = 0; i < pointCount; ++i)

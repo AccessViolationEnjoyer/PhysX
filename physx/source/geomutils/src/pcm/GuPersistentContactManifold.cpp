@@ -546,6 +546,7 @@ bool PersistentContactManifold::replaceManifoldPoint(const Vec3VArg localPointA,
 			mContactPoints[i].mLocalPointA = localPointA;
 			mContactPoints[i].mLocalPointB = localPointB;
 			mContactPoints[i].mLocalNormalPen = localNormalPen;
+			setAnchor(i, PCM_ANCHOR_B);
 			return true;
 		}
 	}
@@ -583,14 +584,17 @@ PxU32 PersistentContactManifold::reduceContactsForPCM(const Vec3VArg localPointA
 	PxMemZero(chosen, sizeof(bool)*5);
 	const FloatV negMax = FNeg(FMax());
 	PersistentContact tempContacts[5];
-	
+	PxU32 tempAnchors[5];
+
 	for(PxU32 i=0; i<4; ++i)
 	{
 		tempContacts[i] = mContactPoints[i];
+		tempAnchors[i] = getAnchor(i);
 	}
 	tempContacts[4].mLocalPointA = localPointA;
 	tempContacts[4].mLocalPointB = localPointB;
 	tempContacts[4].mLocalNormalPen = localNormalPen;
+	tempAnchors[4] = PCM_ANCHOR_B;
 
 	//ML: we set the start point to be the 4th point
 	FloatV maxDist = V4GetW(localNormalPen);
@@ -608,8 +612,9 @@ PxU32 PersistentContactManifold::reduceContactsForPCM(const Vec3VArg localPointA
 
 	chosen[index] = true;
 	mContactPoints[0] = tempContacts[index];
+	mAnchors = PxU8(tempAnchors[index]);
 
-	//ML: we set the start point to be the 0th point 
+	//ML: we set the start point to be the 0th point
 	Vec3V dir = V3Sub(tempContacts[0].mLocalPointB, mContactPoints[0].mLocalPointB);
 	maxDist = V3Dot(dir, dir);
 	index = 0;
@@ -631,6 +636,7 @@ PxU32 PersistentContactManifold::reduceContactsForPCM(const Vec3VArg localPointA
 	//PX_ASSERT(chosen[index] == false);
 	chosen[index] = true;
 	mContactPoints[1] = tempContacts[index];
+	setAnchor(1, tempAnchors[index]);
 
 	maxDist = negMax;	
 	for(PxI32 i=0; i<5; ++i)
@@ -648,6 +654,7 @@ PxU32 PersistentContactManifold::reduceContactsForPCM(const Vec3VArg localPointA
 	//PX_ASSERT(chosen[index] == false);
 	chosen[index] = true;
 	mContactPoints[2]=tempContacts[index];
+	setAnchor(2, tempAnchors[index]);
 
 	//Find point farthest away from segment tempContactPoints[0] - tempContactPoints[1]
 	maxDist = negMax;
@@ -669,12 +676,14 @@ PxU32 PersistentContactManifold::reduceContactsForPCM(const Vec3VArg localPointA
 	{
 		//if we don't have any new contacts, which means the leftover contacts are inside the triangles
 		mNumContacts = 3;
+		setAnchor(3, PCM_ANCHOR_B);
 		return 0;
 	}
 	else
 	{
 		chosen[index] = true;
 		mContactPoints[3] = tempContacts[index];
+		setAnchor(3, tempAnchors[index]);
 	}
 
 	//Final pass, we work out the index that we didn't choose and bind it to its closest point. We then consider whether we want to swap the point if the
@@ -707,6 +716,7 @@ PxU32 PersistentContactManifold::reduceContactsForPCM(const Vec3VArg localPointA
 	{
 		//Swap
 		mContactPoints[index] = tempContacts[notChosenIndex];
+		setAnchor(PxU32(index), tempAnchors[notChosenIndex]);
 	}
 
 	return 0;
@@ -728,6 +738,38 @@ void PersistentContactManifold::addManifoldContactsToContactBuffer(PxContactBuff
 		{
 			const Vec3V worldP = transf1.transform(p.mLocalPointB);
 
+			outputPCMContact(contactBuffer, contactCount, worldP, normal, dist);
+		}
+	}
+
+	contactBuffer.count = contactCount;
+}
+
+//	For box/convexHull pairs whose generator records anchors. Refresh already moved the B witness of points anchored
+//	to A onto A's witness, and the generator moved crossings; midpoints are reported halfway between the witnesses,
+//	A's taken onto B's surface along the point's normal by the distance refresh left.
+void PersistentContactManifold::addManifoldContactsToContactBuffer(PxContactBuffer& contactBuffer, const Vec3VArg normal, const PxTransformV& transf0, const PxTransformV& transf1, const FloatVArg contactOffset)
+{
+	if(!hasAnchor(PCM_ANCHOR_MIDPOINT))
+	{
+		addManifoldContactsToContactBuffer(contactBuffer, normal, transf1, contactOffset);
+		return;
+	}
+	const FloatV half = FHalf();
+	PxU32 contactCount = 0;
+	for(PxU32 i=0; (i< mNumContacts) & (contactCount < PxContactBuffer::MAX_CONTACTS); ++i)
+	{
+		const PersistentContact& p = getContactPoint(i);
+		const FloatV dist = V4GetW(p.mLocalNormalPen);
+		if(FAllGrtrOrEq(contactOffset, dist))
+		{
+			Vec3V worldP = transf1.transform(p.mLocalPointB);
+			if(getAnchor(i) == PCM_ANCHOR_MIDPOINT)
+			{
+				const Vec3V pointNormal = transf1.rotate(Vec3V_From_Vec4V(p.mLocalNormalPen));
+				const Vec3V pointA = V3NegScaleSub(pointNormal, dist, transf0.transform(p.mLocalPointA));
+				worldP = V3Scale(V3Add(worldP, pointA), half);
+			}
 			outputPCMContact(contactBuffer, contactCount, worldP, normal, dist);
 		}
 	}
@@ -786,21 +828,24 @@ void PersistentContactManifold::addManifoldContactsToContactBuffer(PxContactBuff
 //	This function is used in the box/convexhull full manifold contact genenation. We will pass in a list of manifold contacts. If the number of contacts are more than
 //	GU_MANIFOLD_CACHE_SIZE, we will need to do contact reduction while we are storing the chosen manifold contacts from the manifold contact list to the manifold contact
 //	buffer.
-void PersistentContactManifold::addBatchManifoldContacts(const PersistentContact* manifoldContacts, PxU32 numPoints, PxReal toleranceLength)
+void PersistentContactManifold::addBatchManifoldContacts(const PersistentContact* manifoldContacts, PxU32 numPoints, PxReal toleranceLength, const PxU8* anchors)
 {
 	if(numPoints <= GU_MANIFOLD_CACHE_SIZE)
 	{
+		PxU32 packed = 0;
 		for(PxU32 i=0; i<numPoints; ++i)
 		{
 			mContactPoints[i].mLocalPointA = manifoldContacts[i].mLocalPointA;
 			mContactPoints[i].mLocalPointB = manifoldContacts[i].mLocalPointB;
 			mContactPoints[i].mLocalNormalPen = manifoldContacts[i].mLocalNormalPen;
+			packed |= anchors ? PxU32(anchors[i]) << (2 * i) : 0;
 		}
 		mNumContacts = PxTo8(numPoints);
+		mAnchors = PxU8(packed);
 	}
 	else
 	{
-		reduceBatchContacts(manifoldContacts, numPoints, toleranceLength);
+		reduceBatchContacts(manifoldContacts, numPoints, toleranceLength, anchors);
 
 		mNumContacts = GU_MANIFOLD_CACHE_SIZE;
 	}
@@ -982,7 +1027,7 @@ void PersistentContactManifold::reduceBatchContactsCluster(const PersistentConta
 }
 
 //	This function is for box/convexhull full contact generation. If the numPoints > 4, we will reduce the contact points to 4
-void PersistentContactManifold::reduceBatchContacts(const PersistentContact* manifoldPoints, PxU32 numPoints, PxReal tolereanceLength)
+void PersistentContactManifold::reduceBatchContacts(const PersistentContact* manifoldPoints, PxU32 numPoints, PxReal tolereanceLength, const PxU8* anchors)
 {
 	PxU8 chosenIndices[4];
 	PxU8 candidates[64];
@@ -1148,6 +1193,7 @@ void PersistentContactManifold::reduceBatchContacts(const PersistentContact* man
 			mContactPoints[i] = manifoldPoints[chosenIndices[i]];
 		}
 	}
+	mAnchors = anchors ? PxU8(anchors[chosenIndices[0]] | (anchors[chosenIndices[1]] << 2) | (anchors[chosenIndices[2]] << 4) | (anchors[chosenIndices[3]] << 6)) : PxU8(0);
 }
 
 //	This function is for capsule full contact generation. If the numPoints > 2, we will reduce the contact points to 2
@@ -1233,6 +1279,7 @@ PxU32 PersistentContactManifold::addManifoldPoint(const Vec3VArg localPointA, co
 	case 3:
 		mContactPoints[mNumContacts].mLocalPointA = localPointA;
 		mContactPoints[mNumContacts].mLocalPointB = localPointB;
+		setAnchor(mNumContacts, PCM_ANCHOR_B);
 		mContactPoints[mNumContacts++].mLocalNormalPen = localNormalPen;
 
 		return 1;

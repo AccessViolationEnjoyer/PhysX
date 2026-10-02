@@ -97,7 +97,9 @@ static void getIncidentPolygon(Vec3V* pts, Vec3V& faceNormal, const Vec3VArg axi
 }
 
 //p0 and p1 is in the local space of AABB
-static bool intersectSegmentAABB(const Vec3VArg p0, const Vec3VArg d, const Vec3VArg max, const Vec3VArg min, FloatV& tmin, FloatV& tmax)
+// faceEdgeMin and faceEdgeMax report whether tmin and tmax lie on an x or y bound, a side of the
+// reference face, rather than on the z bound or the segment's ends.
+static bool intersectSegmentAABB(const Vec3VArg p0, const Vec3VArg d, const Vec3VArg max, const Vec3VArg min, FloatV& tmin, FloatV& tmax, bool& faceEdgeMin, bool& faceEdgeMax)
 {
 	const Vec3V eps = V3Load(1e-6f);
 	const Vec3V absV = V3Abs(d);
@@ -129,6 +131,9 @@ static bool intersectSegmentAABB(const Vec3VArg p0, const Vec3VArg d, const Vec3
 
 	tmin = tminf;
 	tmax = tmaxf;
+	// The bounds are components of tt1 and tt2, so these compare exactly.
+	faceEdgeMin = FAllGrtr(tminf, FZero()) && !FAllEq(tminf, V3GetZ(tt1));
+	faceEdgeMax = FAllGrtr(one, tmaxf) && !FAllEq(tmaxf, V3GetZ(tt2));
 
 	const BoolV con0 = FIsGrtr(tminf, tmaxf);
 	const BoolV con1 = FIsGrtr(tminf, one);
@@ -137,7 +142,9 @@ static bool intersectSegmentAABB(const Vec3VArg p0, const Vec3VArg d, const Vec3
 }
 
 //pts, faceNormal and contact normal are in the local space of new space
-static void calculateContacts(const FloatVArg extentX_, const FloatVArg extentY_, Vec3V* pts, const Vec3VArg incidentFaceNormalInNew, const Vec3VArg localNormal, PersistentContact* manifoldContacts, PxU32& numContacts, const FloatVArg contactDist)
+// The reference face is A's here and the incident polygon B's; anchors receives each point's
+// PCMContactAnchor in that order.
+static void calculateContacts(const FloatVArg extentX_, const FloatVArg extentY_, Vec3V* pts, const Vec3VArg incidentFaceNormalInNew, const Vec3VArg localNormal, PersistentContact* manifoldContacts, PxU8* anchors, PxU32& numContacts, const FloatVArg contactDist)
 {
 	const FloatV zero = FZero();
 	const FloatV max = FMax();
@@ -176,6 +183,7 @@ static void calculateContacts(const FloatVArg extentX_, const FloatVArg extentY_
 				//Add the point to the manifold
 				manifoldContacts[numContacts].mLocalPointA = V3SetZ(pts[i], zero); //transformNewTo0.transform(localPointA);
 				manifoldContacts[numContacts].mLocalPointB = pts[i];//transform1ToNew.transformInv(pts[i]);
+				anchors[numContacts] = PCM_ANCHOR_B;
 				manifoldContacts[numContacts++].mLocalNormalPen = V4SetW(Vec4V_From_Vec3V(localNormal), z);
 			}
 			else
@@ -209,7 +217,8 @@ static void calculateContacts(const FloatVArg extentX_, const FloatVArg extentY_
 					if(FAllGrtr(contactDist, pen))
 					{
 						manifoldContacts[numContacts].mLocalPointA = q0;
-						manifoldContacts[numContacts].mLocalPointB = V3SetZ(q0, t); 
+						manifoldContacts[numContacts].mLocalPointB = V3SetZ(q0, t);
+						anchors[numContacts] = PCM_ANCHOR_A; 
 						manifoldContacts[numContacts++].mLocalNormalPen = V4SetW(Vec4V_From_Vec3V(localNormal), pen);
 					}
 				}
@@ -226,6 +235,7 @@ static void calculateContacts(const FloatVArg extentX_, const FloatVArg extentY_
 					{
 						manifoldContacts[numContacts].mLocalPointA = q0;
 						manifoldContacts[numContacts].mLocalPointB = V3SetZ(q0, t);
+						anchors[numContacts] = PCM_ANCHOR_A;
 						manifoldContacts[numContacts++].mLocalNormalPen = V4SetW(Vec4V_From_Vec3V(localNormal), pen);
 					}
 				}
@@ -242,6 +252,7 @@ static void calculateContacts(const FloatVArg extentX_, const FloatVArg extentY_
 					{
 						manifoldContacts[numContacts].mLocalPointA = q0;
 						manifoldContacts[numContacts].mLocalPointB = V3SetZ(q0, t);
+						anchors[numContacts] = PCM_ANCHOR_A;
 						manifoldContacts[numContacts++].mLocalNormalPen = V4SetW(Vec4V_From_Vec3V(localNormal), pen);
 					}
 				}
@@ -259,6 +270,7 @@ static void calculateContacts(const FloatVArg extentX_, const FloatVArg extentY_
 					{
 						manifoldContacts[numContacts].mLocalPointA = q0;
 						manifoldContacts[numContacts].mLocalPointB = V3SetZ(q0, t);
+						anchors[numContacts] = PCM_ANCHOR_A;
 						manifoldContacts[numContacts++].mLocalNormalPen = V4SetW(Vec4V_From_Vec3V(localNormal), pen);
 					}
 				}
@@ -286,13 +298,15 @@ static void calculateContacts(const FloatVArg extentX_, const FloatVArg extentY_
 		const Vec3V p0p1 = V3Sub(p1, p0);
 
 		FloatV tmin, tmax;
-		if(::intersectSegmentAABB(p0, p0p1, ext, negExt, tmin, tmax))
+		bool faceEdgeMin, faceEdgeMax;
+		if(::intersectSegmentAABB(p0, p0p1, ext, negExt, tmin, tmax, faceEdgeMin, faceEdgeMax))
 		{
 			if(!con0)
 			{
 				const Vec3V intersectP = V3ScaleAdd(p0p1, tmin, p0);
 				manifoldContacts[numContacts].mLocalPointA = V3SetZ(intersectP, zero);
 				manifoldContacts[numContacts].mLocalPointB = intersectP;
+				anchors[numContacts] = PxU8(faceEdgeMin ? PCM_ANCHOR_CROSSING : PCM_ANCHOR_B);
 				manifoldContacts[numContacts++].mLocalNormalPen = V4SetW(Vec4V_From_Vec3V(localNormal), FNeg(V3GetZ(intersectP)));
 			}
 			if(!con1)
@@ -300,13 +314,14 @@ static void calculateContacts(const FloatVArg extentX_, const FloatVArg extentY_
 				const Vec3V intersectP = V3ScaleAdd(p0p1, tmax, p0);
 				manifoldContacts[numContacts].mLocalPointA = V3SetZ(intersectP, zero);
 				manifoldContacts[numContacts].mLocalPointB = intersectP;
+				anchors[numContacts] = PxU8(faceEdgeMax ? PCM_ANCHOR_CROSSING : PCM_ANCHOR_B);
 				manifoldContacts[numContacts++].mLocalNormalPen = V4SetW(Vec4V_From_Vec3V(localNormal), FNeg(V3GetZ(intersectP)));
 			}
 		}
 	}
 }
 
-static PxU32 doBoxBoxGenerateContacts(const Vec3VArg box0Extent, const Vec3VArg box1Extent, const PxMatTransformV& transform0, const PxMatTransformV& transform1, const FloatVArg contactDist, PersistentContact* manifoldContacts, PxU32& numContacts)
+static PxU32 doBoxBoxGenerateContacts(const Vec3VArg box0Extent, const Vec3VArg box1Extent, const PxMatTransformV& transform0, const PxMatTransformV& transform1, const FloatVArg contactDist, PersistentContact* manifoldContacts, PxU8* anchors, PxU32& numContacts)
 {
 	const FloatV ea0 = V3GetX(box0Extent);
 	const FloatV ea1 = V3GetY(box0Extent);
@@ -645,7 +660,7 @@ static PxU32 doBoxBoxGenerateContacts(const Vec3VArg box0Extent, const Vec3VArg 
 			const Vec3V localNormal = newTransformV.rotateInv(mtd);
 			getIncidentPolygon(pts, incidentFaceNormalInNew, V3Neg(localNormal), transform1ToNew, box1Extent);
 		
-			calculateContacts(ea2, ea1, pts, incidentFaceNormalInNew, localNormal, manifoldContacts, numContacts, contactDist);
+			calculateContacts(ea2, ea1, pts, incidentFaceNormalInNew, localNormal, manifoldContacts, anchors, numContacts, contactDist);
 			
 			break;
 		};
@@ -673,7 +688,7 @@ static PxU32 doBoxBoxGenerateContacts(const Vec3VArg box0Extent, const Vec3VArg 
 			const Vec3V localNormal = newTransformV.rotateInv(mtd);
 			getIncidentPolygon(pts, incidentFaceNormalInNew, V3Neg(localNormal), transform1ToNew, box1Extent);
 
-			calculateContacts(ea0, ea2, pts, incidentFaceNormalInNew, localNormal, manifoldContacts, numContacts, contactDist);
+			calculateContacts(ea0, ea2, pts, incidentFaceNormalInNew, localNormal, manifoldContacts, anchors, numContacts, contactDist);
 
 			break;
 		};
@@ -702,7 +717,7 @@ static PxU32 doBoxBoxGenerateContacts(const Vec3VArg box0Extent, const Vec3VArg 
 			const Vec3V localNormal = newTransformV.rotateInv(mtd);
 			getIncidentPolygon(pts, incidentFaceNormalInNew, V3Neg(localNormal), transform1ToNew, box1Extent);
 
-			calculateContacts(ea0, ea1, pts, incidentFaceNormalInNew, localNormal, manifoldContacts, numContacts, contactDist);
+			calculateContacts(ea0, ea1, pts, incidentFaceNormalInNew, localNormal, manifoldContacts, anchors, numContacts, contactDist);
 
 			break;
 		};
@@ -730,7 +745,7 @@ static PxU32 doBoxBoxGenerateContacts(const Vec3VArg box0Extent, const Vec3VArg 
 			const Vec3V localNormal = newTransformV.rotateInv(mtd);
 			getIncidentPolygon(pts, incidentFaceNormalInNew, localNormal, transform1ToNew, box0Extent);
 
-			calculateContacts(eb2, eb1, pts, incidentFaceNormalInNew, localNormal, manifoldContacts, numContacts, contactDist);
+			calculateContacts(eb2, eb1, pts, incidentFaceNormalInNew, localNormal, manifoldContacts, anchors, numContacts, contactDist);
 			
 			break;
 		};
@@ -759,7 +774,7 @@ static PxU32 doBoxBoxGenerateContacts(const Vec3VArg box0Extent, const Vec3VArg 
 			const PxMatTransformV transform1ToNew = newTransformV.transformInv(transform0);
 			const Vec3V localNormal = newTransformV.rotateInv(mtd);
 			getIncidentPolygon(pts, incidentFaceNormalInNew, localNormal, transform1ToNew, box0Extent);
-			calculateContacts(eb0, eb2, pts, incidentFaceNormalInNew, localNormal, manifoldContacts, numContacts, contactDist);
+			calculateContacts(eb0, eb2, pts, incidentFaceNormalInNew, localNormal, manifoldContacts, anchors, numContacts, contactDist);
 			break;
 		}
 	case 5: //ub2;
@@ -788,7 +803,7 @@ static PxU32 doBoxBoxGenerateContacts(const Vec3VArg box0Extent, const Vec3VArg 
 			const Vec3V localNormal = newTransformV.rotateInv(mtd);
 			getIncidentPolygon(pts, incidentFaceNormalInNew, localNormal, transform1ToNew, box0Extent);
 		
-			calculateContacts(eb0, eb1, pts, incidentFaceNormalInNew, localNormal, manifoldContacts, numContacts, contactDist);
+			calculateContacts(eb0, eb1, pts, incidentFaceNormalInNew, localNormal, manifoldContacts, anchors, numContacts, contactDist);
 			break;
 		};
 	default:
@@ -804,6 +819,8 @@ static PxU32 doBoxBoxGenerateContacts(const Vec3VArg box0Extent, const Vec3VArg 
 				const Vec3V localB = manifoldContacts[i].mLocalPointB;
 				manifoldContacts[i].mLocalPointB = manifoldContacts[i].mLocalPointA;
 				manifoldContacts[i].mLocalPointA = localB;
+				// Box 1 was the reference: swap A and B; crossings belong to both.
+				anchors[i] = PxU8(anchors[i] < PCM_ANCHOR_MIDPOINT ? PCM_ANCHOR_A - anchors[i] : anchors[i]);
 			}
 		}
 		const PxMatTransformV transformNewTo1 = transform1.transformInv(newTransformV);
@@ -820,6 +837,75 @@ static PxU32 doBoxBoxGenerateContacts(const Vec3VArg box0Extent, const Vec3VArg 
 	}
 
 	return true;
+}
+
+// The edge through a point on a box edge: the point is at the box's extent on two axes, so the
+// edge runs along the axis with the most room to its extent. A crossing's edges lie across the
+// contact normal, so the axis nearest the normal is never the edge: at a corner, where every
+// axis has no room, it would be a box side's edge, nearly parallel to the other box's edge as
+// seen along the normal, and the crossing would run far along it.
+static PX_FORCE_INLINE Vec3V boxEdgeDirection(const Vec3VArg point, const Vec3VArg extents, const Vec3VArg normal)
+{
+	const Vec3V room = V3Sub(extents, V3Abs(point));
+	const Vec3V alignment = V3Abs(normal);
+	const FloatV nx = V3GetX(alignment), ny = V3GetY(alignment), nz = V3GetZ(alignment);
+	const FloatV x = V3GetX(room), y = V3GetY(room), z = V3GetZ(room);
+	if(FAllGrtrOrEq(nx, ny) && FAllGrtrOrEq(nx, nz))
+	{
+		return FAllGrtrOrEq(y, z) ? V3UnitY() : V3UnitZ();
+	}
+	if(FAllGrtrOrEq(ny, nz))
+	{
+		return FAllGrtrOrEq(x, z) ? V3UnitX() : V3UnitZ();
+	}
+	return FAllGrtrOrEq(x, y) ? V3UnitX() : V3UnitY();
+}
+
+// Whether moving point by distance along a box edge (a unit axis) stays on the edge.
+static PX_FORCE_INLINE bool staysOnEdge(const FloatVArg distance, const Vec3VArg point, const Vec3VArg edge, const Vec3VArg extents)
+{
+	return FAllGrtrOrEq(V3Dot(extents, edge), FAbs(FAdd(V3Dot(point, edge), distance))) != 0;
+}
+
+// Moves the witnesses of a reused manifold's edge crossings to where the two edges cross now, as
+// seen along each point's normal, and updates the point's distance.
+static void moveBoxBoxCrossings(PersistentContactManifold& manifold, const PxMatTransformV& aToB, const Vec3VArg extentsA, const Vec3VArg extentsB)
+{
+	const PxU32 count = manifold.mNumContacts;
+	for(PxU32 i = 0; i < count; ++i)
+	{
+		if(manifold.getAnchor(i) != PCM_ANCHOR_CROSSING)
+		{
+			continue;
+		}
+		PersistentContact& point = manifold.mContactPoints[i];
+		const Vec3V normal = Vec3V_From_Vec4V(point.mLocalNormalPen);
+		const Vec3V localEdgeA = boxEdgeDirection(point.mLocalPointA, extentsA, aToB.rotateInv(normal));
+		const Vec3V edgeA = aToB.rotate(localEdgeA);
+		const Vec3V edgeB = boxEdgeDirection(point.mLocalPointB, extentsB, normal);
+		const FloatV denominator = V3Dot(V3Cross(edgeA, edgeB), normal);
+		// Parallel edges have no crossing; the point keeps its witnesses.
+		if(FAllEq(denominator, FZero()))
+		{
+			continue;
+		}
+		const Vec3V pointA = aToB.transform(point.mLocalPointA);
+		const Vec3V offset = V3Sub(pointA, point.mLocalPointB);
+		// Points pointA + edgeA s and pointB + edgeB t differ along the normal. A crossing beyond
+		// either edge's end, as near-parallel edges give, is no longer an edge crossing; the point
+		// keeps its witnesses until the manifold is regenerated.
+		const FloatV s = FDiv(V3Dot(V3Cross(edgeB, offset), normal), denominator);
+		const FloatV t = FDiv(V3Dot(V3Cross(edgeA, offset), normal), denominator);
+		if(!staysOnEdge(s, point.mLocalPointA, localEdgeA, extentsA) || !staysOnEdge(t, point.mLocalPointB, edgeB, extentsB))
+		{
+			continue;
+		}
+		const Vec3V crossingA = V3ScaleAdd(edgeA, s, pointA);
+		const Vec3V crossingB = V3ScaleAdd(edgeB, t, point.mLocalPointB);
+		point.mLocalPointA = aToB.transformInv(crossingA);
+		point.mLocalPointB = crossingB;
+		point.mLocalNormalPen = V4SetW(point.mLocalNormalPen, V3Dot(V3Sub(crossingA, crossingB), normal));
+	}
 }
 
 bool Gu::pcmContactBoxBox(GU_CONTACT_METHOD_ARGS)
@@ -877,13 +963,14 @@ bool Gu::pcmContactBoxBox(GU_CONTACT_METHOD_ARGS)
 		transfV1.rot.col2 = V3Normalize(transfV1.rot.col2);
 
 		PersistentContact* manifoldContacts = PX_CP_TO_PCP(contactBuffer.contacts);
+		PxU8 anchors[PxContactBuffer::MAX_CONTACTS];
 		PxU32 numContacts = 0;
 	
-		if(doBoxBoxGenerateContacts(boxExtents0, boxExtents1, transfV0, transfV1, contactDist, manifoldContacts, numContacts)) 
+		if(doBoxBoxGenerateContacts(boxExtents0, boxExtents1, transfV0, transfV1, contactDist, manifoldContacts, anchors, numContacts)) 
 		{
 			if(numContacts > 0)
 			{
-				manifold.addBatchManifoldContacts(manifoldContacts, numContacts, toleranceLength);
+				manifold.addBatchManifoldContacts(manifoldContacts, numContacts, toleranceLength, anchors);
 				const Vec3V worldNormal = V3Normalize(transfV1.rotate(Vec3V_From_Vec4V(manifold.mContactPoints[0].mLocalNormalPen)));
 				manifold.addManifoldContactsToContactBuffer(contactBuffer, worldNormal, transfV1);
 #if	PCM_LOW_LEVEL_DEBUG
@@ -925,7 +1012,7 @@ bool Gu::pcmContactBoxBox(GU_CONTACT_METHOD_ARGS)
 					//transform the normal back to world space
 					const Vec3V worldNormal = V3Normalize(transf1.rotate(output.normal));
 
-					manifold.addManifoldContactsToContactBuffer(contactBuffer, worldNormal, transf1, contactDist);
+					manifold.addManifoldContactsToContactBuffer(contactBuffer, worldNormal, transf0, transf1, contactDist);
 
 #if	PCM_LOW_LEVEL_DEBUG
 					manifold.drawManifold(*renderOutput, transf0, transf1);
@@ -937,8 +1024,12 @@ bool Gu::pcmContactBoxBox(GU_CONTACT_METHOD_ARGS)
 	}
 	else if(manifold.getNumContacts() > 0)
 	{
+		if(manifold.hasAnchor(PCM_ANCHOR_CROSSING))
+		{
+			moveBoxBoxCrossings(manifold, aToB, boxExtents0, boxExtents1);
+		}
 		const Vec3V worldNormal = manifold.getWorldNormal(transf1);
-		manifold.addManifoldContactsToContactBuffer(contactBuffer, worldNormal, transf1, contactDist);
+		manifold.addManifoldContactsToContactBuffer(contactBuffer, worldNormal, transf0, transf1, contactDist);
 #if	PCM_LOW_LEVEL_DEBUG
 		manifold.drawManifold(*renderOutput, transf0, transf1);
 #endif

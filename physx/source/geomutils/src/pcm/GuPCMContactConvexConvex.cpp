@@ -36,15 +36,16 @@ static bool fullContactsGenerationConvexConvex(const GjkConvex* relativeConvex, 
 	SupportLocal* map1 = (idtScale1 ? static_cast<SupportLocal*>(PX_PLACEMENT_NEW(buff1, SupportLocalImpl<ConvexHullNoScaleV>)(static_cast<const ConvexHullNoScaleV&>(convexHull1), transf1, convexHull1.vertex2Shape, convexHull1.shape2Vertex, idtScale1)) : 
 		static_cast<SupportLocal*>(PX_PLACEMENT_NEW(buff1, SupportLocalImpl<ConvexHullV>)(convexHull1, transf1, convexHull1.vertex2Shape, convexHull1.shape2Vertex, idtScale1)));
 
+	PxU8 anchors[PxContactBuffer::MAX_CONTACTS];
 	PxU32 numContacts = 0;
 
-	if(generateFullContactManifold(polyData0, polyData1, map0, map1, manifoldContacts, numContacts, contactDist, normal, closestA, closestB, convexHull0.getMarginF(), 
+	if(generateFullContactManifold(polyData0, polyData1, map0, map1, manifoldContacts, anchors, numContacts, contactDist, normal, closestA, closestB, convexHull0.getMarginF(), 
 		convexHull1.getMarginF(), doOverlapTest, renderOutput, toleranceLength))
 	{
 		if(numContacts > 0)
 		{
 			//reduce contacts
-			manifold.addBatchManifoldContacts(manifoldContacts, numContacts, toleranceLength);
+			manifold.addBatchManifoldContacts(manifoldContacts, numContacts, toleranceLength, anchors);
 
 			const Vec3V worldNormal = manifold.getWorldNormal(transf1);
 
@@ -62,7 +63,7 @@ static bool fullContactsGenerationConvexConvex(const GjkConvex* relativeConvex, 
 			{
 				const Vec3V worldNormal = manifold.getWorldNormal(transf1);
 
-				manifold.addManifoldContactsToContactBuffer(contactBuffer, worldNormal, transf1, contactDist);
+				manifold.addManifoldContactsToContactBuffer(contactBuffer, worldNormal, transf0, transf1, contactDist);
 			}
 		}
 		return true;
@@ -110,7 +111,7 @@ static bool generateOrProcessContactsConvexConvex(	const GjkConvex* relativeConv
 			const Vec3V newLocalNor = V3Add(localNor, output.normal);
 			const Vec3V worldNormal = V3Normalize(transf1.rotate(newLocalNor));
 			//const Vec3V worldNormal = transf1.rotate(normal);
-			manifold.addManifoldContactsToContactBuffer(contactBuffer, worldNormal, transf1, contactDist);
+			manifold.addManifoldContactsToContactBuffer(contactBuffer, worldNormal, transf0, transf1, contactDist);
 			return true;
 		}
 	}
@@ -242,7 +243,7 @@ bool Gu::pcmContactConvexConvex(GU_CONTACT_METHOD_ARGS)
 	else if(manifold.getNumContacts()> 0)
 	{
 		const Vec3V worldNormal = manifold.getWorldNormal(transf1);
-		manifold.addManifoldContactsToContactBuffer(contactBuffer, worldNormal, transf1, contactDist);
+		manifold.addManifoldContactsToContactBuffer(contactBuffer, worldNormal, transf0, transf1, contactDist);
 #if	PCM_LOW_LEVEL_DEBUG
 		manifold.drawManifold(*renderOutput, transf0, transf1);
 #endif

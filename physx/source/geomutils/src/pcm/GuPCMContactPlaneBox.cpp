@@ -172,13 +172,15 @@ bool Gu::pcmContactPlaneBox(GU_CONTACT_METHOD_ARGS)
 		
 		//reduce contacts
 		manifold.addBatchManifoldContactsCluster(manifoldContacts, numContacts);
-		manifold.addManifoldContactsToContactBuffer(contactBuffer, negPlaneNormal, transf1, contactDist);
+		// Every point is a box corner on the plane.
+		manifold.setAllAnchors(PCM_ANCHOR_A);
+		manifold.addManifoldContactsToContactBuffer(contactBuffer, negPlaneNormal, transf0, transf1, contactDist);
 
 		return manifold.getNumContacts() > 0;
 	}
 	else
 	{
-		manifold.addManifoldContactsToContactBuffer(contactBuffer, negPlaneNormal, transf1, contactDist);
+		manifold.addManifoldContactsToContactBuffer(contactBuffer, negPlaneNormal, transf0, transf1, contactDist);
 		
 		//manifold.drawManifold(*gRenderOutPut, transf0, transf1);
 		return manifold.getNumContacts() > 0;

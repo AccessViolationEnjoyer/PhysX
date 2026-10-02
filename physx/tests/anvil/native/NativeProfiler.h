@@ -2,10 +2,60 @@
 #define ANVIL_NATIVE_PROFILER_H
 
 #include "foundation/PxProfiler.h"
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstring>
 #include <limits>
+#include <mutex>
+#include <utility>
+#include <vector>
+
+// CPU time and wall time (the union of the intervals) of one kind of zone that runs as parallel tasks.
+class ZoneIntervals
+{
+public:
+	void reset()
+	{
+		std::lock_guard<std::mutex> lock(mMutex);
+		mIntervals.clear();
+		mCpu = 0;
+	}
+
+	void add(uint64_t start, uint64_t end)
+	{
+		std::lock_guard<std::mutex> lock(mMutex);
+		mIntervals.push_back(std::make_pair(start, end));
+		mCpu += end - start;
+	}
+
+	double cpuMilliseconds() const
+	{
+		return double(mCpu) * 1e-6;
+	}
+
+	double wallMilliseconds()
+	{
+		std::lock_guard<std::mutex> lock(mMutex);
+		std::sort(mIntervals.begin(), mIntervals.end());
+		uint64_t total = 0, coveredTo = 0;
+		for(size_t i = 0; i < mIntervals.size(); ++i)
+		{
+			const uint64_t start = std::max(mIntervals[i].first, coveredTo);
+			if(mIntervals[i].second > start)
+			{
+				total += mIntervals[i].second - start;
+				coveredTo = mIntervals[i].second;
+			}
+		}
+		return double(total) * 1e-6;
+	}
+
+private:
+	std::mutex mMutex;
+	std::vector<std::pair<uint64_t, uint64_t> > mIntervals;
+	uint64_t mCpu = 0;
+};
 
 // Test-only observer for the SDK's existing profile zones. No event storage or
 // allocation is needed; simultaneous islands contribute to one wall-time span.
@@ -27,6 +77,8 @@ public:
 	std::atomic<int> rows;
 	std::atomic<int> factors, updates, lineEvaluations;
 	std::atomic<float> scaledGradient;
+	// Collision detection: narrow-phase tasks and broad-phase passes.
+	ZoneIntervals narrowPhase, broadPhase;
 
 	NativeSolverProfiler() { reset(); }
 
@@ -40,6 +92,19 @@ public:
 		minimumIterations = std::numeric_limits<int>::max();
 		maximumIterations = 0;
 		scaledGradient = 0.0f;
+		narrowPhase.reset();
+		broadPhase.reset();
+	}
+
+	static bool isNarrowPhase(const char* name)
+	{
+		return std::strcmp(name, "Sim.narrowPhase") == 0;
+	}
+
+	static bool isBroadPhase(const char* name)
+	{
+		return std::strcmp(name, "Basic.updateBroadPhase") == 0 || std::strcmp(name, "Basic.broadPhaseFirstPass") == 0 ||
+			std::strcmp(name, "Basic.broadPhaseSecondPass") == 0;
 	}
 
 	static uint64_t now()
@@ -51,7 +116,7 @@ public:
 	virtual void* zoneStart(const char* name, bool, uint64_t) PX_OVERRIDE
 	{
 		static const char prefix[] = "Dynamics.anvil";
-		if(std::strncmp(name, prefix, sizeof(prefix) - 1) != 0)
+		if(std::strncmp(name, prefix, sizeof(prefix) - 1) != 0 && !isNarrowPhase(name) && !isBroadPhase(name))
 		{
 			return NULL;
 		}
@@ -67,7 +132,15 @@ public:
 		const uint64_t end = now();
 		// 32-bit targets keep only the start time's low bits; zones are far shorter than 4 s.
 		const uint64_t start = end - uint64_t(uintptr_t(uintptr_t(end) - reinterpret_cast<uintptr_t>(data)));
-		if(std::strcmp(name, "Dynamics.anvilIsland") == 0)
+		if(isNarrowPhase(name))
+		{
+			narrowPhase.add(start, end);
+		}
+		else if(isBroadPhase(name))
+		{
+			broadPhase.add(start, end);
+		}
+		else if(std::strcmp(name, "Dynamics.anvilIsland") == 0)
 		{
 			uint64_t earliest = firstStart.load();
 			while(start < earliest && !firstStart.compare_exchange_weak(earliest, start))

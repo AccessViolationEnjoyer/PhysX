@@ -1940,7 +1940,47 @@ void DynamicsContext::updatePostKinematic(IG::SimpleIslandManager& simpleIslandM
 	PxsForceThresholdTask* forceThresholdTask = PX_PLACEMENT_NEW(getTaskPool().allocate(sizeof(PxsForceThresholdTask)), PxsForceThresholdTask)(*this);
 	forceThresholdTask->setContinuation(lostTouchTask);
 
-	const IG::IslandId*const islandIds = islandSim.getActiveIslands();
+	const IG::IslandId* islandIds = islandSim.getActiveIslands();
+	// Anvil solves an island of more than solverBatchMax bodies as a task of its own, and the step
+	// waits for the last to finish, so those should start first. The dispatcher's job queues are
+	// stacks, so the last task submitted starts first: smaller islands, batched together, go first
+	// in their own order, then the large ones by size (bodies plus contacts), the largest last.
+	// Equal sizes keep their order, so the order is deterministic.
+	if(mAnvilSolver && islandCount > 1)
+	{
+		mAnvilLargeIslands.clear();
+		for(PxU32 i = 0; i < islandCount; ++i)
+		{
+			const IG::Island& island = islandSim.getIsland(islandIds[i]);
+			const PxU32 bodies = island.mNodeCount[IG::Node::eRIGID_BODY_TYPE];
+			if(bodies > solverBatchMax)
+			{
+				const PxU32 size = bodies + island.mEdges.getCount(IG::Edge::eCONTACT_MANAGER);
+				mAnvilLargeIslands.pushBack((PxU64(size) << 32) | i);
+			}
+		}
+		const PxU32 largeCount = mAnvilLargeIslands.size();
+		// Nothing to move without a large island or with one that is already last.
+		if(largeCount > 1 || (largeCount == 1 && PxU32(mAnvilLargeIslands[0]) != islandCount - 1))
+		{
+			PxSort(mAnvilLargeIslands.begin(), largeCount);
+			mAnvilIslandOrder.resizeUninitialized(islandCount);
+			PxU32 next = 0;
+			for(PxU32 i = 0; i < islandCount; ++i)
+			{
+				if(islandSim.getIsland(islandIds[i]).mNodeCount[IG::Node::eRIGID_BODY_TYPE] <= solverBatchMax)
+				{
+					mAnvilIslandOrder[next++] = islandIds[i];
+				}
+			}
+			for(PxU32 i = 0; i < largeCount; ++i)
+			{
+				mAnvilIslandOrder[next++] = islandIds[PxU32(mAnvilLargeIslands[i])];
+			}
+			PX_ASSERT(next == islandCount);
+			islandIds = mAnvilIslandOrder.begin();
+		}
+	}
 
 	PxU32 currentIsland = 0;
 	PxU32 currentBodyIndex = 0;

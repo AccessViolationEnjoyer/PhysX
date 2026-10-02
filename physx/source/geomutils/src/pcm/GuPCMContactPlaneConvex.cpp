@@ -193,9 +193,11 @@ bool Gu::pcmContactPlaneConvex(GU_CONTACT_METHOD_ARGS)
 		//manifold.addBatchManifoldContactsCluster(manifoldContacts, numContacts);
 
 		manifold.addBatchManifoldContacts(manifoldContacts, numContacts, toleranceLength);
+		// Every point is a hull vertex on the plane.
+		manifold.setAllAnchors(PCM_ANCHOR_A);
 	}
-	
-	manifold.addManifoldContactsToContactBuffer(contactBuffer, negPlaneNormal, transf1, contactDist);
+
+	manifold.addManifoldContactsToContactBuffer(contactBuffer, negPlaneNormal, transf0, transf1, contactDist);
 #if	PCM_LOW_LEVEL_DEBUG
 	manifold.drawManifold(*renderOutput, transf0, transf1);
 #endif

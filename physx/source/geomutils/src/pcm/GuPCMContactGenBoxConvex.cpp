@@ -305,8 +305,9 @@ static bool testEdgeNormal(const PolygonalData& polyData0, const PolygonalData& 
 }
 
 //contactNormal is in the space of polyData0
+//The incident polygon's shape is A here and the reference polygon's B; anchors receives each point's PCMContactAnchor in that order.
 static void generatedContacts(const PolygonalData& polyData0, const PolygonalData& polyData1, const HullPolygonData& referencePolygon, const HullPolygonData& incidentPolygon,
-	const SupportLocal* map0, const SupportLocal* map1, const PxMatTransformV& transform0To1, PersistentContact* manifoldContacts, 
+	const SupportLocal* map0, const SupportLocal* map1, const PxMatTransformV& transform0To1, PersistentContact* manifoldContacts, PxU8* anchors,
 	PxU32& numContacts, const FloatVArg contactDist, PxRenderOutput* renderOutput)
 {
 	PX_UNUSED(renderOutput);
@@ -389,6 +390,7 @@ static void generatedContacts(const PolygonalData& polyData0, const PolygonalDat
 				const Vec4V localNormalPen = V4SetW(Vec4V_From_Vec3V(contactNormal), points1In0TValue[i]);
 				manifoldContacts[numContacts].mLocalPointA = vert1;
 				manifoldContacts[numContacts].mLocalPointB = M33TrnspsMulV3(rot, points1In0[i]);
+				anchors[numContacts] = PCM_ANCHOR_A;
 				manifoldContacts[numContacts++].mLocalNormalPen = localNormalPen;
 			}
 		}
@@ -435,6 +437,7 @@ static void generatedContacts(const PolygonalData& polyData0, const PolygonalDat
 
 			manifoldContacts[numContacts].mLocalPointA = projPoint;
 			manifoldContacts[numContacts].mLocalPointB = vert0;
+			anchors[numContacts] = PCM_ANCHOR_B;
 			manifoldContacts[numContacts++].mLocalNormalPen = localNormalPen;
 		}
 	}
@@ -499,6 +502,7 @@ static void generatedContacts(const PolygonalData& polyData0, const PolygonalDat
 					const Vec4V localNormalPen = V4SetW(Vec4V_From_Vec3V(contactNormal), pen);
 					manifoldContacts[numContacts].mLocalPointA = pB;
 					manifoldContacts[numContacts].mLocalPointB = pA;
+					anchors[numContacts] = PCM_ANCHOR_MIDPOINT;
 					manifoldContacts[numContacts++].mLocalNormalPen = localNormalPen;
 				}
 			}
@@ -506,7 +510,7 @@ static void generatedContacts(const PolygonalData& polyData0, const PolygonalDat
 	}
 }
 
-bool Gu::generateFullContactManifold(const PolygonalData& polyData0, const PolygonalData& polyData1, const SupportLocal* map0, const SupportLocal* map1, PersistentContact* manifoldContacts, PxU32& numContacts,
+bool Gu::generateFullContactManifold(const PolygonalData& polyData0, const PolygonalData& polyData1, const SupportLocal* map0, const SupportLocal* map1, PersistentContact* manifoldContacts, PxU8* anchors, PxU32& numContacts,
 	const FloatVArg contactDist, const Vec3VArg normal, const Vec3VArg closestA, const Vec3VArg closestB, PxReal marginA, PxReal marginB, bool doOverlapTest, 
 	PxRenderOutput* renderOutput, PxReal toleranceLength)
 {
@@ -550,7 +554,7 @@ EdgeTest:
 			const Vec3V n = transform0To1V.rotate(minNormal);
 			const HullPolygonData& incidentPolygon = polyData1.mPolygons[getPolygonIndex(polyData1, map1, n)];
 				
-			generatedContacts(polyData0, polyData1, referencePolygon, incidentPolygon, map0, map1, transform0To1V, manifoldContacts, numContacts, contactDist, renderOutput);
+			generatedContacts(polyData0, polyData1, referencePolygon, incidentPolygon, map0, map1, transform0To1V, manifoldContacts, anchors, numContacts, contactDist, renderOutput);
 				
 			if (numContacts > 0)
 			{
@@ -561,6 +565,7 @@ EdgeTest:
 					const Vec3V localPointB = manifoldContacts[i].mLocalPointB;
 					manifoldContacts[i].mLocalPointB = manifoldContacts[i].mLocalPointA;
 					manifoldContacts[i].mLocalPointA = localPointB;
+					anchors[i] = PxU8(anchors[i] < PCM_ANCHOR_MIDPOINT ? PCM_ANCHOR_A - anchors[i] : anchors[i]);
 					manifoldContacts[i].mLocalNormalPen = V4SetW(nn, V4GetW(manifoldContacts[i].mLocalNormalPen));
 				}
 			}
@@ -572,7 +577,7 @@ EdgeTest:
 			const HullPolygonData& incidentPolygon = polyData0.mPolygons[getPolygonIndex(polyData0, map0, transform1To0V.rotate(minNormal))];
 				
 			//reference face is polyData1
-			generatedContacts(polyData1, polyData0, referencePolygon, incidentPolygon, map1, map0, transform1To0V, manifoldContacts, numContacts, contactDist, renderOutput);
+			generatedContacts(polyData1, polyData0, referencePolygon, incidentPolygon, map1, map0, transform1To0V, manifoldContacts, anchors, numContacts, contactDist, renderOutput);
 
 		}
 		else //if(status == EDGE0)
@@ -581,7 +586,7 @@ EdgeTest:
 			
 			const HullPolygonData& incidentPolygon = polyData0.mPolygons[getPolygonIndex(polyData0, map0, V3Neg(minNormal))];
 			const HullPolygonData& referencePolygon = polyData1.mPolygons[getPolygonIndex(polyData1, map1, transform0To1V.rotate(minNormal))];
-			generatedContacts(polyData1, polyData0, referencePolygon, incidentPolygon, map1, map0, transform1To0V, manifoldContacts, numContacts, contactDist, renderOutput);
+			generatedContacts(polyData1, polyData0, referencePolygon, incidentPolygon, map1, map0, transform1To0V, manifoldContacts, anchors, numContacts, contactDist, renderOutput);
 		}
 
 		if(numContacts == 0 && !doEdgeTest)
@@ -615,11 +620,11 @@ EdgeTest:
 
 		if (FAllGrtrOrEq(referenceProject, incidentProject))
 		{
-			generatedContacts(polyData1, polyData0, referencePolygon, incidentPolygon, map1, map0, transform1To0V, manifoldContacts, numContacts, contactDist, renderOutput);
+			generatedContacts(polyData1, polyData0, referencePolygon, incidentPolygon, map1, map0, transform1To0V, manifoldContacts, anchors, numContacts, contactDist, renderOutput);
 		}
 		else
 		{
-			generatedContacts(polyData0, polyData1, incidentPolygon, referencePolygon, map0, map1, transform0To1V, manifoldContacts, numContacts, contactDist, renderOutput);
+			generatedContacts(polyData0, polyData1, incidentPolygon, referencePolygon, map0, map1, transform0To1V, manifoldContacts, anchors, numContacts, contactDist, renderOutput);
 
 			if (numContacts > 0)
 			{
@@ -632,6 +637,7 @@ EdgeTest:
 					const Vec3V localPointB = manifoldContacts[i].mLocalPointB;
 					manifoldContacts[i].mLocalPointB = manifoldContacts[i].mLocalPointA;
 					manifoldContacts[i].mLocalPointA = localPointB;
+					anchors[i] = PxU8(anchors[i] < PCM_ANCHOR_MIDPOINT ? PCM_ANCHOR_A - anchors[i] : anchors[i]);
 					manifoldContacts[i].mLocalNormalPen = V4SetW(nn, V4GetW(manifoldContacts[i].mLocalNormalPen));
 				}
 			}

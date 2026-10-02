@@ -213,6 +213,10 @@ protected:
 private:
 	const bool	mSolveFrictionEveryIteration;
 	AnvilSolver* mAnvilSolver;
+	// The step's island order when Anvil moves large islands to the front (updatePostKinematic);
+	// it lives until the step's tasks have read it.
+	PxArray<PxU64> mAnvilLargeIslands;
+	PxArray<IG::IslandId> mAnvilIslandOrder;
 
 	protected:
 

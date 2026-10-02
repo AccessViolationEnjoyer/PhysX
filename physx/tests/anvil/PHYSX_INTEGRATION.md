@@ -27,6 +27,81 @@ stays convex without MuJoCo's pyramidal coupling of normal and tangential veloci
 contacts do not separate. The lag is one step: a contact's friction limit follows a change of
 its load in the next step. The tangent basis follows the contact's initial slip direction.
 
+A point of a sliding pair aligns its tangent rows with its slip `s`, its velocity relative to
+the surface's target velocity at the start of the step. Coulomb friction keeps magnitude
+`mu N0` and turns with the slip, so a velocity `v` across the slip turns it by `v / |s|`. The row
+across the slip therefore has compliance `|s| / (mu N0)`, or the row compliance where that is
+smaller, as inside the friction limit; both rows keep the `+/- mu N0` bound. As the slip
+vanishes the rows become sticking's two rows, with no threshold between the cases. Two stiff
+rows let the row across the slip hold while the other slides: a case straddling belts at 0.6
+and 0.4 m/s then did not turn at all. A single row along the slip turned it, but with nothing
+across the slip the lagged direction overshot every step when the slip was small against the
+step's friction impulse. At 0.505/0.495 m/s the yaw rate then flipped sign each step. With the
+compliant cross row the case turns at the Coulomb rate for its contact points at both speed
+differences (ratio 1.0026 and 0.9997, `BehaviourTests split_conveyors`). On wasm the pallet
+fall phase was 12% faster on the mean (4 repeats); belt, case, tote and pile-drop scenes were
+unchanged in behaviour and within noise in time.
+
+A sticking pair accumulates its slip, the tangential displacement at the contact centre, and its
+friction rows correct it with twice the penetration stiffness, so a held load stays put. The
+slip used to relax over 1 s, which let every held load creep at the slip that holds it divided
+by that time: the PEEL card house sank 0.03 mm/s and a 150 N grip slipped 0.007 mm/s. The slip
+no longer relaxes (card house 0.004 mm in 9 s, grip 0.0008 mm/s, near its limit 0.0005 instead of
+0.017). Without relaxation, slip outlived its surfaces in collapsing hull piles: a hull that
+tipped onto another face kept the slip of the face it left, and ten PEEL convex pile sizes took
+9% longer on wasm. The slip now lapses when the contact normal, fixed in body 0's frame while the
+pair sticks, turns far enough that body 0's material at the contact has moved by more than the
+1 mm slip limit; the ten piles then take 4% less than with relaxation. Box scenes are unchanged
+or faster (wasm platform -10%, pile 125 -10%, pallet and pile 1000 within noise); totes measured
++4% and -4% in separate runs. Four times the slip stiffness made the pallet five times slower.
+
+PCM reuses a persistent box or hull manifold until the shapes have moved 0.375 times the
+margin (15% of the smallest box half-extent), and PhysX placed reused points at their witness on
+the second shape. On a static belt those trailed a sliding case by up to that distance. In the
+split-belt test that drifted the case 2 mm in 4 s, dipped its speed 7.5% where its corners cross
+the seam, and after 10 s, 5 mm off the seam, locked it onto the slow belt. Drift toward the slow
+belt shifts load onto it, and once the case has turned to 45 degrees, Coulomb friction can hold
+it there: a static check at the locked state needs 97-99.8% of each point's friction limit.
+
+Box-box, box-convex and convex-convex clipping, and plane-box and plane-convex, therefore record
+which shape owns each point (`PCMContactAnchor`, two bits per point in `mAnchors`, which fills
+padding, so manifolds keep their size). A vertex inside the other shape's face belongs to its
+shape; an edge crossing belongs to neither. `refreshContactPoints` moves the B witness of a point
+owned by A onto A's witness projected on B's surface, which it already computes, so those points
+cost nothing extra. Their drift is then a step's, and the manifold's relative-motion
+invalidation, which acts before the drift limit, decides when they are regenerated. Points from
+GJK's incremental path keep B's witness. A first version placed anchored points in the output
+from both transforms. It cost tote 6%, 42,000 contacts each paying two quaternion transforms
+per step.
+
+Edge crossings move with neither shape. Box-box tags those clipped against a side of the
+reference face `PCM_ANCHOR_CROSSING`; points clipped at the contact distance lie on B's edge and
+keep B's witness. On reuse, `moveBoxBoxCrossings` moves both witnesses to where the two edges
+cross now, seen along the point's normal, and updates the distance. A point on a box edge sits
+at the extent on two axes, so the edge runs along the third and needs no storage. The edge is
+taken from the two axes across the normal: at a corner every axis is at its extent, and choosing
+a side's edge there, nearly parallel to the other box's edge as seen along the normal, moved the
+crossing up that side and reported points centimetres apart; a pallet box whose edge overhung its
+slipsheet by 60 um lost its edge's support that way and sank 52 um for 25 s. A crossing
+that would leave either edge segment, as near-parallel edges of aligned boxes give, keeps its
+witnesses until regeneration (moving it anyway blew up stacked cubes). Hull pairs report
+crossings halfway between the witnesses (`PCM_ANCHOR_MIDPOINT`): exact placement there would need
+the edges' hull indices, 16 more bytes per manifold.
+
+Split belts, 0.6/0.4 m/s, 4 s:
+
+| Contacts | Drift | Speed dip at the seam | Yaw / Coulomb |
+|---|---|---|---|
+| PhysX PCM | 2.0 mm | 7.5% | 1.0026 |
+| Anchored, crossings halfway | 0.44 mm | 2.6% | 1.0017 |
+| Anchored, box crossings exact | 0.0017 mm | 0.05% | 1.0009 |
+| Regenerated every step | 0.0008 mm | 0.01% | 1.0009 |
+
+Over 20 s the exact version drifts 0.25 mm through three seam crossings without locking. Wasm,
+against PhysX PCM: pile drop -7%, 5x5x5 pile -4%, case -3%, pallet belt -4% and overall -2%,
+tote within noise; the pallet fall phase is 4-5% slower on the mean and 9-10% on p95, which the
+anchoring without exact crossings does not show.
+
 `anvilRegularization` maps to impedance `d = 1 / (1 + regularization)`. With
 `timeConstant = max(0.02, 2 timestep)`, the reference coefficients are
 `B = 2 / (d timeConstant)` and `K = 1 / (d^2 timeConstant^2)`. Row compliance is
@@ -46,6 +121,27 @@ freeSpeed - initialSpeed + timestep *
 ```
 
 The shape's contact offset slop is not applied to Anvil rows.
+
+A bouncing normal row (positive restitution, approach faster than the bounce threshold, and
+closing within the step) instead targets the rebound speed directly: its free term is
+`freeSpeed - targetSpeed`, with `targetSpeed` the restitution times the approach speed. The
+relaxed form above loses part of the rebound at small timesteps. Its position term also adds
+the depth at which the step finds the impact (without speculative contacts) or subtracts the
+remaining gap (with them). At 10 ms the old form rebounded at 0.62/0.92 of the impact speed for
+restitution 0.5/0.8 without speculative contacts, and at 0.37/0.67 with them. It now rebounds at
+0.50/0.80 both ways (`BehaviourTests bouncing_balls`). PGS does the same: it drops the bias from
+bouncing points.
+
+A separated point that does not bounce pushes only to keep the step from carrying it through the
+surface: its target is `targetSpeed - gap / timestep`, as PGS's speculative contacts. The spring
+and damper act once the surfaces touch. The relaxed form used before damped a separated point's
+approach too, slowing a body before it collided: a 64-sided hull rolling down a 5 degree ramp
+reached 0.10 m/s in 1 s at any timestep, its next corner always within the contact offset, where a
+rigid hull reaches 0.49 m/s; it now reaches 0.28 m/s at 10 ms and 0.42 m/s at 1 ms, as PGS does
+(`BehaviourTests rolling`). On the wasm 125-box pile with a layer dropped every 0.2 s the mean step
+is 2-4% slower, p95 4% and the worst step 13% faster, p99 22% slower (landings now arrive in one
+step at full speed; an earlier solver measured +73% on p99). The pallet fall-off is faster (native
+p95 2.5 -> 1.6 ms). A ball landing with speculative CCD penetrates 15-20 um instead of 4 um.
 
 Contact points whose gap cannot close within the step are left out of the problem: a point is
 kept within 1 mm of its rest distance, or when its approach over the step (which already holds
@@ -85,7 +181,20 @@ PhysX task. Islands smaller than 32 bodies share one task chain, up to 32 bodies
 scattered resting objects do not each dispatch three tasks; every island in a batch is still
 prepared, factored and solved separately, with results identical to unbatched tasks. A batch
 task holds one solver workspace for all of its islands and groups the batch's constraint
-descriptors by island once, so small islands share no lock or counter between workers. Large Cholesky factors parallelize independent trailing block updates with up to eight
+descriptors by island once, so small islands share no lock or counter between workers.
+
+Islands of more than 32 bodies, each a task of its own, are submitted after the small islands'
+batches, ordered by bodies plus contacts with the largest last (`updatePostKinematic`). The
+dispatcher's job queues are stacks (`PxSList`), so the last task submitted starts first, and a
+large island that started behind the small ones would hold up the step while other threads idle.
+In `tools/islands/MixedIslands.cpp` (a 294-box pile below the parallel-phase threshold, layers
+dropped every 0.2 s, beside 8,000 single boxes), a pile listed before the singles took the step
+from 5.0 to 5.6 ms; with the ordering both arrangements take 5.0-5.1 ms. Putting large islands
+first instead made the step up to 16% slower. Results are bit-identical; tote, case and pallet
+timings are unchanged within noise. The order costs one pass over the islands' node counts per
+step, and a copy only when a large island is not already last.
+
+Large Cholesky factors parallelize independent trailing block updates with up to eight
 workers from PhysX's CPU dispatcher. Pivots are grouped into panels of up to 16 (or 8,192 block
 updates): a panel factors its own columns in order, then applies its updates to all later columns
 in one parallel region, one task per target column, so a factor synchronizes once per panel rather
@@ -272,8 +381,10 @@ Friction uses static friction while a contact sticks and changes to dynamic fric
 next step once every loaded point of the pair reaches its friction limit: for scalar friction
 rows, one row at its bound; three-row blocks compare each tangent impulse with friction times the
 normal impulse. A slip-speed threshold is not used: soft friction lets a holding contact creep in
-proportion to its load, so such a threshold failed at large scales. The two bounded tangent rows
-form a square friction limit aligned with the initial slip direction, not a circle.
+proportion to its load, so such a threshold failed at large scales. While a pair sticks, its
+two bounded tangent rows form a square friction limit aligned with the initial slip direction,
+not a circle; sliding points align the rows with the slip and soften the row across it (see
+Equations).
 
 An explicitly capped contact point currently retains its exact normal cap and omits friction.
 Native negative-restitution compliant contacts use their existing implicit scalar normal row.

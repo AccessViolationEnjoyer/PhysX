@@ -48,6 +48,19 @@ extern const PxF32 invalidateQuatThresholds2[3];
 
 aos::Mat33V findRotationMatrixFromZAxis(const aos::Vec3VArg to);
 
+// Where a reused manifold point is reported. A point keeps a witness on each shape; once the
+// shapes slide, only the witness of the shape that owns the contact feature (a vertex inside
+// the other's face) is still at the contact, and an edge crossing moves with neither, so it is
+// reported halfway. Points of unknown origin keep B's witness. The generator itself moves a
+// crossing's witnesses to where the edges cross now when it knows the edges' directions.
+enum PCMContactAnchor
+{
+	PCM_ANCHOR_B = 0,
+	PCM_ANCHOR_A = 1,
+	PCM_ANCHOR_MIDPOINT = 2,
+	PCM_ANCHOR_CROSSING = 3
+};
+
 //This contact is used in the primitives vs primitives contact gen
 class PersistentContact
 {
@@ -122,7 +135,7 @@ class PersistentContactManifold
 {
 public:
 
-	PersistentContactManifold(PersistentContact* contactPointsBuff, PxU8 capacity): mNumContacts(0), mCapacity(capacity), mNumWarmStartPoints(0), mContactPoints(contactPointsBuff)
+	PersistentContactManifold(PersistentContact* contactPointsBuff, PxU8 capacity): mNumContacts(0), mCapacity(capacity), mNumWarmStartPoints(0), mAnchors(0), mContactPoints(contactPointsBuff)
 	{
 		using namespace physx::aos;
 		mRelativeTransform.invalidate();
@@ -232,10 +245,34 @@ public:
 		return BAllEqTTTT(con);
 	}
 
+	PX_FORCE_INLINE PxU32 getAnchor(PxU32 index) const { return (PxU32(mAnchors) >> (2 * index)) & 3; }
+
+	// Nonzero when a point has the given two-bit anchor (any anchor but B).
+	PX_FORCE_INLINE PxU32 hasAnchor(PxU32 anchor) const
+	{
+		const PxU32 bits = PxU32(mAnchors);
+		const PxU32 high = anchor & 2 ? bits & 0xAA : (~bits & 0xAA);
+		const PxU32 low = anchor & 1 ? bits & 0x55 : (~bits & 0x55);
+		return high & (low << 1);
+	}
+
+	PX_FORCE_INLINE void setAnchor(PxU32 index, PxU32 anchor)
+	{
+		mAnchors = PxU8((PxU32(mAnchors) & ~(3u << (2 * index))) | (anchor << (2 * index)));
+	}
+
+	// Every current point gets the anchor; the bits of unused points stay clear.
+	PX_FORCE_INLINE void setAllAnchors(PxU32 anchor)
+	{
+		mAnchors = PxU8((anchor * 0x55u) & ((1u << (2 * mNumContacts)) - 1));
+	}
+
 	PX_FORCE_INLINE void removeContactPoint(PxU32 index)
 	{
 		mNumContacts--;
 		mContactPoints[index] = mContactPoints[mNumContacts];
+		setAnchor(index, getAnchor(mNumContacts));
+		setAnchor(mNumContacts, PCM_ANCHOR_B);
 	}
     
 	/*bool validContactDistance(const PersistentContact& pt, const aos::FloatVArg breakingThreshold) const
@@ -249,6 +286,7 @@ public:
 	{
 		mNumWarmStartPoints = 0;
 		mNumContacts = 0;
+		mAnchors = 0;
 		mRelativeTransform.invalidate();
 	}
 
@@ -270,14 +308,15 @@ public:
 	//This function is used in the capsule full manifold contact genenation(maximum 2 points). 
 	void addBatchManifoldContacts2(const PersistentContact* manifoldPoints, PxU32 numPoints);//max two points of contacts             
 	
-	//This function is used in the box/convexhull full manifold contact generation(maximum 4 points). 
-	void addBatchManifoldContacts(const PersistentContact* manifoldPoints, PxU32 numPoints, PxReal toleranceLength);
+	//This function is used in the box/convexhull full manifold contact generation(maximum 4 points).
+	//anchors, when given, holds each point's PCMContactAnchor.
+	void addBatchManifoldContacts(const PersistentContact* manifoldPoints, PxU32 numPoints, PxReal toleranceLength, const PxU8* anchors = NULL);
 	//This function is using the cluster algorithm to reduce contacts
 	void reduceBatchContactsCluster(const PersistentContact* manifoldPoints, PxU32 numPoints);
 	//This function is called by addBatchManifoldContacts2 to reduce the manifold contacts to 2 points;
 	void reduceBatchContacts2(const PersistentContact* manifoldPoints, PxU32 numPoints);
 	//This function is called by addBatchManifoldContacts to reduce the manifold contacts to 4 points
-	void reduceBatchContacts(const PersistentContact* manifoldPoints, PxU32 numPoints, PxReal toleranceLength);
+	void reduceBatchContacts(const PersistentContact* manifoldPoints, PxU32 numPoints, PxReal toleranceLength, const PxU8* anchors = NULL);
 
 	//This function is used for incremental manifold contact reduction for box/convexhull
 	PxU32 reduceContactsForPCM(const aos::Vec3VArg localPointA, const aos::Vec3VArg localPointB, const aos::Vec4VArg localNormalPen);
@@ -291,6 +330,8 @@ public:
 	void addManifoldContactsToContactBuffer(PxContactBuffer& contactBuffer, const aos::Vec3VArg normal, const aos::PxMatTransformV& transf1);
 	//This function is for adding box/convexhull manifold contacts to the contact buffer
 	void addManifoldContactsToContactBuffer(PxContactBuffer& contactBuffer, const aos::Vec3VArg normal, const aos::PxTransformV& transf1, const aos::FloatVArg contactOffset);
+	//As above, placing anchored points at their owner's witness (see PCMContactAnchor); for reused points, after refreshContactPoints
+	void addManifoldContactsToContactBuffer(PxContactBuffer& contactBuffer, const aos::Vec3VArg normal, const aos::PxTransformV& transf0, const aos::PxTransformV& transf1, const aos::FloatVArg contactOffset);
 	//This function is for adding sphere/capsule manifold contacts to the contact buffer
 	void addManifoldContactsToContactBuffer(PxContactBuffer& contactBuffer, const aos::Vec3VArg normal, const aos::Vec3VArg projectionNormal, const aos::PxTransformV& transf0, const aos::FloatVArg radius, const aos::FloatVArg contactOffset);
 
@@ -318,9 +359,13 @@ public:
 	PxU8 mCapacity;
 	PxU8 mNumWarmStartPoints;
 	PxU8 mAIndice[4];
-	PxU8 mBIndice[4]; 
+	PxU8 mBIndice[4];
+	PxU8 mAnchors; // two bits per point, a PCMContactAnchor; fills padding before the pointer
 	PersistentContact* mContactPoints;
 } PX_ALIGN_SUFFIX(16);
+
+// The cache stream copies manifolds every step; mAnchors must not grow them.
+PX_COMPILE_TIME_ASSERT(sizeof(PersistentContactManifold) == (sizeof(void*) == 8 ? 96 : 80));
 
 PX_ALIGN_PREFIX(16)
 class LargePersistentContactManifold : public PersistentContactManifold
@@ -727,10 +772,16 @@ PX_FORCE_INLINE void PersistentContactManifold::refreshContactPoints(const aos::
 		if(BAllEqTTTT(con))
 		{
 			removeContactPoint(i-1);
-		} 
+		}
 		else
 		{
 			manifoldPoint.mLocalNormalPen = V4SetW(Vec4V_From_Vec3V(localNormal), dist);
+			// A point anchored to A follows A's witness across B's surface. Its drift is then a step's,
+			// so the manifold's relative-motion invalidation decides when it is regenerated.
+			if(getAnchor(i-1) == PCM_ANCHOR_A)
+			{
+				manifoldPoint.mLocalPointB = projectedPoint;
+			}
 		}
 	}
 }

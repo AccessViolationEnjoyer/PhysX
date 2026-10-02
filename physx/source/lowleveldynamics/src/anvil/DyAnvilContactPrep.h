@@ -100,19 +100,22 @@ struct AnvilContactPoint
 // normalImpulse is the pair's total normal impulse in the last step. Friction is lagged: the
 // next step bounds each point's friction rows by the friction coefficient times its share, so
 // friction does not depend on the step's normal rows and sliding contacts do not separate.
+// normal0 is the contact normal in body 0's frame when the slip began; the slip lapses when the
+// normal turns far enough in that frame that the contact has moved to other surfaces.
 struct AnvilFrictionState
 {
 	PxReal slip[3];
 	PxReal twist;
 	PxReal normalImpulse;
+	PxReal normal0[3];
 };
 
 static const PxReal ANVIL_SLIDING_TWIST = PX_MAX_F32;
-// Seconds over which accumulated slip relaxes, and the slip correction's stiffness relative to
-// penetration's. A held load keeps creeping at a rate that falls with both; slip left by a
-// transient locks tangential forces into stacks for about the relaxation time, and a stiffer
-// correction holds them harder, so both also raise the solver's work on stacks.
-static const PxReal ANVIL_SLIP_RELAXATION_TIME = 1.0f;
+// The slip correction's stiffness relative to penetration's. Accumulated slip does not relax:
+// relaxing it let every held load creep (a card house by 0.03 mm/s, a 150 N grip by 0.007 mm/s
+// with a 1 s relaxation). Slip that outlives its surfaces, kept by a hull that tipped onto
+// another face, slowed collapsing piles instead; it lapses with the normal's turn. Four times
+// this stiffness made the pallet five times slower.
 static const double ANVIL_SLIP_STIFFNESS = 2.0;
 // Normal rows of contacts with friction use this fraction of the contact regularization, so
 // their friction rows are eight times softer, as the four-edge pyramid used before had at
