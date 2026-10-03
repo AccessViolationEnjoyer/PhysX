@@ -49,7 +49,8 @@ bool Gu::pcmContactPlaneConvex(GU_CONTACT_METHOD_ARGS)
 	const PxU32 newContacts = manifold.mNumContacts;
 	const bool bLostContacts = (newContacts != initialContacts);//((initialContacts == 0) || (newContacts != initialContacts));
 
-	if(bLostContacts || manifold.invalidate_PrimitivesPlane(curTransf, convexMargin, FLoad(0.2f)))
+	if(bLostContacts || manifold.invalidate_PrimitivesPlane(curTransf, convexMargin, FLoad(0.2f)) ||
+		manifold.movedByContactDistance(curTransf, CalculateConvexReach(hullData, vScale), FMax(), params))
 	{
 		const PxMatTransformV aToB(curTransf);
 		const QuatV vQuat = QuatVLoadU(&shapeConvex.scale.rotation.x);
@@ -62,6 +63,8 @@ bool Gu::pcmContactPlaneConvex(GU_CONTACT_METHOD_ARGS)
 
 		manifold.mNumContacts = 0;
 		manifold.setRelativeTransform(curTransf);
+		manifold.setGenerationDistance(params.mContactDistance);
+		manifold.setSeparation(V3UnitX(), FLoad(params.mContactDistance));
 		const PxVec3* PX_RESTRICT verts = hullData->getHullVertices();
 
 		const PxU32 nbPolygons = hullData->mNbPolygons;

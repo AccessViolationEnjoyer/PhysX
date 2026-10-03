@@ -29,11 +29,22 @@ class IncrementalCholesky
 public:
 	IncrementalCholesky() : m_size(0), m_profile(false), m_updateInverseCurrent(false), m_dense(false) {}
 	const Curvature& currentWeights() const { return m_weights; }
+	BlockFactor& factor() { return m_double ? static_cast<BlockFactor&>(m_doubleFactor) : static_cast<BlockFactor&>(m_floatFactor); }
+	const BlockFactor& factor() const { return m_double ? static_cast<const BlockFactor&>(m_doubleFactor) : static_cast<const BlockFactor&>(m_floatFactor); }
 
 	// keepOrdering: the problem has the bodies of this workspace's last solve, so a changed sparse
 	// pattern keeps their ordering and only the pattern is analyzed (see Settings::keepOrdering).
-	void beginSolve(bool profile, bool continuation, bool keepOrdering, ParallelExecutor* parallelExecutor)
+	// doublePrecision selects the double-precision block factor (Settings::doublePrecisionFactor).
+	void beginSolve(bool profile, bool continuation, bool keepOrdering, bool doublePrecision, ParallelExecutor* parallelExecutor)
 	{
+		// The other precision's factor holds no analysis of this pattern.
+		if(doublePrecision != m_double)
+		{
+			m_double = doublePrecision;
+			m_size = 0;
+			m_pairs.clear();
+			m_orderingKept = false;
+		}
 		// Ordinary solves rebuild numerics. Explicit same-prepared-problem
 		// continuation compares fresh curvature against this factor's m_weights.
 		if(!continuation)
@@ -52,11 +63,11 @@ public:
 		m_profile = profile;
 		m_keepOrdering = keepOrdering;
 		m_parallelExecutor = parallelExecutor;
-		m_factor.setParallelExecutor(parallelExecutor);
+		factor().setParallelExecutor(parallelExecutor);
 	}
 
 	// Whether a refactorization is costly enough to take steps on the retained factor instead.
-	bool retainedStepSized() const { return m_size != 0 && !m_dense && m_factor.retainedStepSized(); }
+	bool retainedStepSized() const { return m_size != 0 && !m_dense && factor().retainedStepSized(); }
 
 	// changedRows optionally lists every diagonal row whose weight differs from
 	// m_weights; otherwise the complete diagonal is compared.
@@ -71,7 +82,7 @@ public:
 		}
 		// Bilateral curvature is constant within a solve. Its existing factor
 		// can be reused without scanning weights or estimating update costs.
-		if(problem.equalityRows == problem.rowCount())
+		if(problem.equalityRows + problem.unboundedScalarRows == problem.rowCount())
 		{
 			++result.reusedFactors;
 			return true;
@@ -171,7 +182,7 @@ public:
 		// whatever this machine has, so the choice and the rounding it implies are the same on
 		// every machine.
 		double refactorWork = m_factorWork + problem.rebuildWorkEstimate();
-		if(m_factor.parallelSized())
+		if(factor().parallelSized())
 		{
 			refactorWork -= m_factorWork * double(PARALLEL_FACTOR_WORKERS - 1) / PARALLEL_FACTOR_WORKERS;
 		}
@@ -230,18 +241,18 @@ public:
 		}
 		else
 		{
-			const bool blockInverseCurrent = m_factor.hasCurrentBlocks();
-			m_factor.beginScalarUpdates();
+			const bool blockInverseCurrent = factor().hasCurrentBlocks();
+			factor().beginScalarUpdates();
 			if(!m_updateInverseCurrent)
 			{
 				if(blockInverseCurrent)
 				{
 					m_updateInverseDiagonal.resize(m_size);
-					m_factor.swapInverseDiagonal(m_updateInverseDiagonal);
+					factor().swapInverseDiagonal(m_updateInverseDiagonal);
 				}
 				else
 				{
-					const Sparse& lower = m_factor.m_matrix;
+					const Sparse& lower = factor().m_matrix;
 					const int* outer = lower.outerIndexPtr();
 					const double* values = lower.valuePtr();
 					m_updateInverseDiagonal.resize(m_size);
@@ -343,9 +354,9 @@ public:
 		{
 			solution[m_permutation[row]] = -gradient[row];
 		}
-		if(m_factor.hasCurrentBlocks())
+		if(factor().hasCurrentBlocks())
 		{
-			m_factor.solveBlocks(solution.data());
+			factor().solveBlocks(solution.data());
 		}
 		else
 		{
@@ -393,7 +404,7 @@ private:
 
 	void solveForwardBlocks(double* solution) const
 	{
-		const Sparse& lower = m_factor.m_matrix;
+		const Sparse& lower = factor().m_matrix;
 		const int* outer = lower.outerIndexPtr();
 		const int* inner = lower.innerIndexPtr();
 		const double* values = lower.valuePtr();
@@ -479,7 +490,7 @@ private:
 
 	void solveBackwardPackets(double* solution) const
 	{
-		const Sparse& lower = m_factor.m_matrix;
+		const Sparse& lower = factor().m_matrix;
 		const int* outer = lower.outerIndexPtr();
 		const int* inner = lower.innerIndexPtr();
 		const double* values = lower.valuePtr();
@@ -572,8 +583,8 @@ private:
 				}
 				m_pairs = problem.hessianPairs;
 				m_permutedCurrent = false;
-				m_factor.analyzePattern(bodies, m_pairs, m_permutation);
-				m_factor.prepareBlockInput(m_pairs, m_permutation);
+				factor().analyzePattern(bodies, m_pairs, m_permutation);
+				factor().prepareBlockInput(m_pairs, m_permutation);
 				++result.symbolicAnalyses;
 			}
 			result.symbolicMs += profileElapsed(m_profile, symbolicStart);
@@ -581,7 +592,7 @@ private:
 		m_size = problem.bodyCount() * 6;
 		m_vector.resize(m_size);
 		m_solution.resize(m_size);
-		if(!m_factor.readsBlocks() || !m_factor.factorizeBlocks(m_hessian.blocks.data(), m_hessian.nonzero.data()))
+		if(!factor().readsBlocks() || !factor().factorizeBlocks(m_hessian.blocks.data(), m_hessian.nonzero.data()))
 		{
 			// The scalar fallback reads the permuted scalar Hessian, prepared on its first use
 			// after an analysis.
@@ -596,7 +607,7 @@ private:
 			{
 				m_permuted.valuePtr()[entry] = values.valuePtr()[m_permutedSourceIndices[entry]];
 			}
-			if(!m_factor.factorize(m_permuted))
+			if(!factor().factorize(m_permuted))
 			{
 				return false;
 			}
@@ -609,7 +620,7 @@ private:
 			// Cache those reach costs so selection is linear in changed contacts.
 			if(changedPattern)
 			{
-				const Sparse& lower = m_factor.m_matrix;
+				const Sparse& lower = factor().m_matrix;
 				m_reachWork.resize(m_size);
 				// The exported scalar Hessian's entries: 21 per diagonal block, 36 per pair.
 				m_factorWork = 36.0 * double(m_pairs.size()) - 15.0 * problem.bodyCount();
@@ -880,7 +891,7 @@ private:
 		{
 			return true;
 		}
-		Sparse& lower = m_factor.m_matrix;
+		Sparse& lower = factor().m_matrix;
 		const int* inner = lower.innerIndexPtr();
 		double* values = lower.valuePtr();
 		const int begin = lower.outerIndexPtr()[column], end = lower.outerIndexPtr()[column + 1];
@@ -931,7 +942,7 @@ private:
 		// A successful update consumes the single elimination-tree path below and
 		// clears every visited entry, so the retained vector is already zero here.
 		// Avoid clearing the entire factor-sized vector for every contact update.
-		const Sparse& lower = m_factor.m_matrix;
+		const Sparse& lower = factor().m_matrix;
 		const int* outer = lower.outerIndexPtr();
 		const int* inner = lower.innerIndexPtr();
 		for(int column = scatterUpdate(body, vector, m_vector.data()); column < m_size;)
@@ -962,7 +973,10 @@ private:
 	bool m_orderingKept = false;
 	// Whether m_permuted holds the current pattern; the scalar fallback alone needs it.
 	bool m_permutedCurrent = false;
-	BlockCholesky m_factor;
+	// The block factor of each precision; m_double selects the one in use.
+	BlockCholeskyT<FloatBlock> m_floatFactor;
+	BlockCholeskyT<DoubleBlock> m_doubleFactor;
+	bool m_double = false;
 	ParallelExecutor* m_parallelExecutor = NULL;
 	std::vector<BodyPair> m_bodyEdges;
 	std::vector<int> m_bodyOrder, m_permutation;

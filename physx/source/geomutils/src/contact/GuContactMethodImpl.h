@@ -26,10 +26,12 @@ namespace Gu
 	{
 		PX_FORCE_INLINE	NarrowPhaseParams(PxReal contactDistance, PxReal meshContactMargin, PxReal toleranceLength) :
 				mContactDistance(contactDistance),
+				mContactOffsets(contactDistance),
 				mMeshContactMargin(meshContactMargin),
 				mToleranceLength(toleranceLength)	{}
 
 		PxReal			mContactDistance;
+		PxReal			mContactOffsets;	// The shapes' contact offsets alone: mContactDistance less the reach speculative CCD adds for the bodies' motion over the step.
 		const PxReal	mMeshContactMargin;	// PT: Margin used to generate mesh contacts. Temp & unclear, should be removed once GJK is default path.
 		const PxReal	mToleranceLength;	// PT: copy of PxTolerancesScale::length
 	};

@@ -751,6 +751,98 @@ ANVIL_FORCE_INLINE double dotFloat6(const float* ANVIL_RESTRICT block, int colum
 #endif
 }
 
+// The block factor's kernels by block precision. Single-precision blocks use the kernels above;
+// double-precision blocks are 6x6 column-major, 36 doubles, and use the double kernels.
+ANVIL_FORCE_INLINE void subtractBlockProduct6(float* ANVIL_RESTRICT destination, const float* ANVIL_RESTRICT left, const float* ANVIL_RESTRICT right)
+{
+	subtractProductFloat6(destination, left, right);
+}
+
+ANVIL_FORCE_INLINE void subtractBlockProduct6(double* ANVIL_RESTRICT destination, const double* ANVIL_RESTRICT left, const double* ANVIL_RESTRICT right)
+{
+	subtractProduct6(destination, left, right);
+}
+
+ANVIL_FORCE_INLINE void solveBlockTransposedLower6(float* ANVIL_RESTRICT value, const float* ANVIL_RESTRICT lower, const double* ANVIL_RESTRICT inverseDiagonal)
+{
+	solveTransposedLowerFloat6(value, lower, inverseDiagonal);
+}
+
+ANVIL_FORCE_INLINE void solveBlockTransposedLower6(double* ANVIL_RESTRICT value, const double* ANVIL_RESTRICT lower, const double* ANVIL_RESTRICT inverseDiagonal)
+{
+	for(int column = 0; column < 6; ++column)
+	{
+		double* current = value + 6 * column;
+		for(int inner = 0; inner < column; ++inner)
+		{
+			const double scale = lower[6 * inner + column];
+			const double* solved = value + 6 * inner;
+			for(int row = 0; row < 6; ++row)
+			{
+				current[row] -= scale * solved[row];
+			}
+		}
+		const double inverse = inverseDiagonal[column];
+		for(int row = 0; row < 6; ++row)
+		{
+			current[row] *= inverse;
+		}
+	}
+}
+
+ANVIL_FORCE_INLINE void subtractBlockMatrixVector6(double* ANVIL_RESTRICT destination, const float* ANVIL_RESTRICT matrix, const double* ANVIL_RESTRICT vector)
+{
+	subtractFloatMatrixVector6(destination, matrix, vector);
+}
+
+ANVIL_FORCE_INLINE void subtractBlockMatrixVector6(double* ANVIL_RESTRICT destination, const double* ANVIL_RESTRICT matrix, const double* ANVIL_RESTRICT vector)
+{
+	for(int column = 0; column < 6; ++column)
+	{
+		const double scale = vector[column];
+		for(int row = 0; row < 6; ++row)
+		{
+			destination[row] -= matrix[6 * column + row] * scale;
+		}
+	}
+}
+
+ANVIL_FORCE_INLINE void convertBlockColumn6(float* ANVIL_RESTRICT block, int column, const double* ANVIL_RESTRICT source)
+{
+	convertColumnFloat6(block, column, source);
+}
+
+ANVIL_FORCE_INLINE void convertBlockColumn6(double* ANVIL_RESTRICT block, int column, const double* ANVIL_RESTRICT source)
+{
+	for(int row = 0; row < 6; ++row)
+	{
+		block[6 * column + row] = source[row];
+	}
+}
+
+ANVIL_FORCE_INLINE void promoteBlockColumn6(double* ANVIL_RESTRICT destination, const float* ANVIL_RESTRICT block, int column)
+{
+	promoteColumnFloat6(destination, block, column);
+}
+
+ANVIL_FORCE_INLINE void promoteBlockColumn6(double* ANVIL_RESTRICT destination, const double* ANVIL_RESTRICT block, int column)
+{
+	for(int row = 0; row < 6; ++row)
+	{
+		destination[row] = block[6 * column + row];
+	}
+}
+
+ANVIL_FORCE_INLINE double dotBlockColumn6(const float* ANVIL_RESTRICT block, int column, const double* ANVIL_RESTRICT right)
+{
+	return dotFloat6(block, column, right);
+}
+
+ANVIL_FORCE_INLINE double dotBlockColumn6(const double* ANVIL_RESTRICT block, int column, const double* ANVIL_RESTRICT right)
+{
+	return dot6(block + 6 * column, right);
+}
+
 ANVIL_FORCE_INLINE double subtractDot6(double value, const double* left, const double* right)
 {
 #if defined(ANVIL_AVX2_FMA)

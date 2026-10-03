@@ -10,6 +10,7 @@ namespace anvil
 class alignas(FLOAT_BLOCK_ALIGNMENT) FloatBlock
 {
 public:
+	typedef float Scalar;
 	float& operator()(int row, int column) { return m_values[floatBlockIndex(row, column)]; }
 	float operator()(int row, int column) const { return m_values[floatBlockIndex(row, column)]; }
 	float* data() { return m_values; }
@@ -29,9 +30,47 @@ private:
 	float m_values[FLOAT_BLOCK_SIZE];
 };
 
-class BlockCholesky : public StorageCholesky
+// A 6x6 factor block in double precision, column-major. The Hessians of islands with rows stiffer
+// than a single-precision factor resolves against the bodies' masses use it (see
+// Settings::doublePrecisionFactor).
+class alignas(16) DoubleBlock
 {
-	typedef FloatBlock Block;
+public:
+	typedef double Scalar;
+	double& operator()(int row, int column) { return m_values[6 * column + row]; }
+	double operator()(int row, int column) const { return m_values[6 * column + row]; }
+	double* data() { return m_values; }
+	const double* data() const { return m_values; }
+	void setZero() { std::fill(m_values, m_values + 36, 0.0); }
+	void clearPadding(int) {}
+
+private:
+	double m_values[36];
+};
+
+// The block factor of either precision, as the incremental factor uses it.
+class BlockFactor : public StorageCholesky
+{
+public:
+	virtual ~BlockFactor() {}
+	virtual bool hasCurrentBlocks() const = 0;
+	virtual void swapInverseDiagonal(std::vector<double>& inverseDiagonal) = 0;
+	virtual bool retainedStepSized() const = 0;
+	virtual bool parallelSized() const = 0;
+	virtual void setParallelExecutor(ParallelExecutor* executor) = 0;
+	virtual void beginScalarUpdates() = 0;
+	virtual void solveBlocks(double* solution) = 0;
+	virtual void analyzePattern(int bodies, const std::vector<std::uint64_t>& pairs, const std::vector<int>& permutation) = 0;
+	virtual void prepareBlockInput(const std::vector<std::uint64_t>& pairs, const std::vector<int>& permutation) = 0;
+	virtual bool factorize(const SparseStorage& ap) = 0;
+	virtual bool readsBlocks() const = 0;
+	virtual bool factorizeBlocks(const Mat6* hessian, const unsigned char* nonzero) = 0;
+};
+
+template<class Block>
+class BlockCholeskyT : public BlockFactor
+{
+	typedef typename Block::Scalar Scalar;
 	enum
 	{
 		MIN_PARALLEL_FACTOR_UPDATES = 60000,
@@ -54,21 +93,21 @@ class BlockCholesky : public StorageCholesky
 	};
 public:
 	bool usesBlocks() const { return m_useBlocks; }
-	bool hasCurrentBlocks() const { return m_blocksCurrent; }
-	void swapInverseDiagonal(std::vector<double>& inverseDiagonal) { m_inverseDiagonal.swap(inverseDiagonal); }
+	bool hasCurrentBlocks() const override { return m_blocksCurrent; }
+	void swapInverseDiagonal(std::vector<double>& inverseDiagonal) override { m_inverseDiagonal.swap(inverseDiagonal); }
 	// Whether a refactorization costs enough to take steps on the retained factor instead.
-	bool retainedStepSized() const { return m_useBlocks && m_blocksCurrent && m_updateOuter.back() >= MIN_RETAINED_STEP_UPDATES; }
+	bool retainedStepSized() const override { return m_useBlocks && m_blocksCurrent && m_updateOuter.back() >= MIN_RETAINED_STEP_UPDATES; }
 	// Whether the factor has enough block updates to use helpers, on any machine.
-	bool parallelSized() const { return m_useBlocks && m_updateOuter.back() >= MIN_PARALLEL_FACTOR_UPDATES; }
-	void setParallelExecutor(ParallelExecutor* executor) { m_parallelExecutor = executor; m_parallelWorkers = 0; }
+	bool parallelSized() const override { return m_useBlocks && m_updateOuter.back() >= MIN_PARALLEL_FACTOR_UPDATES; }
+	void setParallelExecutor(ParallelExecutor* executor) override { m_parallelExecutor = executor; m_parallelWorkers = 0; }
 
-	void beginScalarUpdates()
+	void beginScalarUpdates() override
 	{
 		ensureScalarFactor();
 		m_blocksCurrent = false;
 	}
 
-	void solveBlocks(double* solution)
+	void solveBlocks(double* solution) override
 	{
 		if(m_parallelExecutor == NULL || m_parallelWorkers < 2 || m_stageGroupOuter.empty())
 		{
@@ -99,7 +138,7 @@ public:
 	// which maps a body's first coordinate to its factor coordinate. The pairs are the body
 	// graph: every allocated body pair is a full block. The scalar input maps are prepared only
 	// if the scalar fallback factors (prepareScalarInput).
-	void analyzePattern(int bodies, const std::vector<std::uint64_t>& pairs, const std::vector<int>& permutation)
+	void analyzePattern(int bodies, const std::vector<std::uint64_t>& pairs, const std::vector<int>& permutation) override
 	{
 		m_parent.resize(bodies);
 		m_tags.resize(bodies);
@@ -323,7 +362,7 @@ public:
 		}
 	}
 
-	bool factorize(const SparseStorage& ap)
+	bool factorize(const SparseStorage& ap) override
 	{
 		if(!m_useBlocks)
 		{
@@ -341,11 +380,11 @@ public:
 
 	// The block factors read the Hessian's body-pair blocks directly, avoiding the
 	// scalar CSC export and permutation of every factorization.
-	bool readsBlocks() const { return m_useBlocks; }
+	bool readsBlocks() const override { return m_useBlocks; }
 
 	// pairs are the Hessian's sorted (first, second) body pairs; permutation maps
 	// a body's first coordinate to its factor coordinate.
-	void prepareBlockInput(const std::vector<std::uint64_t>& pairs, const std::vector<int>& permutation)
+	void prepareBlockInput(const std::vector<std::uint64_t>& pairs, const std::vector<int>& permutation) override
 	{
 		if(!m_useBlocks)
 		{
@@ -386,7 +425,7 @@ public:
 	// Factor directly from body-pair blocks. False leaves the caller to use the
 	// scalar input path, including its failed-pivot fallback.
 	// nonzero marks the blocks that received any product; others are zero.
-	bool factorizeBlocks(const Mat6* hessian, const unsigned char* nonzero)
+	bool factorizeBlocks(const Mat6* hessian, const unsigned char* nonzero) override
 	{
 		m_inputNonzero = nonzero;
 		return parallel() ? factorizeParallel(NULL, hessian) : factorizeSerial(NULL, hessian);
@@ -423,7 +462,7 @@ private:
 			{
 				for(int row = 0; row < 6; ++row)
 				{
-					destination(row, column) = float(source(column, row));
+					destination(row, column) = Scalar(source(column, row));
 				}
 			}
 		}
@@ -431,7 +470,7 @@ private:
 		{
 			for(int column = 0; column < 6; ++column)
 			{
-				convertColumnFloat6(destination.data(), column, source.data() + 6 * column);
+				convertBlockColumn6(destination.data(), column, source.data() + 6 * column);
 			}
 		}
 	}
@@ -448,7 +487,7 @@ private:
 			for(int entry = inputOuter[column]; entry < end; ++entry)
 			{
 				const int coordinate = m_inputCoordinates[entry];
-				m_work[coordinate >> 3](axis, coordinate & 7) = float(inputValues[entry]);
+				m_work[coordinate >> 3](axis, coordinate & 7) = Scalar(inputValues[entry]);
 				m_workNonzero[coordinate >> 3] = 1;
 			}
 		}
@@ -519,7 +558,7 @@ private:
 				Block& value = work[i];
 				// Solve value * L' = work using contiguous columns.
 				// These fixed blocks need neither packed GEMM panels nor a transpose.
-				solveTransposedLowerFloat6(value.data(), blocks[blockOuter[i]].data(), &inverseDiagonal[6 * i]);
+				solveBlockTransposedLower6(value.data(), blocks[blockOuter[i]].data(), &inverseDiagonal[6 * i]);
 				for(int previous = blockOuter[i] + 1; previous < address; ++previous)
 				{
 					if(!blockNonzero[previous])
@@ -527,11 +566,11 @@ private:
 						continue;
 					}
 					const int row = blockRows[previous];
-					subtractProductFloat6(work[row].data(), value.data(), blocks[previous].data());
+					subtractBlockProduct6(work[row].data(), value.data(), blocks[previous].data());
 					workNonzero[row] = 1;
 				}
 				// The whole symmetric product costs no more than its lower half in these kernels.
-				subtractProductFloat6(diagonal.data(), value.data(), value.data());
+				subtractBlockProduct6(diagonal.data(), value.data(), value.data());
 				blocks[address] = value;
 				value.setZero();
 			}
@@ -556,7 +595,7 @@ private:
 
 	struct ParallelUpdate
 	{
-		BlockCholesky* factor;
+		BlockCholeskyT* factor;
 		int body;
 		int first;
 		int end;
@@ -565,7 +604,7 @@ private:
 
 	struct ParallelSolve
 	{
-		BlockCholesky* factor;
+		BlockCholeskyT* factor;
 		double* solution;
 		int first;
 	};
@@ -740,7 +779,7 @@ private:
 		{
 			const int block = m_rowEntries[entry];
 			const Vec6 solved = loadVector<6>(solution + 6 * m_blockColumns[block]);
-			subtractFloatMatrixVector6(current.data(), m_blocks[block].data(), solved.data());
+			subtractBlockMatrixVector6(current.data(), m_blocks[block].data(), solved.data());
 		}
 		storeVector<6>(solution + 6 * body, current);
 	}
@@ -753,7 +792,7 @@ private:
 		{
 			const int block = m_rowEntries[entry];
 			const Vec6 solved = loadVector<6>(solution + 6 * m_blockColumns[block]);
-			subtractFloatMatrixVector6(current.data(), m_blocks[block].data(), solved.data());
+			subtractBlockMatrixVector6(current.data(), m_blocks[block].data(), solved.data());
 		}
 		// Pivots multiply by the reciprocals of the stored pivots rather than dividing.
 		const Block& diagonal = m_blocks[m_blockOuter[body]];
@@ -780,7 +819,7 @@ private:
 			const Block& factor = m_blocks[block];
 			for(int axis = 0; axis < 6; ++axis)
 			{
-				current[axis] -= dotFloat6(factor.data(), axis, solved.data());
+				current[axis] -= dotBlockColumn6(factor.data(), axis, solved.data());
 			}
 		}
 		const Block& diagonal = m_blocks[m_blockOuter[body]];
@@ -814,7 +853,7 @@ private:
 	static void gatherForwardBodies(void* context, int index)
 	{
 		ParallelSolve& solve = *static_cast<ParallelSolve*>(context);
-		const BlockCholesky& factor = *solve.factor;
+		const BlockCholeskyT& factor = *solve.factor;
 		const int task = solve.first + index;
 		for(int entry = factor.m_gatherTasks[task]; entry < factor.m_gatherTasks[task + 1]; ++entry)
 		{
@@ -827,7 +866,7 @@ private:
 	static void solveForwardGroups(void* context, int index)
 	{
 		ParallelSolve& solve = *static_cast<ParallelSolve*>(context);
-		const BlockCholesky& factor = *solve.factor;
+		const BlockCholeskyT& factor = *solve.factor;
 		const int task = solve.first + index;
 		const int end = factor.m_groupOuter[factor.m_groupTasks[task + 1]];
 		for(int entry = factor.m_groupOuter[factor.m_groupTasks[task]]; entry < end; ++entry)
@@ -840,7 +879,7 @@ private:
 	static void solveBackwardGroups(void* context, int index)
 	{
 		ParallelSolve& solve = *static_cast<ParallelSolve*>(context);
-		const BlockCholesky& factor = *solve.factor;
+		const BlockCholeskyT& factor = *solve.factor;
 		const int task = solve.first + index;
 		const int first = factor.m_groupOuter[factor.m_groupTasks[task]];
 		for(int entry = factor.m_groupOuter[factor.m_groupTasks[task + 1]] - 1; entry >= first; --entry)
@@ -891,7 +930,7 @@ private:
 			Block& target = m_blocks[m_updateTargets[update++]];
 			const Block& left = m_blocks[row];
 			const Block& right = m_blocks[column];
-			subtractProductFloat6(target.data(), left.data(), right.data());
+			subtractBlockProduct6(target.data(), left.data(), right.data());
 		}
 	}
 
@@ -914,7 +953,7 @@ private:
 			}
 			for(int block = m_blockOuter[body] + 1; block < m_blockOuter[body + 1]; ++block)
 			{
-				promoteColumnFloat6(values + entry, m_blocks[block].data(), axis);
+				promoteBlockColumn6(values + entry, m_blocks[block].data(), axis);
 				entry += 6;
 			}
 		}
@@ -922,7 +961,7 @@ private:
 
 	static void exportBodyParallel(void* context, int body)
 	{
-		static_cast<BlockCholesky*>(context)->exportBody(body);
+		static_cast<BlockCholeskyT*>(context)->exportBody(body);
 	}
 
 	void ensureScalarFactor()
@@ -1039,7 +1078,7 @@ private:
 
 	struct PanelUpdate
 	{
-		BlockCholesky* factor;
+		BlockCholeskyT* factor;
 		int firstTask;
 	};
 
@@ -1065,7 +1104,7 @@ private:
 			const int end = inputOuter[column + 1];
 			for(int entry = inputOuter[column]; entry < end; ++entry)
 			{
-				m_blocks[m_inputBlocks[entry]](column % 6, m_inputCoordinates[entry] & 7) = float(inputValues[entry]);
+				m_blocks[m_inputBlocks[entry]](column % 6, m_inputCoordinates[entry] & 7) = Scalar(inputValues[entry]);
 			}
 		}
 	}
@@ -1090,7 +1129,7 @@ private:
 
 	struct InputLoad
 	{
-		BlockCholesky* factor;
+		BlockCholeskyT* factor;
 		const SparseStorage* input;
 		const Mat6* hessian;
 	};
@@ -1128,13 +1167,13 @@ private:
 			{
 				return false;
 			}
-			const float pivot = float(std::sqrt(diagonal));
+			const Scalar pivot = Scalar(std::sqrt(diagonal));
 			const double inverse = 1.0 / double(pivot);
 			inverseDiagonal[column] = inverse;
 			ANVIL_UNROLL
 			for(int row = 0; row < column; ++row)
 			{
-				output(row, column) = 0.0f;
+				output(row, column) = Scalar(0);
 			}
 			output(column, column) = pivot;
 			ANVIL_UNROLL
@@ -1147,7 +1186,7 @@ private:
 					value -= lower[inner][row] * lower[inner][column];
 				}
 				lower[column][row] = value * inverse;
-				output(row, column) = float(lower[column][row]);
+				output(row, column) = Scalar(lower[column][row]);
 			}
 			output.clearPadding(column);
 		}
@@ -1166,7 +1205,7 @@ private:
 		const int end = m_blockOuter[body + 1];
 		for(int address = first; address < end; ++address)
 		{
-			solveTransposedLowerFloat6(m_blocks[address].data(), diagonal.data(), &m_inverseDiagonal[6 * body]);
+			solveBlockTransposedLower6(m_blocks[address].data(), diagonal.data(), &m_inverseDiagonal[6 * body]);
 		}
 		return true;
 	}
@@ -1255,4 +1294,6 @@ private:
 	std::vector<unsigned char> m_blockNonzero, m_workNonzero;
 	const unsigned char* m_inputNonzero = NULL;
 };
+
+typedef BlockCholeskyT<FloatBlock> BlockCholesky;
 }

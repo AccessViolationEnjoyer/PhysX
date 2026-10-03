@@ -86,6 +86,7 @@ static bool generateOrProcessContactsBoxConvex(	const GjkConvex* relativeConvex,
 {
 	if (status == GJK_NON_INTERSECT)
 	{
+		manifold.setSeparation(output.normal, output.penDep);
 		return false;
 	}
 	else
@@ -182,9 +183,11 @@ bool Gu::pcmContactBoxConvex(GU_CONTACT_METHOD_ARGS)
 	//After the refresh contact points, the numcontacts in the manifold will be changed
 	const bool bLostContacts = (manifold.mNumContacts != initialContacts);
 
-	if(bLostContacts || manifold.invalidate_BoxConvex(curRTrans, transf0.q, transf1.q, minMargin, radiusA, radiusB))
+	if(bLostContacts || manifold.invalidate_BoxConvex(curRTrans, transf0.q, transf1.q, minMargin, radiusA, radiusB) ||
+		manifold.movedByContactDistance(curRTrans, radiusA, CalculateConvexReach(hullData, vScale), params))
 	{
 		manifold.setRelativeTransform(curRTrans, transf0.q, transf1.q);
+		manifold.setGenerationDistance(params.mContactDistance);
 	
 		GjkStatus status = manifold.mNumContacts > 0 ? GJK_UNDEFINED : GJK_NON_INTERSECT;
 

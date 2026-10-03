@@ -46,7 +46,8 @@ bool Gu::pcmContactPlaneBox(GU_CONTACT_METHOD_ARGS)
 	const PxU32 newContacts = manifold.mNumContacts;
 	const bool bLostContacts = (newContacts != initialContacts);//((initialContacts == 0) || (newContacts != initialContacts));
 
-	if(bLostContacts || manifold.invalidate_PrimitivesPlane(curTransf, boxMargin, FLoad(0.2f)))
+	if(bLostContacts || manifold.invalidate_PrimitivesPlane(curTransf, boxMargin, FLoad(0.2f)) ||
+		manifold.movedByContactDistance(curTransf, V3Length(boxExtents), FMax(), params))
 	{
 		//ML:localNormal is the local space of plane normal, however, because shape1 is box and shape0 is plane, we need to use the reverse of contact normal(which will be the plane normal) to make the refreshContactPoints
 		//work out the correct pentration for points
@@ -54,6 +55,8 @@ bool Gu::pcmContactPlaneBox(GU_CONTACT_METHOD_ARGS)
 
 		manifold.mNumContacts = 0;
 		manifold.setRelativeTransform(curTransf);
+		manifold.setGenerationDistance(params.mContactDistance);
+		manifold.setSeparation(V3UnitX(), FLoad(params.mContactDistance));
 
 		const PxMatTransformV aToB(curTransf);
 		const FloatV bx = V3GetX(boxExtents);

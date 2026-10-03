@@ -41,6 +41,14 @@ namespace Gu
 		return FMin(FMul(min, FLoad(0.25f)), toleranceMargin);
 	}
 
+	// A bound on the scaled hull's distance from its origin, for PersistentContactManifold::movedByContactDistance.
+	PX_SUPPORT_FORCE_INLINE aos::FloatV CalculateConvexReach(const Gu::ConvexHullData* hullData, const aos::Vec3VArg scale)
+	{
+		using namespace aos;
+		const FloatV unscaled = FLoad(hullData->mAABB.mCenter.magnitude() + hullData->mAABB.mExtents.magnitude());
+		return FMul(unscaled, V3ExtractMax(V3Abs(scale)));
+	}
+
 	PX_SUPPORT_FORCE_INLINE aos::FloatV CalculateMTDConvexMargin(const Gu::ConvexHullData* hullData, const aos::Vec3VArg scale)
 	{
 		using namespace aos;

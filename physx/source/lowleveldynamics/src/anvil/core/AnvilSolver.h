@@ -140,6 +140,10 @@ struct Problem
 	// gather per body or block and so keep the serial accumulation order.
 	std::vector<int> bodyRunOuter, bodyRuns, blockRunOuter, blockRuns;
 	int equalityRows = 0;
+	// Scalar rows with unlimited bounds (joint rows). Like equality rows they are always active, so
+	// their curvature never changes, but the bounded scalar paths solve them; they do not make the
+	// problem non-scalar.
+	int unboundedScalarRows = 0;
 	// Structural arithmetic of a fresh factorization's contact outer products, counting
 	// potential entries of inactive rows too. It is computed when the update or refactor
 	// choice first needs it; solves that never update skip it.
@@ -346,6 +350,12 @@ struct Result : SolverStatistics
 	SolveStatus::Enum status = SolveStatus::eINVALID_INPUT;
 	VectorStorage impulse;
 	VectorStorage primal; // Mass-scaled body velocity increment used for warm starting.
+	// The Newton step a stop on the velocity tolerances leaves untaken (mass scaled, as primal), with
+	// Settings::keepFinalStep, or empty. It moves no body by the tolerances, but a row's impulse is its
+	// velocity residual over its compliance, so a stiff row's impulse at primal is off by the step's
+	// residual over a compliance as small as 1e-10; readers of such rows' impulses evaluate them at
+	// primal + finalStep.
+	VectorStorage finalStep;
 };
 
 inline double elapsed(Clock::time_point start)
@@ -385,6 +395,14 @@ struct Settings
 	// and only the pattern is analyzed. A deferred contact that joins an island after its solve
 	// usually adds a pair, and the ordering cost most of the re-solve.
 	bool keepOrdering = false;
+	// Factor in double precision. A single-precision factor resolves the Hessian's curvature only
+	// to its rounding times the largest: a row whose curvature exceeds the bodies' masses by more
+	// than 1 / FLT_EPSILON (a joint row, at 1e10) leaves the bodies' free motion unresolved, and the
+	// Newton steps crawl and stop short.
+	bool doublePrecisionFactor = false;
+	// Keep the step a stop on the velocity tolerances leaves untaken in Result::finalStep, for a
+	// caller that reads stiff rows' impulses (joints).
+	bool keepFinalStep = false;
 	bool checkFactor = false;
 	bool profile = false; // Detailed phase timers.
 	// Measures Result::elapsedMs. Clock reads leave WebAssembly, so callers that do not

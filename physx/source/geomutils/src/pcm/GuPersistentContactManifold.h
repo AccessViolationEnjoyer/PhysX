@@ -10,6 +10,7 @@
 #include "foundation/PxUnionCast.h"
 #include "foundation/PxMemory.h"
 #include "foundation/PxVecTransform.h"
+#include "GuContactMethodImpl.h"
 
 #define PCM_LOW_LEVEL_DEBUG 0
 
@@ -135,7 +136,7 @@ class PersistentContactManifold
 {
 public:
 
-	PersistentContactManifold(PersistentContact* contactPointsBuff, PxU8 capacity): mNumContacts(0), mCapacity(capacity), mNumWarmStartPoints(0), mAnchors(0), mContactPoints(contactPointsBuff)
+	PersistentContactManifold(PersistentContact* contactPointsBuff, PxU8 capacity): mNumContacts(0), mCapacity(capacity), mNumWarmStartPoints(0), mAnchors(0), mContactDistance(0.0f), mContactPoints(contactPointsBuff)
 	{
 		using namespace physx::aos;
 		mRelativeTransform.invalidate();
@@ -168,11 +169,101 @@ public:
 		mRelativeTransform = transform;
 	}
 
+	// Called when the points are about to be generated: every feature beyond the contact distance
+	// will have none. Without points the first slot holds the separating direction, none so far.
+	PX_FORCE_INLINE void setGenerationDistance(const PxReal contactDistance)
+	{
+		mContactDistance = contactDistance;
+		if(!mNumContacts)
+			mContactPoints[0].mLocalNormalPen = aos::V4Zero();
+	}
+
+	// The generation found the shapes apart: along the direction (unit, in B's frame) by at least the distance.
+	PX_FORCE_INLINE void setSeparation(const aos::Vec3VArg direction, const aos::FloatVArg distance)
+	{
+		if(!mNumContacts)
+		{
+			mContactPoints[0].mLocalNormalPen = aos::Vec4V_From_Vec3V(direction);
+			aos::FStore(distance, &mContactDistance);
+		}
+	}
+
 	PX_FORCE_INLINE void setRelativeTransform(const aos::PxTransformV& transform, const aos::QuatV quatA, const aos::QuatV quatB)
 	{
 		mRelativeTransform = transform;
 		mQuatA = quatA;
 		mQuatB = quatB;
+	}
+
+	// Whether the manifold may lack a point for a feature the step could bring into contact: a
+	// feature that was farther than the contact distance when the manifold was generated. The
+	// margin-based thresholds of invalidate_BoxConvex assume contact offsets of at least half the
+	// margin (PhysX's defaults): with offsets far below it, a feature could close and sink by a
+	// fraction of the margin before the manifold was generated again. The far edge of a joint
+	// between two 10 m stones, hinged on its near edge, arrived 15 mm deep, and a pair with no
+	// contact was not examined again until it had moved 25 mm.
+	// The manifold holds every feature that was within its contact distance, so one without a
+	// point is now no closer than that distance less the movement since. The step can close the
+	// reach speculative CCD adds to the contact offsets for the bodies' motion (nothing without
+	// it), so the manifold is complete while
+	//     movement <= generation's contact distance - (contact distance - contact offsets).
+	// Without speculative CCD that is movement within the contact offsets. With it, the distance
+	// grows with the bodies' speed even when they move together: stones falling side by side, their
+	// joints 1.3 mm open, kept manifolds made at rest, and each stone met the one below, stopped a
+	// step earlier, up to 19 mm deep (a 73 cm arch of 3 cm stones at 10 ms; it burst).
+	// A's points move, as B sees them, by the shift of A's origin and the turn about it, and the
+	// points near B by the same movement taken about B's origin: the smaller bounds both. With
+	// contacts, the faces in contact close only along their normal and by the turn across it;
+	// sliding and spinning on the faces bring no feature of theirs closer. reachA and reachB bound
+	// each shape about its origin.
+	// A generation that finds the shapes apart records the separation it proved instead (GJK's
+	// direction and the distance along it, setSeparation): that distance, often well beyond the
+	// contact distance, then stands for the generation's contact distance, and only movement along
+	// the direction counts. Tumbling hulls that pass near each other are otherwise generated again
+	// every step.
+	PX_FORCE_INLINE bool movedByContactDistance(const aos::PxTransformV& curRTrans, const aos::FloatVArg reachA, const aos::FloatVArg reachB, const NarrowPhaseParams& params)	const
+	{
+		using namespace aos;
+		const PxReal allowed = mContactDistance - params.mContactDistance + params.mContactOffsets;
+		if(allowed <= 0.0f)
+			return true;
+		const FloatV allowance = FLoad(allowed);
+		const Vec3V shiftA = V3Sub(curRTrans.p, mRelativeTransform.p);
+		// The contact normal, or without points the separating direction if the generation found one.
+		const Vec3V normal = Vec3V_From_Vec4V(mContactPoints[0].mLocalNormalPen);
+		const bool directed = mNumContacts || FAllGrtr(V3Dot(normal, normal), FHalf());
+		FloatV moveASq = V3Dot(shiftA, shiftA);
+		if(directed)
+		{
+			const FloatV along = V3Dot(shiftA, normal);
+			moveASq = FMul(along, along);
+		}
+		// This runs for every pair that keeps its manifold, and most have barely moved or only
+		// slide: a bound without the quaternion product or a square root settles them. The
+		// quaternions' difference is 2 sin(angle / 4) long, so the angle's square is at most 5
+		// times its square (up to a half turn), and (a + b)^2 <= 2 (a^2 + b^2).
+		const Vec4V turnDifference = V4Sub(curRTrans.q, mRelativeTransform.q);
+		const FloatV angleSq = FMul(FLoad(5.0f), V4Dot(turnDifference, turnDifference));
+		const FloatV movementSq = FMul(FLoad(2.0f), FAdd(moveASq, FMul(angleSq, FMul(reachA, reachA))));
+		if(FAllGrtrOrEq(FMul(allowance, allowance), movementSq))
+			return false;
+		// The turn's angle from the vector part of the quaternion between the two relative
+		// orientations, the sine of half the angle, which keeps the small turns that the
+		// quaternions' dot product rounds away; twice its tangent bounds the angle.
+		const QuatV turn = QuatMul(curRTrans.q, QuatConjugate(mRelativeTransform.q));
+		Vec3V halfSine = QuatGetImaginaryPart(turn);
+		const Vec3V shiftB = V3Sub(curRTrans.p, QuatRotate(turn, mRelativeTransform.p));
+		FloatV moveBSq = V3Dot(shiftB, shiftB);
+		if(directed)
+		{
+			halfSine = V3NegScaleSub(normal, V3Dot(halfSine, normal), halfSine);
+			const FloatV along = V3Dot(shiftB, normal);
+			moveBSq = FMul(along, along);
+		}
+		const FloatV sineSq = V3Dot(halfSine, halfSine);
+		const FloatV angle = FMul(FLoad(2.0f), FSqrt(FDiv(sineSq, FMax(FSub(FOne(), sineSq), FEps()))));
+		const FloatV movement = FMin(FAdd(FSqrt(moveASq), FMul(angle, reachA)), FAdd(FSqrt(moveBSq), FMul(angle, reachB)));
+		return FAllGrtr(movement, allowance) != 0;
 	}
 
 	//This is used for the box/convexhull vs box/convexhull contact gen to decide whether the relative movement of a pair of objects are 
@@ -361,11 +452,13 @@ public:
 	PxU8 mAIndice[4];
 	PxU8 mBIndice[4];
 	PxU8 mAnchors; // two bits per point, a PCMContactAnchor; fills padding before the pointer
+	PxReal mContactDistance; // how far every feature without a point was when the points were generated (the contact distance, or a separation found), for movedByContactDistance
 	PersistentContact* mContactPoints;
 } PX_ALIGN_SUFFIX(16);
 
-// The cache stream copies manifolds every step; mAnchors must not grow them.
-PX_COMPILE_TIME_ASSERT(sizeof(PersistentContactManifold) == (sizeof(void*) == 8 ? 96 : 80));
+// mAnchors and mContactDistance fill the padding before a 64-bit pointer; with 32-bit pointers the
+// distance takes the manifold from 80 to 96 bytes.
+PX_COMPILE_TIME_ASSERT(sizeof(PersistentContactManifold) == 96);
 
 PX_ALIGN_PREFIX(16)
 class LargePersistentContactManifold : public PersistentContactManifold

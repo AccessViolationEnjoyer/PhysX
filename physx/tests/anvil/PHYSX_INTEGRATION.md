@@ -229,6 +229,52 @@ window's extremes move between builds (max rotation 0.079 to 0.112 degrees); the
 limit is the displacement limit as a turn, 0.25% of a radian. The creep stays, as a known
 limitation of the equal friction split, by decision.
 
+PCM generates a box or hull manifold again only when the pair's relative movement passes a
+fraction of the shapes' margin (0.125 to 0.5 times it, by the number of points; the margin is up
+to 5% of the tolerance length, 5 cm), or a turn its quaternion dot product can resolve. That
+suits PhysX's 2 cm contact offsets, where a feature is given its point long before it touches.
+With the 0.5 mm offsets used here, a feature that had no point could close and sink by the
+threshold before the pair was looked at again: the far edge of a joint between two 10 m stones
+of the masonry arch (`BehaviourTests masonry_arch`), hinged on its near edge, received its
+contact 15 mm deep, and the normal law's position correction then did 15 kJ of work per row
+in that step and 8-10 kJ in each of the next. With the velocity-tolerance stop off the arch
+rocked with growing energy (32 kJ after 20 s); a work ledger per row and step put all of the
+gain in normal rows that started the step penetrating, in bursts at one joint. A manifold is
+now also generated again when it may lack a point for a feature the step could bring into
+contact (`PersistentContactManifold::movedByContactDistance`, for box and hull pairs and for
+either against a plane). The manifold holds every feature that was within its contact distance,
+so one without a point is no closer than that distance less the movement since; the step can
+close the reach speculative CCD adds to the contact offsets (nothing without it); so the manifold
+is complete while
+
+    movement <= generation's contact distance - (contact distance - contact offsets).
+
+The movement is the shift along the manifold's normal plus the tilt across it times the shape's
+reach, the smaller of the bounds taken about either shape's origin: sliding and spinning on the
+faces in contact do not count, and a square-root-free bound settles the pairs that have barely
+moved. Without speculative CCD the rule is movement within the contact offsets. With it the
+contact distance grows with the bodies' speed even when they move together, which the manifolds
+ignored: the arch scaled to 1/100 (73 cm, 3 cm stones) burst at a 10 ms step because its stones
+fall side by side with the joints 1.3 mm open, each kept the manifold made at rest, and each met
+the stone below, stopped a step earlier, up to 19 mm deep. It now closes with no contact deeper
+than 0.06 mm and is at rest in 0.15 s, at 20, 10, 5 and 2.5 ms steps; the full-size arch comes to
+rest with the velocity-tolerance stop off at 10, 5 and 2.5 ms. A generation that finds the shapes
+apart keeps the separation it proved (GJK's direction and the distance along it, in the first
+point's slot, `setSeparation`), which then stands for the contact distance and gives a pair
+without points a direction too: hulls tumbling past each other were otherwise generated again
+every step (in the 5x5x20 hull pile the rule alone added 335,000 generations to 340,000, 204,000
+of them for pairs without points; with the separation kept 142,000 and 11,000). The generation's
+distance is a float in the manifold, in the padding before a 64-bit pointer; with 32-bit pointers
+the manifold grows from 80 to 96 bytes, which measured the same as 80.
+What the arch test still shows before it rests is the mechanism's own fall: the symmetric arch on
+four hinges is a balance, the sway doubles every 1.3 s from the asymmetry the settling left, and
+the energy comes from the stones' height. Timing, wasm with 8 workers, each step's minimum over
+repeated runs: totes 3.90 -> 4.04 ms (+3 to 4%: 41,000 box pairs a step take the test, and it adds
+55 generations a step to 17,500); cases, pallets and the 500-box pile unchanged within 1%
+(pallet fall-off p95 1.37 -> 1.34 ms); ten hull pile sizes 63.9 -> 65.6 s (+2.7%, inside their
+chaotic scatter; mean p95 18.5 -> 18.3 ms). Native: unchanged within noise. Capsule and sphere
+manifolds and the mesh manifolds keep PhysX's thresholds.
+
 This matters with `PxRigidBodyFlag::eENABLE_SPECULATIVE_CCD`, which inflates a body's contact
 reach by its motion per step: contacts then exist a step before surfaces meet, and a body
 arriving at 1 m/s is stopped at the surface instead of embedding a centimetre and bouncing. On a
@@ -240,8 +286,47 @@ pairs within its inflation are generated each step, and a scene of 2,000 totes r
 the narrow phase before the filter discards the points. The test scenes set the flag on every body.
 
 Hard joint rows use the same reference policy. Native spring rows retain their exact implicit
-stiffness and damping law. Positive restitution, compliant contacts, contact modification,
-force caps and threshold reporting remain Anvil-only PhysX extensions.
+stiffness and damping law.
+
+A hard row holds its anchors' relative velocity, but a turning body carries its anchor along an
+arc, `dt^2 / 2 * w x (w x r)` off the tangent each step, and the reference policy's 20 ms correction
+then opened a hinge until its stretch supplied the centripetal force: 1.46 mm on a 1 m arm swinging
+at 4 rad/s (PGS, correcting each step's error in full, 0.42 mm). Each hard row's free velocity now
+includes its anchors' arcs at the step's starting angular velocities, so the row supplies that force
+within the step: the hinge opens 12-41 um while the arm swings, and 0.19 mm where its drive's
+torque switches at its limit and the angular velocity changes within a step. The lever across the
+row comes from the row; the lever along it, which the row cannot express, from the joint's anchor.
+
+A joint row's compliance is about 1e-10 of its response, so the Hessian's curvature along a joint
+is about 1e10 against the bodies' masses. The single-precision block factor resolves curvature only
+to its rounding times the largest, so it left the free motion's part of each Newton step wrong:
+a two-link arm's solves crawled (28 iterations a step), stops on the velocity tolerances came
+short of the solution (kicks of 1e-3 rad/s, joint torques 0.1 N m off), and a large island of
+boxes and jointed chains hit nonpositive pivots and the scalar fallback (0.55 s steps, 12 s at
+worst). Islands with a row whose response over compliance exceeds 1 / FLT_EPSILON use a
+double-precision block factor (`Settings::doublePrecisionFactor`, `DoubleBlock`); contacts, at
+1e4-1e5, keep the single-precision factor. Joint writeback reads joint impulses at the end of the
+Newton step that a stop on the velocity tolerances leaves untaken (`Result::finalStep`): a row's
+impulse is its velocity residual over its compliance, so at the solve's velocities a resting hinge
+reported 1.6 MN through `getForce`. Contacts keep the solve's impulses, which set their friction
+limits next step. Joint rows with unlimited bounds are bounded scalar rows, not equality rows
+(`Problem::unboundedScalarRows`): as equality rows they excluded the whole island from the compact
+Jacobian, the fused scalar evaluation and retained-factor steps.
+
+The two-link arm (`two_link_arm`) then matches its analytic torques within 5e-5 of its load at
+every size from 1 m and 3 kg to 1 cm and 3 mg, in one or two iterations a step; the 1 cm arm needs
+its displacement tolerance scaled to its size, as `PxTolerancesScale::length` would. The gripper
+averages 0.9 iterations a solve (0.6 before) and the fixed-joint rods 1.0 (0.4). A large island of
+512 boxes and 16 chains of ten links on spherical joints (`mixed_island`, 8 threads) averages
+19 ms a step (p95 115 ms, 286 ms at worst), against 9.5 ms with the links unjointed. Fixed-joint
+chains cost 10 ms against 9 ms as rigid compounds: the joints themselves cost little. The spherical
+chains drape across the pile and change many contacts each step, and the Newton iterations take
+short line-search steps through them (41 iterations a step while they land, against 12-18 for the
+other variants). The double-precision factor costs 1.8 times the single-precision one; only the
+columns of jointed bodies and their elimination-tree ancestors need it, about 30% of this island's
+factor work.
+Positive restitution, compliant contacts, contact modification, force caps and threshold reporting
+remain Anvil-only PhysX extensions.
 
 ## Implementation
 

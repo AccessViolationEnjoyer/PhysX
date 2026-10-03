@@ -981,9 +981,11 @@ bool Gu::pcmContactBoxBox(GU_CONTACT_METHOD_ARGS)
   
 	const FloatV radiusA = V3Length(boxExtents0);
 	const FloatV radiusB = V3Length(boxExtents1);
-	if(bLostContacts || manifold.invalidate_BoxConvex(curRTrans, transf0.q, transf1.q, minMargin, radiusA, radiusB))
+	if(bLostContacts || manifold.invalidate_BoxConvex(curRTrans, transf0.q, transf1.q, minMargin, radiusA, radiusB) ||
+		manifold.movedByContactDistance(curRTrans, radiusA, radiusB, params))
 	{
 		manifold.setRelativeTransform(curRTrans, transf0.q, transf1.q);
+		manifold.setGenerationDistance(params.mContactDistance);
 		
 		PxMatTransformV transfV0(transf0);
 		PxMatTransformV transfV1(transf1);
@@ -1027,6 +1029,9 @@ bool Gu::pcmContactBoxBox(GU_CONTACT_METHOD_ARGS)
 
 				GjkStatus status = gjkPenetration<RelativeConvex<BoxV>, LocalConvex<BoxV> >(convexA, convexB, aToB.p, contactDist, true,
 					manifold.mAIndice, manifold.mBIndice, manifold.mNumWarmStartPoints, output);
+
+				if(status == GJK_NON_INTERSECT)
+					manifold.setSeparation(output.normal, output.penDep);
 
 				if(status == EPA_CONTACT)
 				{

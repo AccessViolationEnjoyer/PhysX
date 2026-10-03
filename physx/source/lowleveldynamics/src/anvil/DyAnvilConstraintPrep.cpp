@@ -75,6 +75,22 @@ static void setAnvilJointJacobian(anvil::Vec6& jacobian, const PxSolverBodyData&
 	}
 }
 
+// How far a row's anchor on one body leaves the row's linear prediction over the step. The rows hold
+// the anchor's velocity, but the body's turn carries the anchor along an arc, half dt^2 w x (w x r)
+// off its tangent; a hinge on a swinging link opens by this every step, until its position
+// correction supplies the centripetal force. The row's angular part gives the anchor's lever across
+// the row; the lever along it, which the row cannot express, comes from the joint's anchor.
+static double anchorCurvature(const PxVec3& linear, const PxVec3& angular, const PxVec3& angularVelocity, const PxVec3& anchorOffset, double timestep)
+{
+	const PxReal lengthSquared = linear.magnitudeSquared();
+	if(lengthSquared == 0.0f)
+	{
+		return 0.0;
+	}
+	const PxVec3 lever = (linear.cross(angular) + linear * linear.dot(anchorOffset)) / lengthSquared;
+	return 0.5 * timestep * timestep * double(linear.dot(angularVelocity.cross(angularVelocity.cross(lever))));
+}
+
 static void preprocessAnvilSlerp(Px1DConstraint* rows, PxU32 rowCount, const PxSolverBodyData& body0, const PxSolverBodyData& body1, PxI32 bodyIndex0, PxI32 bodyIndex1)
 {
 	Px1DConstraint driveRows[3];
@@ -125,6 +141,8 @@ void prepareAnvilJoint(const Constraint& constraint, const PxSolverBodyData& bod
 
 	Px1DConstraint rows[MAX_CONSTRAINT_ROWS];
 	PxU32 rowCount = 0;
+	// The joint's anchor relative to each body.
+	PxVec3 anchorOffset0(0.0f), anchorOffset1(0.0f);
 	if(constraint.solverPrep && !(constraint.flags & PxConstraintFlag::eDISABLE_CONSTRAINT))
 	{
 		setupConstraintRows(rows, MAX_CONSTRAINT_ROWS);
@@ -136,6 +154,8 @@ void prepareAnvilJoint(const Constraint& constraint, const PxSolverBodyData& bod
 		body0WorldOffset = PxVec3(0.0f);
 		rowCount = constraint.solverPrep(rows, body0WorldOffset, MAX_CONSTRAINT_ROWS, massScales, constraint.constantBlock, frame0, frame1, (constraint.flags & PxConstraintFlag::eENABLE_EXTENDED_LIMITS) != 0, anchor0, anchor1);
 		joint.body0WorldOffset = body0WorldOffset;
+		anchorOffset0 = body0WorldOffset;
+		anchorOffset1 = frame0.p + body0WorldOffset - frame1.p;
 		PX_ASSERT(rowCount <= MAX_CONSTRAINT_ROWS);
 		// Per-constraint mass scaling makes different constraints act through different mass
 		// matrices. It cannot be represented by the shared symmetric Anvil objective.
@@ -218,11 +238,16 @@ void prepareAnvilJoint(const Constraint& constraint, const PxSolverBodyData& bod
 				const double timeConstant = std::max(0.02, 2.0 * timestep);
 				const double damping = 2.0 / (impedance * timeConstant);
 				const double stiffness = 1.0 / (impedance * impedance * timeConstant * timeConstant);
-				contact.freeVelocity = freeSpeed - initialSpeed + timestep *
+				// The row's error grows by the anchors' arcs on top of its velocity: the row takes it up
+				// within the step rather than leaving it to the position correction.
+				const double curvature = anchorCurvature(row.linear0, row.angular0, body0.angularVelocity, anchorOffset0, timestep) -
+					anchorCurvature(row.linear1, row.angular1, body1.angularVelocity, anchorOffset1, timestep);
+				contact.freeVelocity = freeSpeed - initialSpeed + curvature / timestep + timestep *
 					(damping * (initialSpeed - row.velocityTarget) + stiffness * impedance * row.geometricError);
 			}
 		}
 
+		output.maximumStiffness = PxMax(output.maximumStiffness, response / contact.regularization);
 		AnvilJointRow outputRow;
 		outputRow.contactIndex = PxU32(problem.addScalarContact(contact, lower, upper));
 		outputRow.linear0 = (row.flags & Px1DConstraintFlag::eOUTPUT_FORCE) ? row.linear0 : PxVec3(0.0f);
@@ -231,6 +256,41 @@ void prepareAnvilJoint(const Constraint& constraint, const PxSolverBodyData& bod
 	}
 	joint.rowCount = output.rows.size() - joint.firstRow;
 	output.joints.pushBack(joint);
+}
+
+// A joint row's impulse. A solve stopped on the velocity tolerances leaves a step untaken that
+// moves no body appreciably, but a joint row's compliance is so small that the impulse at the
+// solve's velocities carries the step's residual over it: forces of meganewtons on a resting joint.
+// The joint's impulse is read at the step's end instead. Contacts keep the solve's impulses, which
+// set their friction limits next step.
+static double anvilJointImpulse(const anvil::Problem& problem, const anvil::Result& result, PxU32 contactIndex)
+{
+	const anvil::CompactContact& contact = problem.contacts[contactIndex];
+	if(result.finalStep.size() == 0)
+	{
+		return result.impulse[contact.row];
+	}
+	double velocity = problem.freeVelocity[contact.row];
+	for(PxU32 end = 0; end < 2; ++end)
+	{
+		if(contact.body[end] < 0)
+		{
+			continue;
+		}
+		const int offset = 6 * contact.body[end];
+		for(int axis = 0; axis < 6; ++axis)
+		{
+			velocity += contact.jacobian[end][axis] * (result.primal[offset + axis] + result.finalStep[offset + axis]);
+		}
+	}
+	double lower = 0.0, upper = anvil::MAX_IMPULSE;
+	if(contact.hasScalarBounds())
+	{
+		const anvil::ScalarBounds& bounds = problem.scalarBounds[PxU32(anvil::CompactContact::SCALAR_BOUNDS_TAG - contact.block)];
+		lower = bounds.lower;
+		upper = bounds.upper;
+	}
+	return PxClamp(-velocity / problem.regularization[contact.row], lower, upper);
 }
 
 void writebackAnvilJoints(const AnvilJointRows& rows, const anvil::Problem& problem, const anvil::Result& result)
@@ -248,7 +308,7 @@ void writebackAnvilJoints(const AnvilJointRows& rows, const anvil::Problem& prob
 		for(PxU32 j = joint.firstRow; j < lastRow; ++j)
 		{
 			const AnvilJointRow& row = rows.rows[j];
-			const PxReal impulse = PxReal(result.impulse[problem.contacts[row.contactIndex].row]);
+			const PxReal impulse = PxReal(anvilJointImpulse(problem, result, row.contactIndex));
 			linearImpulse += row.linear0 * impulse;
 			angularImpulse += row.angular0 * impulse;
 		}

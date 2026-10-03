@@ -191,6 +191,9 @@ namespace Gu
 			if(FAllGrtr(vw, sumExpandedMargin))
 			{
 				assignWarmStartValue(aIndices, bIndices, warmStartSize, aInd, bInd, size);
+				// The separation found: along v, in b's frame, the shapes are at least this far apart.
+				output.normal = v;
+				output.penDep = FSub(vw, sumMargin);
 				return GJK_NON_INTERSECT;
 			}
 			

@@ -791,9 +791,16 @@ static bool solveAnvilRows(AnvilSolver& solver, AnvilIslandWorkspace& workspace,
 		PX_PROFILE_ZONE("Dynamics.anvilSolve", context.getContextId());
 		anvil::Settings settings = solver.settings;
 		settings.parallelExecutor = parallelExecutor;
-		// Stop once a step would move no body by the displacement tolerance in this timestep.
+		// A row stiffer than the bodies' masses by more than a single-precision factor resolves (joint
+		// rows, at 1e10) needs the double-precision factor; contacts, at 1e4-1e5, do not. In single
+		// precision a two-link arm's steps crawled, 28 iterations a step.
+		const bool stiffRows = workspace.joints.maximumStiffness * double(FLT_EPSILON) > 1.0;
+		settings.doublePrecisionFactor = stiffRows;
+		// Stop once a step would move no body by the displacement tolerance in this timestep. Joint
+		// writeback reads its impulses at the end of the step such a stop leaves (anvilJointImpulse).
 		settings.velocityTolerance = double(solver.displacementTolerance) / timestep;
 		settings.angularVelocityTolerance = settings.velocityTolerance / context.getLengthScale();
+		settings.keepFinalStep = !workspace.joints.joints.empty();
 		if(!solveAnvilSystem(settings, workspace, &workspace.previous))
 		{
 			solver.report("Anvil solve failed.");

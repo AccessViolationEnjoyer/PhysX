@@ -84,11 +84,14 @@ struct AnvilJointRows
 {
 	PxArray<AnvilJointRow> rows;
 	PxArray<AnvilJointWriteback> joints;
+	// The largest ratio of a row's curvature to the bodies' masses: its response over its compliance.
+	double maximumStiffness = 0.0;
 
 	void clear()
 	{
 		rows.clear();
 		joints.clear();
+		maximumStiffness = 0.0;
 	}
 };
 

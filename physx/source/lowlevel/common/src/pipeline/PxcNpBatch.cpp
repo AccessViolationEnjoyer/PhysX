@@ -398,6 +398,8 @@ static PX_FORCE_INLINE void discreteNarrowPhase(PxcNpThreadContext& context, con
 
 	const PxGeometry& contactShape0 = shape0->mGeometry.getGeometry();
 	const PxGeometry& contactShape1 = shape1->mGeometry.getGeometry();
+	// The contact distance may hold speculative CCD's reach for the bodies' motion; a kept manifold is judged against the offsets alone.
+	context.mNarrowPhaseParams.mContactOffsets = shape0->mContactOffset + shape1->mContactOffset;
 
 	if(useLegacyCodepath)
 	{

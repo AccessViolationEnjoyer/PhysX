@@ -237,7 +237,7 @@ void Problem::setScalarBounds(int contactIndex, double lowerImpulse, double uppe
 	limits.upper = upperImpulse;
 	if(prepared)
 	{
-		equalityRows += int(isEquality) - int(wasEquality);
+		unboundedScalarRows += int(isEquality) - int(wasEquality);
 		++preparationGeneration;
 	}
 	if(!isEquality)
@@ -511,6 +511,7 @@ static void prepareProblemInternal(Problem& problem)
 	std::vector<int>& columnCounts = problem.columnCursors;
 	problem.coupledContacts.clear();
 	problem.equalityRows = 0;
+	problem.unboundedScalarRows = 0;
 	problem.hasFiniteBounds = !problem.patches.empty();
 	problem.prepared = false;
 	problem.compactJacobian = !BuildJacobian;
@@ -674,7 +675,7 @@ static void prepareProblemInternal(Problem& problem)
 				const ScalarBounds& limits = problem.bounds(contact);
 				if(!patch && limits.lower == -MAX_IMPULSE && limits.upper == MAX_IMPULSE)
 				{
-					++problem.equalityRows;
+					++problem.unboundedScalarRows;
 				}
 				else if(limits.lower != -MAX_IMPULSE || limits.upper != MAX_IMPULSE)
 				{
@@ -745,10 +746,12 @@ static void prepareProblemInternal(Problem& problem)
 	{
 		if(!CountEntries && !BuildJacobian)
 		{
-			// The compact loop above skips the bound bookkeeping; its caller excluded equality rows.
+			// The compact loop above skips the bound bookkeeping. Each bound belongs to one scalar row.
 			for(const ScalarBounds& limits : problem.scalarBounds)
 			{
-				problem.hasFiniteBounds = problem.hasFiniteBounds || limits.lower != -MAX_IMPULSE || limits.upper != MAX_IMPULSE;
+				const bool unbounded = limits.lower == -MAX_IMPULSE && limits.upper == MAX_IMPULSE;
+				problem.unboundedScalarRows += int(unbounded);
+				problem.hasFiniteBounds = problem.hasFiniteBounds || !unbounded;
 			}
 		}
 		problem.rowLower.resize(rows);
@@ -783,13 +786,8 @@ void prepareProblemFromColumnCounts(Problem& problem) noexcept
 void prepareCompactProblemFromColumnCounts(Problem& problem) noexcept
 {
 	// Every nonzero block tag owns a contact block or scalar bounds, so without either all
-	// contacts are plain scalar rows.
-	// Bounded scalar rows stay compact unless one is an equality row.
-	bool compact = problem.contactBlocks.empty() && problem.patches.empty();
-	for(std::uint32_t i = 0; compact && i < problem.scalarBounds.size(); ++i)
-	{
-		compact = problem.scalarBounds[i].lower != -MAX_IMPULSE || problem.scalarBounds[i].upper != MAX_IMPULSE;
-	}
+	// contacts are plain scalar rows, bounded or not.
+	const bool compact = problem.contactBlocks.empty() && problem.patches.empty();
 #ifndef NDEBUG
 	for(std::uint32_t i = 0; compact && i < problem.contacts.size(); ++i)
 	{
@@ -3615,6 +3613,7 @@ struct WorkspaceData
 static SolveStatus::Enum solveAnvilInternal(const Problem& problem, const Settings& settings, Result& result, WorkspaceData& workspace, const Result* previous, bool continuation)
 {
 	static_cast<SolverStatistics&>(result) = SolverStatistics();
+	result.finalStep.resize(0);
 	const int expectedSize = problem.bodyCount() * 6;
 	assert(settings.iterations >= 0 && settings.tolerance >= 0.0 && settings.lineTolerance >= 0.0);
 	assert(problem.prepared && problem.timestep > 0.0 && problem.massDiagonal.size() == expectedSize && problem.jacobian.cols() == expectedSize && problem.jacobian.rows() == problem.rowCount() && problem.regularization.size() == problem.rowCount() && (!previous || previous->primal.size() == expectedSize));
@@ -3676,7 +3675,7 @@ static SolveStatus::Enum solveAnvilInternal(const Problem& problem, const Settin
 	{
 		inverseRoot[rootRow] = 1.0 / std::sqrt(compliance[rootRow]);
 	}
-	factor.beginSolve(settings.profile, continuation, settings.keepOrdering, settings.parallelExecutor);
+	factor.beginSolve(settings.profile, continuation, settings.keepOrdering, settings.doublePrecisionFactor, settings.parallelExecutor);
 	// Continuations of an interior-point solve restart the interior point from its
 	// previous multipliers instead of repeating the Anvil phase.
 	const bool warmInteriorPoint = continuation && workspace.interiorPoint.warm && settings.interiorPointWarmShift >= 0.0;
@@ -3813,6 +3812,10 @@ static SolveStatus::Enum solveAnvilInternal(const Problem& problem, const Settin
 			{
 				result.backsolveMs += profileElapsed(settings.profile, solveStart);
 				result.stopReason = 7;
+				if(settings.keepFinalStep)
+				{
+					result.finalStep = workspace.retainedSolve.solution;
+				}
 				break;
 			}
 			inexact = outcome == RetainedSolve::eSTEP;
@@ -3869,6 +3872,10 @@ static SolveStatus::Enum solveAnvilInternal(const Problem& problem, const Settin
 		if(settings.velocityTolerance > 0.0 && withinVelocityTolerance(direction, problem.inverseMassDiagonal, settings.velocityTolerance, settings.angularVelocityTolerance))
 		{
 			result.stopReason = 7;
+			if(settings.keepFinalStep)
+			{
+				result.finalStep = direction;
+			}
 			break;
 		}
 		if(directionMetrics.gradient >= 0.0)

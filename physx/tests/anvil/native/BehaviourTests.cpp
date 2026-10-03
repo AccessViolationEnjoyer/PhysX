@@ -25,7 +25,12 @@ using namespace physx;
 // - painleve_box: a tall box thrown along the floor slides upright below the critical friction w / h
 //   and topples onto its side above it.
 // - masonry_arch: the FBF paper's arch of 25 stones closes its joints and stands still.
-// usage: BehaviourTests [all|bouncing_balls|split_conveyors|sheet_stack|paper_drop|card_house|rolling|backspin_ball|painleve_box|masonry_arch] [anvil|pgs] [threads=1]
+// - joint_drive: a position-controlled D6 drive's torque follows its clamped spring law and holds
+//   an arm against gravity at the analytic sag.
+// - two_link_arm: a two-axis arm's joint torques match its analytic dynamics, held against gravity
+//   and spinning (the centrifugal coupling).
+// - mixed_island (timing only, not in all): 512 boxes and 16 jointed chains in one island.
+// usage: BehaviourTests [all|bouncing_balls|split_conveyors|sheet_stack|paper_drop|card_house|rolling|backspin_ball|painleve_box|masonry_arch|joint_drive|two_link_arm|mixed_island] [anvil|pgs] [threads=1]
 namespace
 {
 const PxReal TIMESTEP = 0.01f;
@@ -83,9 +88,12 @@ struct Context
 	bool anvil;
 	bool ccd;
 
-	PxScene* createScene()
+	// displacementTolerance overrides the Anvil stop's default, 1e-7 times the length scale.
+	PxScene* createScene(PxReal displacementTolerance = 0.0f)
 	{
 		PxSceneDesc desc(physics->getTolerancesScale());
+		if(displacementTolerance > 0.0f)
+			desc.anvilDisplacementTolerance = displacementTolerance;
 		desc.cpuDispatcher = dispatcher;
 		desc.filterShader = filterShader;
 		desc.contactModifyCallback = &belts;
@@ -823,12 +831,13 @@ void painleveBox(Context& context, PxReal friction)
 // under its own weight. Closing the joints lowers the crown by less than their summed openings
 // (3.1 m); a collapsing arch drops it to the floor, 60 m down. Each half closes into one block that
 // turns about its springing, the keystone hanging between their upper edges, so the arch has four
-// hinges: a mechanism, which sways the crown 32 mm sideways until a keystone joint closes and the
-// arch stands on three. Settled by 8 s, it then moves less than a mm over the last 2 s and comes to
-// rest (below 1 mm/s, as the Painleve box).
+// hinges: a mechanism, which sways the crown 37 mm sideways until a keystone joint closes and the
+// arch stands on three. The sway starts from the asymmetry the fall leaves, under a mm, and doubles
+// every 1.3 s, so when the joint closes depends on that remainder: by 13 s here. The arch then moves
+// less than a mm over the last 2 s and comes to rest (below 1 mm/s, as the Painleve box).
 void standingMasonryArch(Context& context)
 {
-	const int frames = 1000, restFrames = 200;
+	const int frames = 2000, restFrames = 200;
 	PxScene* scene = context.createScene();
 	PxMaterial* material = context.physics->createMaterial(PxReal(masonryArch::friction), PxReal(masonryArch::friction), 0.0f);
 	context.staticBox(*scene, *material, PxVec3(0.0f, -0.5f, 0.0f), PxVec3(60.0f, 0.5f, 20.0f));
@@ -913,6 +922,368 @@ void standingMasonryArch(Context& context)
 	scene->release();
 	material->release();
 }
+// A motor with position control: an arm 1 m long and 2 kg on a hinge about z, driven by a D6 twist
+// drive (stiffness k, critical damping c, torque limit 12 N m) toward horizontal, from rest 30
+// degrees above it. The drive's torque is its spring law on the twist error the D6 measures,
+// e = 2 sin((target - angle) / 2), taken implicitly at the end of the step and clamped to the limit:
+// clamp(k (e - dt w) - c w) for the step's starting error e and final angular speed w. Gravity
+// pulls the arm down with m g L cos(angle) about the hinge, L = 0.5 m to its centre, so held, the
+// arm sags to where k e = m g L cos(angle), and the drive's torque carries that weight. The torque
+// is read from the joint (PxConstraint::getForce), as an application would. The hinge itself holds:
+// over a step the swinging arm carries its end of the hinge L (w dt)^2 / 2 off its tangent, and the
+// hinge must not open by as much as that.
+void jointDrive(Context& context)
+{
+	const PxReal length = 1.0f, mass = 2.0f, stiffness = 1000.0f, torqueLimit = 12.0f, startAngle = PxPi / 6.0f;
+	const int frames = 300;
+	PxScene* scene = context.createScene();
+	PxMaterial* material = context.physics->createMaterial(0.5f, 0.5f, 0.0f);
+	const PxReal centre = 0.5f * length;
+	PxRigidDynamic* arm = context.dynamicBody(*scene, PxTransform(PxVec3(centre * PxCos(startAngle), centre * PxSin(startAngle), 0.0f), PxQuat(startAngle, PxVec3(0.0f, 0.0f, 1.0f))));
+	PxShape* shape = context.shape(PxBoxGeometry(centre, 0.05f, 0.05f), *material);
+	arm->attachShape(*shape);
+	shape->release();
+	PxRigidBodyExt::setMassAndUpdateInertia(*arm, mass);
+	const double inertia = double(arm->getMassSpaceInertiaTensor().z) + double(mass) * centre * centre;
+	const double damping = 2.0 * std::sqrt(double(stiffness) * inertia);
+	// The joint's x (the twist axis) along the world's z.
+	const PxQuat twistToZ(-PxHalfPi, PxVec3(0.0f, 1.0f, 0.0f));
+	PxD6Joint* joint = PxD6JointCreate(*context.physics, NULL, PxTransform(PxVec3(0.0f), twistToZ), arm, PxTransform(PxVec3(-centre, 0.0f, 0.0f), twistToZ));
+	joint->setMotion(PxD6Axis::eTWIST, PxD6Motion::eFREE);
+	PxD6JointDrive drive(stiffness, PxReal(damping), torqueLimit);
+	drive.flags |= PxD6JointDriveFlag::eOUTPUT_FORCE;
+	joint->setDrive(PxD6Drive::eTWIST, drive);
+	joint->setConstraintFlag(PxConstraintFlag::eDRIVE_LIMITS_ARE_FORCES, true);
+	joint->setDrivePosition(PxTransform(PxIdentity));
+	const double weight = double(mass) * GRAVITY * centre;
+	double maximumError = 0.0, maximumSeparation = 0.0, maximumArc = 0.0, maximumReportOffset = 0.0;
+	int saturatedSteps = 0;
+	double angle = startAngle, torque = 0.0;
+	for(int frame = 0; frame < frames; ++frame)
+	{
+		const double error = 2.0 * std::sin(-0.5 * angle);
+		// The arm's end of the hinge, where the joint's rows are built this step.
+		const PxVec3 anchor = arm->getGlobalPose().transform(PxVec3(-centre, 0.0f, 0.0f));
+		step(*scene);
+		const PxVec3 along = arm->getGlobalPose().q.rotate(PxVec3(1.0f, 0.0f, 0.0f));
+		angle = std::atan2(double(along.y), double(along.x));
+		const double speed = double(arm->getAngularVelocity().z);
+		PxVec3 force, moment;
+		joint->getConstraint()->getForce(force, moment);
+		// getForce is the constraint's force on its first actor, the world, so the arm feels the
+		// opposite. Its moment is about the arm's end of the hinge, but the D6 applies the hinge's
+		// force at the world's end: while the hinge is pulled apart, the moment includes that force's
+		// lever between the two ends, which the drive's torque does not.
+		torque = -double(moment.z);
+		const double offsetMoment = double(anchor.x) * force.y - double(anchor.y) * force.x;
+		const double driveTorque = torque - offsetMoment;
+		const double law = stiffness * (error - TIMESTEP * speed) - damping * speed;
+		const double expected = PxClamp(law, -double(torqueLimit), double(torqueLimit));
+		saturatedSteps += std::abs(law) > torqueLimit ? 1 : 0;
+		maximumError = std::max(maximumError, std::abs(driveTorque - expected));
+		maximumReportOffset = std::max(maximumReportOffset, std::abs(offsetMoment));
+		maximumSeparation = std::max(maximumSeparation, double(arm->getGlobalPose().transform(PxVec3(-centre, 0.0f, 0.0f)).magnitude()));
+		maximumArc = std::max(maximumArc, 0.5 * centre * (speed * TIMESTEP) * (speed * TIMESTEP));
+	}
+	// The held angle, where the drive's spring carries the weight: k e(a) = m g L cos(a).
+	double heldAngle = 0.0;
+	for(int i = 0; i < 20; ++i)
+	{
+		const double residual = 2.0 * stiffness * std::sin(-0.5 * heldAngle) - weight * std::cos(heldAngle);
+		const double slope = -stiffness * std::cos(-0.5 * heldAngle) + weight * std::sin(heldAngle);
+		heldAngle -= residual / slope;
+	}
+	const double heldTorque = weight * std::cos(angle);
+	std::printf("joint_drive max_drive_torque_error_n_m=%.7f saturated_steps=%d max_hinge_separation_mm=%.4f max_step_arc_mm=%.4f max_reported_moment_offset_n_m=%.5f held_angle_deg=%.6f expected_deg=%.6f held_torque_n_m=%.6f weight_torque_n_m=%.6f final_speed_rad_s=%.6f\n",
+		maximumError, saturatedSteps, maximumSeparation * 1e3, maximumArc * 1e3, maximumReportOffset, angle * 180.0 / PxPi, heldAngle * 180.0 / PxPi, torque, heldTorque, double(arm->getAngularVelocity().magnitude()));
+	check(saturatedSteps > 0, "joint_drive: the drive reaches its torque limit while the arm swings");
+	check(maximumError < 1.0e-3, "joint_drive: every step the drive's torque is its clamped spring law (within 1 mN m)");
+	check(stiffness * std::abs(angle - heldAngle) < 1.0e-3, "joint_drive: the arm is held at the analytic sag (its spring torque within 1 mN m)");
+	check(std::abs(torque - heldTorque) < 1.0e-3, "joint_drive: the held drive's torque carries the arm's weight (within 1 mN m)");
+	check(double(arm->getAngularVelocity().magnitude()) * length < 1.0e-3, "joint_drive: the arm comes to rest (tip below 1 mm/s)");
+	check(maximumSeparation < maximumArc, "joint_drive: the hinge opens less than a step's arc off the anchor's tangent");
+	scene->release();
+	material->release();
+}
+// A two-axis arm: link 1 on a hinge to the world, link 2 on a hinge at link 1's end, both hinges
+// about the same axis and both links boxes, so each one's centre is halfway along it. Each hinge is
+// a D6 twist drive. The torques are read from the joints (PxConstraint::getForce) and compared with
+// the planar arm's analytic dynamics,
+//   t1 = M11 a1 + M12 a2 - h (2 w1 w2 + w2^2) + G1,   t2 = M21 a1 + M22 a2 + h w1^2 + G2,
+// with h = m2 L1 c2 sin q2 (c the distance from a link's hinge to its centre), q2 measured from link
+// 1 and the gravity terms G1 = (m1 c1 + m2 L1) g cos q1 + m2 c2 g cos(q1 + q2), G2 = m2 c2 g cos(q1 + q2).
+// Two steady states make them exact, without accelerations:
+// - Held (hinges horizontal): position drives toward 30 and 30 degrees. Each drive's spring settles
+//   where it carries its gravity term, k e(q) = G(q) with the D6 twist error e = 2 sin((target - q) / 2),
+//   which fixes both sags; joint 1 carries both links' weight through joint 2.
+// - Spinning (hinges vertical, so gravity turns neither link): a velocity drive turns link 1 at
+//   2 rad/s while a position drive holds link 2 at 60 degrees. Link 2's centre circles joint 1, and
+//   its drive supplies the centrifugal coupling, t2 = h w1^2; at a steady speed t1 = 0.
+// Four arms: a robot's (1 m and 0.8 m, 2 kg and 1 kg), the same 100 times lighter, one a tenth the
+// size at the same density (1000 times lighter), and one a hundredth (a million times lighter). The
+// drives scale with the loads: springs of 100 times the largest load per radian, critically damped.
+// The torques are averaged over the last second, as the arm keeps a residual oscillation whose
+// inertial torques average out, and must match to 1e-4 of the arm's load (its gravity torque, or its
+// centrifugal coupling h w1^2 at sin q2 = 1). Each arm's scenes scale the solve's displacement
+// tolerance to its size, 1e-7 times link 1's length, as PxTolerancesScale::length would.
+namespace twoLink
+{
+struct Size
+{
+	const char* name;
+	PxReal length1, mass1, length2, mass2;
+};
+
+PxRigidDynamic* link(Context& context, PxScene& scene, PxMaterial& material, const PxVec3& centre, const PxQuat& rotation, PxReal length, PxReal mass, PxReal thickness)
+{
+	PxRigidDynamic* body = context.dynamicBody(scene, PxTransform(centre, rotation));
+	PxShape* shape = context.shape(PxBoxGeometry(0.5f * length, thickness, thickness), material);
+	body->attachShape(*shape);
+	shape->release();
+	PxRigidBodyExt::setMassAndUpdateInertia(*body, mass);
+	return body;
+}
+
+// The torque a joint applies to its second actor about the hinge axis. getForce reports the force on
+// the first actor.
+double torque(PxD6Joint& joint, const PxVec3& axis)
+{
+	PxVec3 force, moment;
+	joint.getConstraint()->getForce(force, moment);
+	return -double(moment.dot(axis));
+}
+
+// The hinge's opening: its anchor on each link.
+double separation(PxD6Joint& joint)
+{
+	PxRigidActor* actors[2];
+	joint.getActors(actors[0], actors[1]);
+	const PxVec3 anchor0 = actors[0] ? actors[0]->getGlobalPose().transform(joint.getLocalPose(PxJointActorIndex::eACTOR0).p) : joint.getLocalPose(PxJointActorIndex::eACTOR0).p;
+	const PxVec3 anchor1 = actors[1]->getGlobalPose().transform(joint.getLocalPose(PxJointActorIndex::eACTOR1).p);
+	return double((anchor1 - anchor0).magnitude());
+}
+
+struct Arm
+{
+	PxRigidDynamic* links[2];
+	PxD6Joint* joints[2];
+};
+
+// The links lie in the plane across the axis, link 1 along `along` at angle 0. Each link is a
+// twentieth of its length thick.
+Arm build(Context& context, PxScene& scene, PxMaterial& material, const Size& size, const PxQuat& twistToAxis, const PxVec3& axis, const PxVec3& along, PxReal angle1, PxReal angle2)
+{
+	const PxQuat rotation1(angle1, axis), rotation2(angle1 + angle2, axis);
+	const PxVec3 direction1 = rotation1.rotate(along), direction2 = rotation2.rotate(along);
+	Arm arm;
+	// The links' x runs along them.
+	const PxQuat linkFrame = PxShortestRotation(PxVec3(1.0f, 0.0f, 0.0f), along);
+	arm.links[0] = link(context, scene, material, direction1 * (0.5f * size.length1), rotation1 * linkFrame, size.length1, size.mass1, 0.05f * size.length1);
+	arm.links[1] = link(context, scene, material, direction1 * size.length1 + direction2 * (0.5f * size.length2), rotation2 * linkFrame, size.length2, size.mass2, 0.05f * size.length1);
+	// Each joint frame's x (the twist axis) along the hinge axis, in the links' frames.
+	const PxQuat jointFrame = linkFrame.getConjugate() * twistToAxis;
+	arm.joints[0] = PxD6JointCreate(*context.physics, NULL, PxTransform(PxVec3(0.0f), twistToAxis), arm.links[0], PxTransform(PxVec3(-0.5f * size.length1, 0.0f, 0.0f), jointFrame));
+	arm.joints[1] = PxD6JointCreate(*context.physics, arm.links[0], PxTransform(PxVec3(0.5f * size.length1, 0.0f, 0.0f), jointFrame), arm.links[1], PxTransform(PxVec3(-0.5f * size.length2, 0.0f, 0.0f), jointFrame));
+	for(PxD6Joint* joint : arm.joints)
+	{
+		joint->setMotion(PxD6Axis::eTWIST, PxD6Motion::eFREE);
+		joint->setConstraintFlag(PxConstraintFlag::eDRIVE_LIMITS_ARE_FORCES, true);
+	}
+	return arm;
+}
+
+void drive(PxD6Joint& joint, double stiffness, double damping, PxReal target)
+{
+	PxD6JointDrive settings(PxReal(stiffness), PxReal(damping), PX_MAX_F32);
+	settings.flags |= PxD6JointDriveFlag::eOUTPUT_FORCE;
+	joint.setDrive(PxD6Drive::eTWIST, settings);
+	joint.setDrivePosition(PxTransform(PxQuat(target, PxVec3(1.0f, 0.0f, 0.0f))));
+}
+}
+
+void twoLinkArm(Context& context, const twoLink::Size& size)
+{
+	using namespace twoLink;
+	const double length1 = size.length1, length2 = size.length2, mass1 = size.mass1, mass2 = size.mass2;
+	const double c1 = 0.5 * length1, c2 = 0.5 * length2;
+	// The links' moments of inertia about their hinges, link 2 carried at link 1's end for joint 1.
+	const double inertia2 = mass2 * length2 * length2 / 3.0;
+	const double inertia1 = mass1 * length1 * length1 / 3.0 + mass2 * (length1 + c2) * (length1 + c2) + inertia2;
+	const int frames = int(4.0f / TIMESTEP), averageFrames = int(1.0f / TIMESTEP);
+	const double precision = 1.0e-4;
+	char message[256];
+	// Held: hinges about z, gravity along -y.
+	{
+		const PxReal target1 = PxPi / 6.0f, target2 = PxPi / 6.0f;
+		const double load1 = (mass1 * c1 + mass2 * length1 + mass2 * c2) * GRAVITY, load2 = mass2 * c2 * GRAVITY;
+		const double stiffness1 = 100.0 * load1, stiffness2 = 100.0 * load2;
+		PxScene* scene = context.createScene(1.0e-7f * size.length1);
+		PxMaterial* material = context.physics->createMaterial(0.5f, 0.5f, 0.0f);
+		const PxVec3 axis(0.0f, 0.0f, 1.0f);
+		Arm arm = build(context, *scene, *material, size, PxQuat(-PxHalfPi, PxVec3(0.0f, 1.0f, 0.0f)), axis, PxVec3(1.0f, 0.0f, 0.0f), target1, target2);
+		drive(*arm.joints[0], stiffness1, 2.0 * std::sqrt(stiffness1 * inertia1), target1);
+		drive(*arm.joints[1], stiffness2, 2.0 * std::sqrt(stiffness2 * inertia2), target2);
+		double error1 = 0.0, error2 = 0.0, gravityTorque1 = 0.0, gravityTorque2 = 0.0, angle1 = 0.0, angle2 = 0.0, maximumSeparation = 0.0;
+		for(int frame = 0; frame < frames; ++frame)
+		{
+			step(*scene);
+			if(frame < frames - averageFrames)
+			{
+				continue;
+			}
+			const double q1 = arm.joints[0]->getTwistAngle(), q2 = arm.joints[1]->getTwistAngle();
+			const double gravity1 = (mass1 * c1 + mass2 * length1) * GRAVITY * std::cos(q1) + mass2 * c2 * GRAVITY * std::cos(q1 + q2);
+			const double gravity2 = mass2 * c2 * GRAVITY * std::cos(q1 + q2);
+			error1 += (torque(*arm.joints[0], axis) - gravity1) / averageFrames;
+			error2 += (torque(*arm.joints[1], axis) - gravity2) / averageFrames;
+			gravityTorque1 += gravity1 / averageFrames;
+			gravityTorque2 += gravity2 / averageFrames;
+			angle1 += q1 / averageFrames;
+			angle2 += q2 / averageFrames;
+			maximumSeparation = PxMax(maximumSeparation, PxMax(separation(*arm.joints[0]), separation(*arm.joints[1])));
+		}
+		// The sags where both springs carry their gravity terms (Newton's method on the two equations).
+		double held1 = target1, held2 = target2;
+		for(int i = 0; i < 20; ++i)
+		{
+			const double s = std::sin(held1 + held2), c = std::cos(held1 + held2);
+			const double f1 = 2.0 * stiffness1 * std::sin(0.5 * (target1 - held1)) - (mass1 * c1 + mass2 * length1) * GRAVITY * std::cos(held1) - mass2 * c2 * GRAVITY * c;
+			const double f2 = 2.0 * stiffness2 * std::sin(0.5 * (target2 - held2)) - mass2 * c2 * GRAVITY * c;
+			const double a11 = -stiffness1 * std::cos(0.5 * (target1 - held1)) + (mass1 * c1 + mass2 * length1) * GRAVITY * std::sin(held1) + mass2 * c2 * GRAVITY * s;
+			const double a12 = mass2 * c2 * GRAVITY * s, a21 = a12;
+			const double a22 = -stiffness2 * std::cos(0.5 * (target2 - held2)) + mass2 * c2 * GRAVITY * s;
+			const double determinant = a11 * a22 - a12 * a21;
+			held1 -= (a22 * f1 - a12 * f2) / determinant;
+			held2 -= (a11 * f2 - a21 * f1) / determinant;
+		}
+		const double sagError1 = stiffness1 * std::abs(angle1 - held1) / gravityTorque1, sagError2 = stiffness2 * std::abs(angle2 - held2) / gravityTorque2;
+		std::printf("two_link_arm %s held torque1_n_m=%.6g error=%.2e torque2_n_m=%.6g error=%.2e sag_error=%.2e/%.2e max_separation_um=%.4f\n", size.name,
+			gravityTorque1, error1 / gravityTorque1, gravityTorque2, error2 / gravityTorque2, sagError1, sagError2, maximumSeparation * 1e6);
+		std::snprintf(message, sizeof(message), "two_link_arm %s: held, joint 1's torque carries both links' weight (within 1e-4)", size.name);
+		check(std::abs(error1) < precision * gravityTorque1, message);
+		std::snprintf(message, sizeof(message), "two_link_arm %s: held, joint 2's torque carries link 2's weight (within 1e-4)", size.name);
+		check(std::abs(error2) < precision * gravityTorque2, message);
+		std::snprintf(message, sizeof(message), "two_link_arm %s: held, both joints sag to the analytic angles (their springs' torques within 1e-4)", size.name);
+		check(sagError1 < precision && sagError2 < precision, message);
+		scene->release();
+		material->release();
+	}
+	// Spinning: hinges about y, along gravity.
+	{
+		const PxReal speed = 2.0f, target2 = PxPi / 3.0f;
+		const double load = mass2 * length1 * c2 * speed * speed;
+		const double stiffness2 = 100.0 * load, damping1 = inertia1 / 0.05;
+		PxScene* scene = context.createScene(1.0e-7f * size.length1);
+		PxMaterial* material = context.physics->createMaterial(0.5f, 0.5f, 0.0f);
+		const PxVec3 axis(0.0f, 1.0f, 0.0f);
+		Arm arm = build(context, *scene, *material, size, PxQuat(PxHalfPi, PxVec3(0.0f, 0.0f, 1.0f)), axis, PxVec3(1.0f, 0.0f, 0.0f), 0.0f, target2);
+		PxD6JointDrive motor(0.0f, PxReal(damping1), PX_MAX_F32);
+		motor.flags |= PxD6JointDriveFlag::eOUTPUT_FORCE;
+		arm.joints[0]->setDrive(PxD6Drive::eTWIST, motor);
+		arm.joints[0]->setDriveVelocity(PxVec3(0.0f), PxVec3(speed, 0.0f, 0.0f));
+		drive(*arm.joints[1], stiffness2, 2.0 * std::sqrt(stiffness2 * inertia2), target2);
+		double torque1 = 0.0, error2 = 0.0, turnSpeed = 0.0, centrifugal = 0.0, maximumSeparation = 0.0;
+		for(int frame = 0; frame < frames; ++frame)
+		{
+			step(*scene);
+			if(frame < frames - averageFrames)
+			{
+				continue;
+			}
+			const double q2 = arm.joints[1]->getTwistAngle();
+			const double w1 = double(arm.links[0]->getAngularVelocity().dot(axis));
+			const double coupling = mass2 * length1 * c2 * std::sin(q2) * w1 * w1;
+			torque1 += torque(*arm.joints[0], axis) / averageFrames;
+			error2 += (torque(*arm.joints[1], axis) - coupling) / averageFrames;
+			turnSpeed += std::abs(w1) / averageFrames;
+			centrifugal += coupling / averageFrames;
+			maximumSeparation = PxMax(maximumSeparation, PxMax(separation(*arm.joints[0]), separation(*arm.joints[1])));
+		}
+		std::printf("two_link_arm %s spinning w1_rad_s=%.6f torque1_error=%.2e centrifugal_n_m=%.6g error=%.2e motor_error=%.2e max_separation_um=%.4f\n", size.name,
+			turnSpeed, torque1 / load, centrifugal, error2 / load, std::abs(turnSpeed - speed) * damping1 / load, maximumSeparation * 1e6);
+		std::snprintf(message, sizeof(message), "two_link_arm %s: spinning, link 1 turns at the motor's speed (the motor's torque within 1e-4)", size.name);
+		check(std::abs(turnSpeed - speed) * damping1 < precision * load, message);
+		std::snprintf(message, sizeof(message), "two_link_arm %s: spinning, joint 1 needs no torque at a steady speed (within 1e-4)", size.name);
+		check(std::abs(torque1) < precision * load, message);
+		std::snprintf(message, sizeof(message), "two_link_arm %s: spinning, joint 2's torque is the centrifugal coupling m2 L1 c2 sin q2 w1^2 (within 1e-4)", size.name);
+		check(std::abs(error2) < precision * load, message);
+		scene->release();
+		material->release();
+	}
+}
+// Timing only, not part of "all": a large island of contacts and joints. 512 boxes of 20 cm settle
+// in an 8 x 8 x 8 pile while 16 chains of ten 20 cm links on spherical joints fall across it, so
+// boxes and chains become one island. Prints the step times.
+void mixedIsland(Context& context)
+{
+	PxScene* scene = context.createScene();
+	PxMaterial* material = context.physics->createMaterial(0.5f, 0.5f, 0.0f);
+	context.staticBox(*scene, *material, PxVec3(0.0f, -0.5f, 0.0f), PxVec3(20.0f, 0.5f, 20.0f));
+	const PxReal half = 0.1f, spacing = 0.2005f;
+	for(int layer = 0; layer < 8; ++layer)
+	{
+		for(int row = 0; row < 8; ++row)
+		{
+			for(int column = 0; column < 8; ++column)
+			{
+				PxRigidDynamic* box = context.dynamicBody(*scene, PxTransform(PxVec3((column - 3.5f) * spacing, half + layer * spacing, (row - 3.5f) * spacing)));
+				PxShape* shape = context.shape(PxBoxGeometry(PxVec3(half)), *material);
+				box->attachShape(*shape);
+				shape->release();
+				PxRigidBodyExt::updateMassAndInertia(*box, 1000.0f);
+			}
+		}
+	}
+	const PxReal linkHalf = 0.1f, linkThickness = 0.025f;
+	for(int chain = 0; chain < 16; ++chain)
+	{
+		// Chains run along x above the pile, one every 10 cm across z, at increasing heights.
+		const PxReal z = (chain - 7.5f) * 0.1f, y = 8.0f * spacing + 0.2f + 0.06f * chain;
+		PxRigidDynamic* previous = NULL;
+
+		for(int link = 0; link < 10; ++link)
+		{
+			const PxReal x = (link - 4.5f) * 2.0f * linkHalf;
+			PxRigidDynamic* body = context.dynamicBody(*scene, PxTransform(PxVec3(x, y, z)));
+			PxShape* shape = context.shape(PxBoxGeometry(linkHalf, linkThickness, linkThickness), *material);
+			body->attachShape(*shape);
+			shape->release();
+			PxRigidBodyExt::updateMassAndInertia(*body, 1000.0f);
+			if(previous)
+			{
+				PxSphericalJointCreate(*context.physics, previous, PxTransform(PxVec3(linkHalf, 0.0f, 0.0f)), body, PxTransform(PxVec3(-linkHalf, 0.0f, 0.0f)));
+			}
+			previous = body;
+		}
+	}
+	const int frames = 400;
+	std::vector<double> times;
+	for(int frame = 0; frame < frames; ++frame)
+	{
+		const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+		step(*scene);
+		times.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+	}
+	double total = 0.0;
+	for(double time : times)
+	{
+		total += time;
+	}
+	std::sort(times.begin(), times.end());
+	// The final poses, which must not depend on the worker count.
+	PxActor* actors[1024];
+	const PxU32 actorCount = scene->getActors(PxActorTypeFlag::eRIGID_DYNAMIC, actors, 1024);
+	double checksum = 0.0;
+	for(PxU32 i = 0; i < actorCount; ++i)
+	{
+		const PxTransform pose = static_cast<PxRigidDynamic*>(actors[i])->getGlobalPose();
+		checksum += double(i + 1) * (double(pose.p.x) + 2.0 * double(pose.p.y) + 3.0 * double(pose.p.z) + double(pose.q.w));
+	}
+	std::printf("mixed_island bodies=672 joints=144 mean_ms=%.3f p95_ms=%.3f max_ms=%.3f total_ms=%.1f checksum=%.12g\n", total / frames, times[frames * 95 / 100], times.back(), total, checksum);
+	scene->release();
+	material->release();
+}
+
 // A sphere and a cylinder (a 64-sided convex hull) roll from rest down a 5 degree ramp with
 // friction 0.5, far more than rolling without slipping needs (tan 5 / (1 + m r^2 / I) at most
 // 0.03). Rolling, the contact stays put on both surfaces while the bodies' material passes
@@ -1053,6 +1424,23 @@ int main(int argc, char** argv)
 	if(all || std::strcmp(selection, "masonry_arch") == 0)
 	{
 		standingMasonryArch(context);
+	}
+	if(all || std::strcmp(selection, "joint_drive") == 0)
+	{
+		jointDrive(context);
+	}
+	if(all || std::strcmp(selection, "two_link_arm") == 0)
+	{
+		const twoLink::Size sizes[] = { { "robot", 1.0f, 2.0f, 0.8f, 1.0f }, { "light", 1.0f, 0.02f, 0.8f, 0.01f },
+			{ "small", 0.1f, 2.0e-3f, 0.08f, 1.0e-3f }, { "tiny", 0.01f, 2.0e-6f, 0.008f, 1.0e-6f } };
+		for(const twoLink::Size& size : sizes)
+		{
+			twoLinkArm(context, size);
+		}
+	}
+	if(std::strcmp(selection, "mixed_island") == 0)
+	{
+		mixedIsland(context);
 	}
 	dispatcher->release();
 	physics->release();

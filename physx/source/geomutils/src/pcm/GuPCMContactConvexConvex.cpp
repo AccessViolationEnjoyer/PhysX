@@ -78,6 +78,7 @@ static bool generateOrProcessContactsConvexConvex(	const GjkConvex* relativeConv
 {
 	if(status == GJK_NON_INTERSECT)
 	{
+		manifold.setSeparation(output.normal, output.penDep);
 		return false;
 	}
 	else
@@ -214,9 +215,11 @@ bool Gu::pcmContactConvexConvex(GU_CONTACT_METHOD_ARGS)
 	const FloatV radiusA = V3Length(extent0);
 	const FloatV radiusB = V3Length(extent1);
 
-	if(bLostContacts || manifold.invalidate_BoxConvex(curRTrans, transf0.q, transf1.q, minMargin, radiusA, radiusB))
+	if(bLostContacts || manifold.invalidate_BoxConvex(curRTrans, transf0.q, transf1.q, minMargin, radiusA, radiusB) ||
+		manifold.movedByContactDistance(curRTrans, CalculateConvexReach(hullData0, vScale0), CalculateConvexReach(hullData1, vScale1), params))
 	{
 		manifold.setRelativeTransform(curRTrans, transf0.q, transf1.q);
+		manifold.setGenerationDistance(params.mContactDistance);
 		
 		const bool idtScale0 = shapeConvex0.scale.isIdentity();
 		const bool idtScale1 = shapeConvex1.scale.isIdentity();
